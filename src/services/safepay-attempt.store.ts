@@ -191,6 +191,7 @@ export function createPrismaSafepayStore(database: PaymentDatabase) {
   code: string,
   tracker?: Tracker,
   httpStatus?: number,
+  providerError?: { providerErrorCode?: string; providerMessage?: string },
 ): Promise<void> {
       try {
         await database.$transaction(async tx => {
@@ -218,15 +219,17 @@ export function createPrismaSafepayStore(database: PaymentDatabase) {
             validationStatus: "UNVERIFIED", decision: "REVIEW_REQUIRED", reasonCode: code,
             paymentVersion: claim.version + 1, observedProviderState: tracker?.state,
             observedCurrency: tracker?.currency, observedQuoteMinor: tracker?.amountMinor,
-           detailsJson: tracker || httpStatus !== undefined
-  ? JSON.stringify({
-      ...(tracker ? {
-        unverifiedTrackerToken: tracker.token,
-        environment: tracker.environment,
-      } : {}),
-      ...(httpStatus !== undefined ? { httpStatus } : {}),
-    })
-  : undefined,
+            detailsJson: tracker || httpStatus !== undefined || providerError?.providerErrorCode || providerError?.providerMessage
+              ? JSON.stringify({
+                ...(tracker ? {
+                  unverifiedTrackerToken: tracker.token,
+                  environment: tracker.environment,
+                } : {}),
+                ...(httpStatus !== undefined ? { httpStatus } : {}),
+                ...(providerError?.providerErrorCode ? { providerErrorCode: providerError.providerErrorCode } : {}),
+                ...(providerError?.providerMessage ? { providerMessage: providerError.providerMessage } : {}),
+              })
+              : undefined,
           } });
         });
       } catch {

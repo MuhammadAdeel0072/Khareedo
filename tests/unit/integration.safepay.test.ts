@@ -119,7 +119,7 @@ describe("Safepay session orchestration with mocked HTTP and real disposable per
     const evidence = await db.paymentEvidence.findMany({ where: { paymentId: payment.id } });
     expect(evidence).toHaveLength(4);
     expect(serialize(evidence)).not.toContain("synthetic-authentication");
-    expect(http).toHaveBeenCalledTimes(2);
+    expect(http).toHaveBeenCalledTimes(3);
   });
 
   it("replays a local request without creating a second tracker or token", async () => {
@@ -127,7 +127,7 @@ describe("Safepay session orchestration with mocked HTTP and real disposable per
     expect((await run(f.request, f.owner)).kind).toBe("ready");
     expect(await run(f.request, f.owner)).toEqual({ kind: "blocked", code: "ALREADY_ISSUED" });
     expect(await run({ ...f.request, requestKey: randomUUID() }, f.owner)).toMatchObject({ kind: "blocked", code: "REQUEST_CONFLICT" });
-    expect(http).toHaveBeenCalledTimes(2);
+    expect(http).toHaveBeenCalledTimes(3);
   });
   it("handles concurrent requests with one durable provider-creation claim", async () => {
     const f = await fixture();
@@ -143,7 +143,7 @@ describe("Safepay session orchestration with mocked HTTP and real disposable per
     const second = await run(f.request, f.owner);
     expect(second).toMatchObject({ kind: "blocked", code: "CREATION_UNCERTAIN" });
     release(); expect((await first).kind).toBe("ready");
-    expect(http).toHaveBeenCalledTimes(2);
+    expect(http).toHaveBeenCalledTimes(3);
   });
   it("does not dispatch on a crashed prior creation claim", async () => {
     const f = await fixture(), http = transport();
@@ -166,7 +166,32 @@ describe("Safepay session orchestration with mocked HTTP and real disposable per
     await db.order.update({ where: { id: f.order.id }, data: { activePaymentId: replacement.id, version: { increment: 1 } } });
     expect(await service(http)({ ...f.request, paymentId: replacement.id }, f.owner))
       .toMatchObject({ kind: "blocked", code: "RESUME_BLOCKED" });
-    expect(http).toHaveBeenCalledTimes(stage === "claimed" ? 0 : 2);
+    expect(http).toHaveBeenCalledTimes(stage === "claimed" ? 0 : 3);
+  });
+  it("keeps a created tracker uncertain when separate metadata setup fails and never retries", async () => {
+    const f = await fixture();
+    const http = vi.fn<HttpTransport>(async (url, init) => {
+      if (url.pathname === "/order/payments/v3/") return goodTracker(init);
+      if (url.pathname.endsWith("/metadata")) return new Response(JSON.stringify({
+        error_code: "INVALID_METADATA", message: "Metadata request rejected",
+      }), { status: 500 });
+      return new Response(JSON.stringify({ data: "synthetic-authentication" }));
+    });
+    const run = service(http);
+    expect(await run(f.request, f.owner)).toEqual({ kind: "uncertain", code: "TRACKER_METADATA_UNCERTAIN" });
+    const payment = await db.payment.findUniqueOrThrow({ where: { id: f.payment.id } });
+    expect(payment).toMatchObject({
+      status: "PENDING", attemptState: "CREATION_UNCERTAIN", reconcileStatus: "REVIEW_REQUIRED",
+    });
+    expect(payment.trackerToken).toBeTruthy();
+    const evidence = await db.paymentEvidence.findFirstOrThrow({
+      where: { paymentId: f.payment.id, decision: "REVIEW_REQUIRED" },
+    });
+    expect(JSON.parse(evidence.detailsJson ?? "{}")).toMatchObject({
+      httpStatus: 500, providerErrorCode: "INVALID_METADATA", providerMessage: "Metadata request rejected",
+    });
+    expect(await run(f.request, f.owner)).toMatchObject({ kind: "blocked" });
+    expect(http).toHaveBeenCalledTimes(2);
   });
   it("rejects a different owner without exposing or modifying the order", async () => {
     const f = await fixture(), other = await fixture(), http = transport();
@@ -247,6 +272,7 @@ describe("Safepay session orchestration with mocked HTTP and real disposable per
     const http = vi.fn<HttpTransport>(async (url, init) => {
       if (url.pathname === "/order/payments/v3/") return goodTracker(init);
       expect((await db.payment.findUniqueOrThrow({ where: { id: f.payment.id } })).trackerToken).toBeTruthy();
+      if (url.pathname.endsWith("/metadata")) return new Response(null, { status: 204 });
       return new Response("synthetic-auth-error", { status: 403 });
     });
     expect(await service(http)(f.request, f.owner)).toMatchObject({ kind: "blocked", code: "AUTHENTICATION_UNAVAILABLE" });
@@ -256,17 +282,20 @@ describe("Safepay session orchestration with mocked HTTP and real disposable per
     });
     expect(JSON.parse(evidence.detailsJson ?? "{}")).toEqual({ httpStatus: 403 });
     expect(evidence.detailsJson).not.toContain("synthetic-auth-error");
-    await service(http)(f.request, f.owner); expect(http).toHaveBeenCalledTimes(2);
+    await service(http)(f.request, f.owner); expect(http).toHaveBeenCalledTimes(3);
   });
   it("does not issue a redirect if the order expires during provider creation", async () => {
     const f = await fixture();
-    const http = vi.fn<HttpTransport>(async (_url, init) => {
-      await db.order.update({ where: { id: f.order.id }, data: { reservationExpiresAt: new Date(0) } });
-      return goodTracker(init);
+    const http = vi.fn<HttpTransport>(async (url, init) => {
+      if (url.pathname === "/order/payments/v3/") {
+        await db.order.update({ where: { id: f.order.id }, data: { reservationExpiresAt: new Date(0) } });
+        return goodTracker(init);
+      }
+      return new Response(null, { status: 204 });
     });
     expect(await service(http)(f.request, f.owner)).toMatchObject({ kind: "blocked", code: "CHECKOUT_NOT_ELIGIBLE" });
     expect((await db.payment.findUniqueOrThrow({ where: { id: f.payment.id } })).trackerToken).toBeTruthy();
-    expect(http).toHaveBeenCalledTimes(1);
+    expect(http).toHaveBeenCalledTimes(2);
   });
   it("does not redirect when expiry happens during authentication", async () => {
     const f = await fixture();

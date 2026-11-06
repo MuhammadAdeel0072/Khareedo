@@ -14,7 +14,12 @@ vi.mock("@/lib/db", async () => {
   if (process.env.KHAREEDO_DISPOSABLE_SQLITE_TEST !== "1") return { db: {} };
   assertDisposableTestDatabase();
   const { PrismaClient } = await import("../../generated/sqlite-client");
-  return { db: new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL } } }) };
+  const client = new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL } } });
+  return { db: client.$extends({ query: { $allOperations({ operation, args, query }) {
+    if (operation === "$queryRaw" || operation === "$queryRawUnsafe" ||
+        operation === "$executeRaw" || operation === "$executeRawUnsafe") return query(args);
+    return query(args);
+  } } }) };
 });
 
 import { db } from "@/lib/db";

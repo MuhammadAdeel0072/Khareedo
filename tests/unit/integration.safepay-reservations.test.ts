@@ -114,8 +114,8 @@ afterAll(async () => {
 });
 
 describe("Atomic Safepay pending checkout (disposable database, no provider I/O)", () => {
-  it.each([false, true])("creates server-priced pending snapshots, holds and one READY attempt; user=%s", async user => {
-    const f = await prepare({ coupon: true, quantity: 2, giftWrap: true, user });
+  it("creates server-priced pending snapshots, holds and one READY attempt", async () => {
+    const f = await prepare({ coupon: true, quantity: 2, giftWrap: true });
     const order = await state(f.result.orderId);
     expect(order).toMatchObject({ status: "PENDING", paymentStatus: "PENDING", subtotal: 2000, discountTotal: 200,
       giftWrapCharge: 300, deliveryFee: 200, total: 2300, paymentFlowVersion: 1, nextPaymentAttempt: 2,

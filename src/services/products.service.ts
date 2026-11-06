@@ -206,7 +206,7 @@ export async function getHomepageCatalog() {
     featured: ProductJson[];
     newArrivals: ProductJson[];
     promotions: PromotionJson[];
-  }>>(Prisma.sql`
+  }>>`
     WITH featured AS (${productRows(true, Prisma.sql`p."rating" DESC`, 8)}),
       arrivals AS (${productRows(false, Prisma.sql`p."createdAt" DESC`, 4)})
     SELECT
@@ -224,7 +224,7 @@ export async function getHomepageCatalog() {
           AND ("endsAt" IS NULL OR "endsAt" >= ${now})
         ORDER BY "createdAt" DESC LIMIT ${2}
       ) offers), '[]'::jsonb) AS "promotions"
-  `);
+  `;
 
   const products = (rows: ProductJson[]): ProductListItem[] => rows.map(row => ({
     ...row, createdAt: new Date(row.createdAt),

@@ -27,7 +27,10 @@ export function createSafepayCheckoutService(deps: {
         orderId: claim.orderId, paymentId: claim.paymentId, amountMinor: claim.amountMinor,
       });
       if (created.kind !== "created") {
-        await deps.store.review(claim, created.code, created.tracker, created.httpStatus);
+        await deps.store.review(claim, created.code, created.tracker, created.httpStatus, {
+          providerErrorCode: created.providerErrorCode,
+          providerMessage: created.providerMessage,
+        });
         return { kind: created.kind === "uncertain" ? "uncertain" : "blocked", code: created.code };
       }
       const bound = await deps.store.bindTracker(claim, created.tracker, deps.config, now());
@@ -36,6 +39,16 @@ export function createSafepayCheckoutService(deps: {
         return { kind: "uncertain", code: "PERSISTENCE_UNCERTAIN" };
       }
       claim = bound;
+      const metadata = await deps.provider.attachTrackerMetadata({
+        trackerToken: created.tracker.token, orderId: claim.orderId,
+      });
+      if (metadata.kind !== "updated") {
+        await deps.store.review(claim, "TRACKER_METADATA_UNCERTAIN", created.tracker, metadata.httpStatus, {
+          providerErrorCode: metadata.providerErrorCode,
+          providerMessage: metadata.providerMessage,
+        });
+        return { kind: "uncertain", code: "TRACKER_METADATA_UNCERTAIN" };
+      }
       const authenticating = await deps.store.advance(claim, deps.config, "TRACKER_CREATED", "AUTHENTICATING", now());
       if (!authenticating) {
         await deps.store.review(claim, "CHECKOUT_NOT_ELIGIBLE");
@@ -44,7 +57,10 @@ export function createSafepayCheckoutService(deps: {
       claim = authenticating;
       const auth = await deps.provider.authenticate();
       if (auth.kind !== "authenticated") {
-        await deps.store.review(claim, auth.code, undefined, auth.httpStatus);
+        await deps.store.review(claim, auth.code, undefined, auth.httpStatus, {
+          providerErrorCode: auth.providerErrorCode,
+          providerMessage: auth.providerMessage,
+        });
         return { kind: "blocked", code: "AUTHENTICATION_UNAVAILABLE" };
       }
       const current = now();

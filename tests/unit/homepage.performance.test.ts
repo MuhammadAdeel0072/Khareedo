@@ -160,6 +160,10 @@ describe("live homepage catalogue batch", () => {
     query.mockResolvedValue([{ featured: [catalogProduct], newArrivals: [catalogProduct], promotions: [promotion] }]);
     const result = await getHomepageCatalog();
     expect(query).toHaveBeenCalledTimes(1);
+    const [template, ...parameters] = query.mock.calls[0];
+    expect(Array.isArray(template)).toBe(true);
+    expect(template.join("")).toContain("WITH featured AS");
+    expect(parameters).toHaveLength(template.length - 1);
     expect(result.featured[0]).toEqual({ ...catalogProduct, createdAt: new Date(catalogProduct.createdAt) });
     expect(result.newArrivals).toEqual(result.featured);
     expect(result.promotions[0]).toEqual({ ...promotion,

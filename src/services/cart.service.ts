@@ -11,7 +11,6 @@ import {
   withPerformanceMeasurement,
   withPerformanceTiming,
 } from "@/lib/performance-timing";
-import { Prisma } from "../../generated/postgres-client";
 
 export interface CartOwner {
   userId?: string;
@@ -235,40 +234,40 @@ export async function getCartCount(): Promise<number> {
       getRequestSession,
       requestId
     );
-    const cartOwnerFilter = await withPerformanceMeasurement(
+    const cartOwner = await withPerformanceMeasurement(
       "cart.count.owner",
       async () => {
         const guestCartKey = session?.user?.id
           ? undefined
           : (await cookies()).get(GUEST_CART_COOKIE)?.value;
         return session?.user?.id
-          ? Prisma.sql`cart."userId" = ${session.user.id}`
+          ? { kind: "user" as const, id: session.user.id }
           : guestCartKey
-            ? Prisma.sql`cart."sessionKey" = ${guestCartKey}`
+            ? { kind: "guest" as const, id: guestCartKey }
             : null;
       },
       requestId
     );
 
-    if (!cartOwnerFilter) return 0;
+    if (!cartOwner) return 0;
 
     const rows = await withPerformanceMeasurement(
       "cart.count.query",
-      () =>
-        db.$queryRaw<Array<{
+      () => db.$queryRaw<Array<{
           quantity: number;
           status: string;
           isDeleted: boolean | number;
           stock: number | null;
-        }>>(Prisma.sql`
+        }>>`
           SELECT item."quantity", p."status", (p."deletedAt" IS NOT NULL) AS "isDeleted",
                  i."quantity" AS "stock"
           FROM "Cart" AS cart
           JOIN "CartItem" AS item ON item."cartId" = cart."id"
           JOIN "Product" AS p ON p."id" = item."productId"
           LEFT JOIN "Inventory" AS i ON i."productId" = p."id"
-          WHERE ${cartOwnerFilter}
-        `),
+          WHERE (${cartOwner.kind === "user"} = TRUE AND cart."userId" = ${cartOwner.id})
+             OR (${cartOwner.kind === "guest"} = TRUE AND cart."sessionKey" = ${cartOwner.id})
+        `,
       requestId
     );
 

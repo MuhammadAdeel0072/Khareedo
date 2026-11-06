@@ -49,7 +49,7 @@ describe("server-only Safepay configuration", () => {
 });
 
 describe("verified Safepay POST adapter", () => {
-  it("creates a tracker using the merchant secret, explicit mode, PKR paisas and allowlisted metadata", async () => {
+  it("creates a tracker using the merchant secret, explicit mode and PKR paisas", async () => {
     const http = vi.fn<HttpTransport>(async () => response(tracker()));
     const result = await createSafepayProvider(config(), http).createTracker(input);
     expect(result.kind).toBe("created");
@@ -60,9 +60,32 @@ describe("verified Safepay POST adapter", () => {
     expect(JSON.parse(init.body as string)).toEqual({
       merchant_api_key: env.SAFEPAY_MERCHANT_API_KEY, intent: "CYBERSOURCE", mode: "payment",
       entry_mode: "flex", currency: "PKR", amount: 100000,
-      metadata: { order_id: "order-1", payment_attempt_id: "payment-1" }, include_fees: false,
     });
     expect(new Headers(init.headers).has("Idempotency-Key")).toBe(false);
+  });
+  it("attaches reconciliation metadata using Safepay's tracker metadata endpoint", async () => {
+    const http = vi.fn<HttpTransport>(async () => new Response(null, { status: 204 }));
+    const result = await createSafepayProvider(config(), http).attachTrackerMetadata({
+      trackerToken: "synthetic-tracker", orderId: input.orderId,
+    });
+    expect(result).toEqual({ kind: "updated" });
+    const [url, init] = http.mock.calls[0];
+    expect(url.href).toBe("https://sandbox.api.getsafepay.com/order/payments/v3/synthetic-tracker/metadata");
+    expect(JSON.parse(init.body as string)).toEqual({ data: { order_id: "order-1" } });
+    expect(new Headers(init.headers).get("X-SFPY-MERCHANT-SECRET")).toBe(env.SAFEPAY_SECRET_KEY);
+  });
+  it("returns sanitized diagnostics when tracker metadata setup fails", async () => {
+    const http = vi.fn<HttpTransport>(async () => response({
+      error_code: "INVALID_METADATA", message: `secret=${env.SAFEPAY_SECRET_KEY}`,
+    }, 500));
+    const result = await createSafepayProvider(config(), http).attachTrackerMetadata({
+      trackerToken: "synthetic-tracker", orderId: input.orderId,
+    });
+    expect(result).toEqual({
+      kind: "failed", code: "HTTP_ERROR", httpStatus: 500,
+      providerErrorCode: "INVALID_METADATA", providerMessage: "[redacted]",
+    });
+    expect(JSON.stringify(result)).not.toContain(env.SAFEPAY_SECRET_KEY);
   });
   it("authenticates with a bodyless documented POST and assumes no expiry", async () => {
     const http = vi.fn<HttpTransport>(async () => response({ data: "synthetic-authentication" }, 200));
@@ -90,6 +113,39 @@ describe("verified Safepay POST adapter", () => {
     expect(result).toMatchObject({ kind: "uncertain", code: "HTTP_ERROR", httpStatus: status });
     expect(http).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(result)).not.toContain(env.SAFEPAY_SECRET_KEY);
+  });
+  it("extracts bounded provider error diagnostics from non-2xx tracker responses", async () => {
+    const body = { error_code: "INVALID_TRACKER_REQUEST", message: "Invalid tracker request" };
+    const http = vi.fn<HttpTransport>(async () => response(body, 422));
+    const result = await createSafepayProvider(config(), http).createTracker(input);
+    expect(result).toEqual({
+      kind: "uncertain", code: "HTTP_ERROR", httpStatus: 422,
+      providerErrorCode: "INVALID_TRACKER_REQUEST", providerMessage: "Invalid tracker request",
+    });
+    expect(http).toHaveBeenCalledTimes(1);
+  });
+  it("keeps malformed and oversized non-2xx responses uncertain without retaining their bodies", async () => {
+    const malformed = new Response("not-json", { status: 502 });
+    const oversized = new Response("x".repeat(1024 * 1024 + 1), { status: 502 });
+    for (const body of [malformed, oversized]) {
+      expect(await createSafepayProvider(config(), async () => body).createTracker(input))
+        .toEqual({ kind: "uncertain", code: "HTTP_ERROR", httpStatus: 502 });
+    }
+  });
+  it("redacts credentials, tokens and customer identifiers from provider messages", async () => {
+    const body = {
+      error_code: "INVALID_REQUEST",
+      message: `Invalid request; secret=${env.SAFEPAY_SECRET_KEY}; token=synthetic-authentication; customer=Jane Doe; email=customer@example.invalid`,
+    };
+    const result = await createSafepayProvider(config(), async () => response(body, 400)).createTracker(input);
+    expect(result.kind).toBe("uncertain");
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain(env.SAFEPAY_SECRET_KEY);
+    expect(serialized).not.toContain(env.SAFEPAY_MERCHANT_API_KEY);
+    expect(serialized).not.toContain("synthetic-authentication");
+    expect(serialized).not.toContain("Jane Doe");
+    expect(serialized).not.toContain("customer@example.invalid");
+    expect(result).toHaveProperty("providerErrorCode", "INVALID_REQUEST");
   });
   it.each([
     { environment: "production" }, { state: "TRACKER_ENDED" }, { intent: "MPGS" },

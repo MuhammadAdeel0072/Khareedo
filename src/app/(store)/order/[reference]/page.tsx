@@ -30,7 +30,11 @@ export default async function OrderPage({
   if (!order) notFound();
   const settings = await getSettings();
 
-  const isConfirmed = order.status !== "CANCELLED";
+  const isCancelled = order.status === "CANCELLED";
+  const isOnlinePayment = order.paymentMethod === "ONLINE";
+  const isPaymentFailed = isOnlinePayment && order.paymentStatus === "FAILED";
+  const isPaymentPending = isOnlinePayment && order.paymentStatus !== "PAID" && !isPaymentFailed;
+  const isConfirmed = !isCancelled && (!isOnlinePayment || order.paymentStatus === "PAID");
 
   return (
     <div className="container-khd max-w-3xl py-10">
@@ -38,7 +42,7 @@ export default async function OrderPage({
       <div className="flex flex-col items-center text-center">
         <span
           className={`flex h-16 w-16 items-center justify-center rounded-full ${
-            isConfirmed ? "bg-brand-50 text-primary" : "bg-red-50 text-destructive"
+            isConfirmed ? "bg-brand-50 text-primary" : isPaymentPending ? "bg-amber-50 text-amber-700" : "bg-red-50 text-destructive"
           }`}
         >
           {isConfirmed ? (
@@ -48,12 +52,19 @@ export default async function OrderPage({
           )}
         </span>
         <h1 className="mt-4 text-2xl font-extrabold tracking-tight sm:text-3xl">
-          {isConfirmed ? "Order Confirmed!" : "Order Cancelled"}
+          {isCancelled ? "Order Cancelled" : isPaymentFailed ? "Payment Not Completed" :
+            isPaymentPending ? "Payment Verification Pending" : "Order Confirmed!"}
         </h1>
         <p className="mt-1.5 max-w-md text-sm text-muted-foreground">
-          {isConfirmed
-            ? `Thank you, ${order.customerName.split(" ")[0]}! Your order has been placed successfully. We'll contact you at ${order.customerPhone} to arrange delivery.`
-            : "This order was cancelled. If you have questions, please contact us on WhatsApp."}
+          {isCancelled
+            ? "This order was cancelled. If you have questions, please contact us on WhatsApp."
+            : isPaymentFailed
+              ? "The payment is recorded as failed, so this order has not been confirmed. Please contact us if you need help."
+              : isPaymentPending
+                ? "Your online payment is awaiting secure server-side verification. This page does not treat the Safepay return as proof of payment. Please do not start another payment attempt."
+                : isOnlinePayment
+                  ? `Payment verified. Thank you, ${order.customerName.split(" ")[0]}! We'll contact you at ${order.customerPhone} to arrange delivery.`
+                  : `Thank you, ${order.customerName.split(" ")[0]}! Your order has been placed successfully. We'll contact you at ${order.customerPhone} to arrange delivery.`}
         </p>
       </div>
 

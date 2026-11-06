@@ -57,6 +57,14 @@ function createPrismaClient() {
   return client.$extends({
     query: {
       async $allOperations({ model, operation, args, query }) {
+        if (
+          operation === "$queryRaw" ||
+          operation === "$queryRawUnsafe" ||
+          operation === "$executeRaw" ||
+          operation === "$executeRawUnsafe"
+        ) {
+          return query(args);
+        }
         const context = getPerformanceContext();
         if (!context && !isDebugLoggingEnabled) return query(args);
 

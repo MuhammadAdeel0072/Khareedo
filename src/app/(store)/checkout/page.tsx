@@ -50,8 +50,8 @@ export default async function CheckoutPage() {
         cart={cart}
         user={{ id: user.id, name: user.name, email: user.email }}
         savedAddresses={savedAddresses}
-        initialName={user?.name ?? session?.user?.name ?? ""}
-        initialEmail={user?.email ?? session?.user?.email ?? ""}
+        initialName={user.name ?? ""}
+        initialEmail={user.email}
         config={{
           codEnabled: settings.cod_enabled,
           bankTransferEnabled: settings.bank_transfer_enabled,

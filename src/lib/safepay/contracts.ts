@@ -34,6 +34,7 @@ export type ProviderErrorCode = "INVALID_REQUEST" | "TIMEOUT" | "NETWORK_ERROR" 
   "INVALID_RESPONSE" | "TRACKER_MISMATCH";
 export type ProviderFailure = Readonly<{
   kind: "failed" | "uncertain"; code: ProviderErrorCode; httpStatus?: number; tracker?: Tracker;
+  providerErrorCode?: string; providerMessage?: string;
 }>;
 
 export function wholePkrToMinor(total: number): bigint {
@@ -42,4 +43,3 @@ export function wholePkrToMinor(total: number): bigint {
   }
   return BigInt(total) * BigInt(100);
 }
-

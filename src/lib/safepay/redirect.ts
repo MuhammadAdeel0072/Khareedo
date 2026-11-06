@@ -30,6 +30,18 @@ export function signReturnState(
 export function verifyReturnState(config: SafepayConfig, value: string, expected: {
   orderId: string; paymentId: string; ownerHash: string;
 }, now = Date.now()): ReturnClaims | null {
+  const claims = verifyReturnStateForOwner(config, value, expected.ownerHash, now);
+  return claims && claims.orderId === expected.orderId && claims.paymentId === expected.paymentId
+    ? claims
+    : null;
+}
+
+export function verifyReturnStateForOwner(
+  config: SafepayConfig,
+  value: string,
+  ownerHash: string,
+  now = Date.now(),
+): ReturnClaims | null {
   try {
     if (value.length > 2048 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/.test(value)) return null;
     const [payload, signature] = value.split(".");
@@ -38,9 +50,7 @@ export function verifyReturnState(config: SafepayConfig, value: string, expected
     const actual = config.signReturnState(DOMAIN + payload);
     if (received.length !== actual.length || !timingSafeEqual(received, actual)) return null;
     const claims = claimsSchema.parse(JSON.parse(Buffer.from(payload, "base64url").toString("utf8")));
-    if (claims.expiresAt <= now || claims.expiresAt > now + LOCAL_MAX_AGE_MS ||
-        claims.orderId !== expected.orderId || claims.paymentId !== expected.paymentId ||
-        claims.ownerHash !== expected.ownerHash) return null;
+    if (claims.expiresAt <= now || claims.expiresAt > now + LOCAL_MAX_AGE_MS || claims.ownerHash !== ownerHash) return null;
     return claims;
   } catch { return null; }
 }
@@ -78,4 +88,3 @@ export function prepareHostedRedirect(config: SafepayConfig, input: {
   }).toString();
   return new HostedCheckoutRedirect(checkout, config);
 }
-
