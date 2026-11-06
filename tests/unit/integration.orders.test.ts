@@ -5,6 +5,12 @@ import { describe, expect, it, beforeAll, afterAll, beforeEach, vi } from "vites
 import bcrypt from "bcryptjs";
 import { assertDisposableTestDatabase } from "../helpers/disposable-sqlite.mjs";
 
+const cartCookie = vi.hoisted(() => ({ guestKey: "" }));
+
+vi.mock("next/headers", () => ({
+  cookies: async () => ({ get: () => cartCookie.guestKey ? { value: cartCookie.guestKey } : undefined }),
+}));
+
 vi.mock("@/lib/db", async () => {
   const { PrismaClient } = await import("../../generated/sqlite-client");
   return {
@@ -18,9 +24,16 @@ vi.mock("@/lib/db", async () => {
 import { db } from "@/lib/db";
 import { placeOrder } from "@/services/checkout.service";
 import { adminUpdateOrderStatus } from "@/services/orders.service";
-import { adminListProducts, listProducts } from "@/services/products.service";
+import {
+  adminListProducts,
+  getProductBySlug,
+  getProductMetadataBySlug,
+  listProducts,
+} from "@/services/products.service";
+import { adminListCustomerSummaries } from "@/services/users.service";
 import * as cartService from "@/services/cart.service";
 import * as settingsService from "@/services/settings.service";
+import { mergeGuestCart } from "@/services/cart.service";
 
 // These tests run only through the disposable SQLite test harness. They exercise
 // the real Prisma layer and never use the application's configured database:
@@ -30,6 +43,7 @@ import * as settingsService from "@/services/settings.service";
 assertDisposableTestDatabase();
 
 const KEY = `test-idem-${Date.now()}`;
+let checkoutUserId = "";
 
 async function seedProduct(
   stock: number,
@@ -38,12 +52,15 @@ async function seedProduct(
     description: string;
     brand: string | null;
     tags: string | null;
+    categoryId: string;
   }> = {}
 ) {
   const suffix = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const cat = await db.category.create({
-    data: { name: `TestCat-${suffix}`, slug: `testcat-${suffix}`, isActive: true },
-  });
+  const cat = overrides.categoryId
+    ? await db.category.findUniqueOrThrow({ where: { id: overrides.categoryId } })
+    : await db.category.create({
+        data: { name: `TestCat-${suffix}`, slug: `testcat-${suffix}`, isActive: true },
+      });
   const product = await db.product.create({
     data: {
       name: overrides.name ?? "Integration Test Watch",
@@ -51,7 +68,7 @@ async function seedProduct(
       description: overrides.description ?? "test",
       brand: overrides.brand,
       tags: overrides.tags,
-      categoryId: cat.id,
+      categoryId: overrides.categoryId ?? cat.id,
       price: 1000,
       status: "PUBLISHED",
       inventory: { create: { quantity: stock } },
@@ -147,10 +164,13 @@ async function createOrderWithItems(
 beforeAll(async () => {
   // ensure a clean slate for this key
   await db.order.deleteMany({ where: { idempotencyKey: KEY } });
+  const user = await db.user.create({ data: { email: `checkout-test-${Date.now()}@example.invalid` } });
+  checkoutUserId = user.id;
 });
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  cartCookie.guestKey = "";
   vi.spyOn(settingsService, "getSettings").mockResolvedValue({
     ...settingsService.DEFAULT_SETTINGS,
     cod_enabled: true,
@@ -171,6 +191,76 @@ afterAll(async () => {
 });
 
 describe("order placement integrity", () => {
+  it("merges a guest cart into the signed-in customer's cart after sign-in", async () => {
+    const { cat, product } = await seedProduct(4);
+    const guestKey = `guest-cart-${Date.now()}`;
+    const guestCart = await db.cart.create({
+      data: { sessionKey: guestKey, items: { create: { productId: product.id, quantity: 2, giftWrap: true } } },
+    });
+    cartCookie.guestKey = guestKey;
+
+    await mergeGuestCart(checkoutUserId);
+
+    const userCart = await db.cart.findUniqueOrThrow({
+      where: { userId: checkoutUserId },
+      include: { items: true },
+    });
+    expect(userCart.items).toMatchObject([{ productId: product.id, quantity: 2, giftWrap: true }]);
+    expect(await db.cart.findUnique({ where: { id: guestCart.id } })).toBeNull();
+    expect(cartCookie.guestKey).toBe(guestKey);
+    await db.cart.delete({ where: { id: userCart.id } });
+    await db.product.delete({ where: { id: product.id } });
+    await db.category.delete({ where: { id: cat.id } });
+  });
+
+  it("does not create an order when no authenticated customer is supplied", async () => {
+    const key = `unauthenticated-checkout-${Date.now()}`;
+    const result = await placeOrder(checkoutInput(key), "");
+
+    expect(result).toMatchObject({ ok: false, code: "AUTHENTICATION_REQUIRED" });
+    expect(await db.order.count({ where: { idempotencyKey: key } })).toBe(0);
+    expect(settingsService.getSettings).not.toHaveBeenCalled();
+  });
+
+  it.each(["COD", "BANK_TRANSFER"] as const)("preserves %s checkout with automatic order IDs", async (paymentMethod) => {
+    const { product } = await seedProduct(4);
+    vi.mocked(settingsService.getSettings).mockResolvedValue({
+      ...settingsService.DEFAULT_SETTINGS,
+      cod_enabled: true,
+      bank_transfer_enabled: true,
+      online_payment_enabled: false,
+      delivery_fee_standard: 0,
+      free_delivery_threshold: 0,
+      gift_wrap_enabled: false,
+    });
+    vi.mocked(cartService.getCartDetails).mockResolvedValue(checkoutCart(product, 4));
+
+    const result = await placeOrder({
+      ...checkoutInput("relation-checkout-" + paymentMethod + "-" + Date.now()),
+      paymentMethod,
+    }, checkoutUserId);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error);
+    const order = await db.order.findUniqueOrThrow({
+      where: { id: result.orderId },
+      include: { items: true, payments: true },
+    });
+    expect(order.id).toMatch(/^c[a-z0-9]+$/);
+    expect(order).toMatchObject({
+      paymentMethod,
+      status: "CONFIRMED",
+      paymentStatus: "PENDING",
+      subtotal: 1000,
+      total: 1000,
+      paymentFlowVersion: null,
+      paymentOwnerOrderId: null,
+    });
+    expect(order.items).toHaveLength(1);
+    expect(order.payments).toHaveLength(1);
+    expect(order.payments[0]).toMatchObject({ provider: paymentMethod, amount: 1000, status: "PENDING" });
+    expect((await db.inventory.findUniqueOrThrow({ where: { productId: product.id } })).quantity).toBe(3);
+  });
+
   it("creates order + items + payment and decrements stock once", async () => {
     const { cat, product } = await seedProduct(10);
 
@@ -320,7 +410,7 @@ describe("order placement integrity", () => {
     const keys = [`coupon-race-a-${Date.now()}`, `coupon-race-b-${Date.now()}`];
 
     const results = await Promise.all(
-      keys.map((key) => placeOrder(checkoutInput(key, couponCode)))
+      keys.map((key) => placeOrder(checkoutInput(key, couponCode), checkoutUserId))
     );
     const orders = await db.order.findMany({ where: { idempotencyKey: { in: keys } } });
     const currentCoupon = await db.coupon.findUniqueOrThrow({ where: { id: coupon.id } });
@@ -343,7 +433,7 @@ describe("order placement integrity", () => {
     vi.mocked(cartService.getCartDetails).mockResolvedValue(checkoutCart(product, 1));
     const key = `coupon-rollback-${Date.now()}`;
 
-    const result = await placeOrder(checkoutInput(key, couponCode));
+    const result = await placeOrder(checkoutInput(key, couponCode), checkoutUserId);
 
     expect(result).toMatchObject({ ok: false, code: "OUT_OF_STOCK" });
     expect((await db.coupon.findUniqueOrThrow({ where: { id: coupon.id } })).usedCount).toBe(0);
@@ -359,7 +449,7 @@ describe("order placement integrity", () => {
     vi.mocked(cartService.getCartDetails).mockResolvedValue(checkoutCart(product, 3));
     const key = `coupon-success-${Date.now()}`;
 
-    const result = await placeOrder(checkoutInput(key, couponCode));
+    const result = await placeOrder(checkoutInput(key, couponCode), checkoutUserId);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
 
@@ -389,12 +479,115 @@ describe("order placement integrity", () => {
     }
   });
 
+  it("filters a category and its direct children in the product query", async () => {
+    const root = await db.category.create({
+      data: { name: "Root", slug: `root-${Date.now()}`, isActive: true },
+    });
+    const child = await db.category.create({
+      data: { name: "Child", slug: `child-${Date.now()}`, parentId: root.id, isActive: true },
+    });
+    const inactiveChild = await db.category.create({
+      data: { name: "Inactive", slug: `inactive-${Date.now()}`, parentId: root.id, isActive: false },
+    });
+    const grandchild = await db.category.create({
+      data: { name: "Grandchild", slug: `grandchild-${Date.now()}`, parentId: child.id, isActive: true },
+    });
+    const rootProduct = await seedProduct(1, { categoryId: root.id });
+    const childProduct = await seedProduct(1, { categoryId: child.id });
+    await seedProduct(1, { categoryId: inactiveChild.id });
+    const grandchildProduct = await seedProduct(1, { categoryId: grandchild.id });
+
+    const rootResults = await listProducts({ category: root.slug });
+    expect(rootResults.items.map(({ id }) => id).sort()).toEqual(
+      [rootProduct.product.id, childProduct.product.id].sort()
+    );
+    expect(rootResults.total).toBe(2);
+
+    const childResults = await listProducts({ category: child.slug });
+    expect(childResults.items.map(({ id }) => id).sort()).toEqual(
+      [childProduct.product.id, grandchildProduct.product.id].sort()
+    );
+    expect(childResults.total).toBe(2);
+  });
+
+  it("derives product metadata from the canonical product detail shape", async () => {
+    const { product } = await seedProduct(1, {
+      name: "Metadata Watch",
+      description: "A test description",
+    });
+
+    await db.productImage.create({
+      data: { productId: product.id, url: "/first-metadata.png", sortOrder: -1 },
+    });
+
+    expect(await getProductMetadataBySlug(product.slug)).toEqual({
+      name: product.name,
+      description: product.description,
+      images: [{ url: "/first-metadata.png" }],
+    });
+    expect(await getProductBySlug(product.slug)).toMatchObject({
+      id: product.id,
+      images: [
+        { url: "/first-metadata.png" },
+        { url: "/images/placeholder.svg" },
+      ],
+    });
+  });
+
   it("searches admin product names using mixed-case terms", async () => {
     const { product } = await seedProduct(1, { name: "adminCaseTokenProduct" });
 
     const result = await adminListProducts({ q: "ADMINCASETOKEN" });
 
     expect(result.items.some((item) => item.id === product.id)).toBe(true);
+  });
+
+  it("aggregates admin customer totals without loading order histories", async () => {
+    const suffix = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const user = await db.user.create({
+      data: {
+        email: `admin-summary-${suffix}@example.test`,
+        name: "Admin Summary Test",
+        role: "CUSTOMER",
+      },
+    });
+    try {
+      const createOrder = (status: string, total: number, index: number) =>
+        db.order.create({
+          data: {
+            reference: `KHA${suffix}${index}`,
+            idempotencyKey: `admin-summary-${suffix}-${index}`,
+            userId: user.id,
+            isGuest: false,
+            customerName: user.name!,
+            customerEmail: user.email,
+            customerPhone: "03001234567",
+            shipFullName: user.name!,
+            shipPhone: "03001234567",
+            shipLine1: "Test Street",
+            shipCity: "Lahore",
+            shipProvince: "Punjab",
+            status,
+            subtotal: total,
+            total,
+          },
+        });
+
+      await createOrder("CONFIRMED", 1_250, 1);
+      await createOrder("CANCELLED", 500, 2);
+
+      const customer = (await adminListCustomerSummaries(1_000)).find(
+        (row) => row.id === user.id
+      );
+      expect(customer).toMatchObject({
+        orderCount: 1,
+        totalSpent: 1_250,
+        addressCount: 0,
+      });
+    } finally {
+      await db.order.deleteMany({ where: { userId: user.id } });
+      await db.user.delete({ where: { id: user.id } });
+    }
   });
 
   it("password hashing roundtrip (auth credentials never stored in plain text)", async () => {

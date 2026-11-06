@@ -31,6 +31,8 @@ npx tsx scripts/seed.ts   # or: bun scripts/seed.ts  (demo catalog + users)
 npm run dev            # http://localhost:3000
 ```
 
+For detailed Prisma and performance diagnostics, set `LOG_LEVEL=debug` before starting the development server.
+
 ### Demo accounts (seeded)
 
 | Role | Email | Password |

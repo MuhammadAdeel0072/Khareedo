@@ -13,6 +13,7 @@ import { getSettings } from "@/services/settings.service";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
+import { withPerformanceTiming } from "@/lib/performance-timing";
 
 export const metadata: Metadata = { title: "Order Confirmation" };
 export const dynamic = "force-dynamic";
@@ -22,6 +23,7 @@ export default async function OrderPage({
 }: {
   params: Promise<{ reference: string }>;
 }) {
+  return withPerformanceTiming("page.order-confirmation", async () => {
   const { reference } = await params;
   const user = await getSessionUser();
   const order = await getOrderByReference(reference, user?.id);
@@ -210,5 +212,6 @@ export default async function OrderPage({
         </a>
       </div>
     </div>
-  );
+    );
+  });
 }

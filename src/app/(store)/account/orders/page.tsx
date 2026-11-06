@@ -8,6 +8,7 @@ import { formatPKR, formatDate } from "@/lib/utils";
 import { STATUS_BADGE_CLASSES } from "@/lib/constants";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { withPerformanceTiming } from "@/lib/performance-timing";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Order History" };
@@ -17,6 +18,7 @@ export default async function OrdersPage({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
+  return withPerformanceTiming("page.orders-history", async () => {
   const user = await getSessionUser();
   if (!user) redirect("/login?callbackUrl=/account/orders");
   const params = await searchParams;
@@ -86,5 +88,6 @@ export default async function OrdersPage({
         </>
       )}
     </div>
-  );
+    );
+  });
 }

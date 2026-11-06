@@ -80,3 +80,10 @@ server.log
 
 # Temporary inspection results
 /tool-results/
+# Khareedo local development and security files
+/.next-db-latency/
+*.db
+*.db-journal
+*.crt
+*.key
+*.manual-backup

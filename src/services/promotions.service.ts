@@ -1,12 +1,13 @@
 // Promotions & coupons service (FR-42, D-06 rules).
 import { db } from "@/lib/db";
-import type { DiscountRule } from "@/lib/pricing";
-import type { Prisma, Coupon, Promotion } from "../../generated/postgres-client";
+import type { Promotion } from "../../generated/postgres-client";
+import type { CouponFormInput } from "@/lib/validation";
+import { validateCouponRecord, type ValidatedCoupon } from "@/lib/coupon-validation";
+import { ReservationWriteConflict } from "@/services/reservation-writes";
 
-export interface ValidatedCoupon {
-  rule: DiscountRule;
-  coupon: Coupon;
-}
+type TransactionClient = Parameters<Parameters<typeof db.$transaction>[0]>[0];
+
+export type { ValidatedCoupon } from "@/lib/coupon-validation";
 
 /** Validate a coupon code against subtotal + window/usage rules (server-side only). */
 export async function validateCoupon(
@@ -26,7 +27,7 @@ export async function validateCoupon(
  * the same final use.
  */
 export async function reserveCoupon(
-  tx: Prisma.TransactionClient,
+  tx: TransactionClient,
   code: string,
   subtotal: number
 ): Promise<ValidatedCoupon | { error: string }> {
@@ -44,13 +45,15 @@ export async function reserveCoupon(
       id: coupon.id,
       isActive: true,
       usedCount: coupon.usedCount,
+      reservedCount: coupon.reservedCount,
+      version: coupon.version,
       maxUses: coupon.maxUses,
       AND: [
         { OR: [{ startsAt: null }, { startsAt: { lte: now } }] },
         { OR: [{ expiresAt: null }, { expiresAt: { gte: now } }] },
       ],
     },
-    data: { usedCount: { increment: 1 } },
+    data: { usedCount: { increment: 1 }, version: { increment: 1 } },
   });
   if (reserved.count !== 1) {
     return { error: "This coupon has reached its usage limit." };
@@ -59,28 +62,32 @@ export async function reserveCoupon(
   return validation;
 }
 
-function validateCouponRecord(
-  coupon: Coupon | null,
-  subtotal: number
-): ValidatedCoupon | { error: string } {
-  if (!coupon || !coupon.isActive) return { error: "This coupon code is not valid." };
+export async function adminUpdateCoupon(id: string, d: CouponFormInput) {
+  return db.$transaction(async tx => {
+    const coupon = await tx.coupon.findUniqueOrThrow({ where: { id } });
+    if ((await tx.coupon.updateMany({ where: { id, version: coupon.version },
+      data: { version: { increment: 1 } } })).count !== 1) throw new ReservationWriteConflict("Coupon changed. Refresh before editing.");
+    if (coupon.reservedCount > 0 || await tx.couponReservation.count({ where: { couponId: id, state: "HELD" } }))
+      throw new ReservationWriteConflict("This coupon has active payment reservations. Close those orders before editing it.");
+    if (d.maxUses != null && d.maxUses < coupon.usedCount + coupon.reservedCount)
+      throw new ReservationWriteConflict("The usage limit cannot be less than existing usage and reservations.");
+    return tx.coupon.update({ where: { id }, data: {
+      code: d.code, description: d.description || null, type: d.type, value: d.value,
+      minOrderAmount: d.minOrderAmount, maxUses: d.maxUses ?? null, isActive: d.isActive,
+      startsAt: d.startsAt ? new Date(d.startsAt) : null, expiresAt: d.expiresAt ? new Date(d.expiresAt) : null,
+    } });
+  });
+}
 
-  const now = new Date();
-  if (coupon.startsAt && coupon.startsAt > now)
-    return { error: "This coupon is not active yet." };
-  if (coupon.expiresAt && coupon.expiresAt < now)
-    return { error: "This coupon has expired." };
-  if (coupon.maxUses !== null && coupon.usedCount >= coupon.maxUses)
-    return { error: "This coupon has reached its usage limit." };
-  if (subtotal < coupon.minOrderAmount)
-    return {
-      error: `This coupon requires a minimum order of Rs ${coupon.minOrderAmount.toLocaleString()}.`,
-    };
-
-  return {
-    rule: { type: coupon.type as "PERCENT" | "FIXED", value: coupon.value, title: coupon.code },
-    coupon,
-  };
+export async function adminDeleteCoupon(id: string) {
+  return db.$transaction(async tx => {
+    const coupon = await tx.coupon.findUniqueOrThrow({ where: { id } });
+    if ((await tx.coupon.updateMany({ where: { id, version: coupon.version },
+      data: { version: { increment: 1 } } })).count !== 1) throw new ReservationWriteConflict("Coupon changed. Refresh before deleting.");
+    if (coupon.reservedCount > 0 || await tx.couponReservation.count({ where: { couponId: id } }))
+      throw new ReservationWriteConflict("Payment reservation history must be preserved. Deactivate this coupon when no holds remain.");
+    await tx.coupon.delete({ where: { id } });
+  });
 }
 
 /** Active site-wide promotions for storefront display (FR-12). */

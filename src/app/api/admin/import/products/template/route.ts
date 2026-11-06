@@ -1,7 +1,7 @@
 // Admin: downloadable Excel template for bulk product import.
 // GET /api/admin/import/products/template
 import { requireAdmin } from "@/lib/auth-guard";
-import { jsonError, handleRoute } from "@/lib/api";
+import { handleRoute } from "@/lib/api";
 import { buildWorkbook } from "@/lib/export/excel";
 import { db } from "@/lib/db";
 

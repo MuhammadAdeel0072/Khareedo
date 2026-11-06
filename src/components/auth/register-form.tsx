@@ -8,9 +8,10 @@ import { Loader2, UserPlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { GoogleSignInButton } from "@/components/auth/google-sign-in-button";
 import { safeCallbackUrl } from "@/lib/auth-client";
 
-export function RegisterForm() {
+export function RegisterForm({ googleEnabled }: { googleEnabled: boolean }) {
   const params = useSearchParams();
   const callbackUrl = safeCallbackUrl(params.get("callbackUrl"));
   const [name, setName] = useState("");
@@ -113,9 +114,32 @@ export function RegisterForm() {
           </Button>
         </form>
 
+        {googleEnabled && (
+          <div className="mt-4 space-y-4">
+            <div className="flex items-center gap-3" aria-hidden="true">
+              <span className="h-px flex-1 bg-border" />
+              <span className="text-xs text-muted-foreground">or</span>
+              <span className="h-px flex-1 bg-border" />
+            </div>
+            <GoogleSignInButton
+              callbackUrl={callbackUrl}
+              className="h-11 w-full gap-2"
+              disabled={loading}
+              onStart={() => {
+                setErrors({});
+                setLoading(true);
+              }}
+              onError={(message) => {
+                setErrors({ _: message });
+                setLoading(false);
+              }}
+            />
+          </div>
+        )}
+
         <p className="mt-6 text-center text-sm text-muted-foreground">
           Already have an account?{" "}
-          <Link href="/login" className="font-bold text-primary hover:underline">
+          <Link href={`/login?callbackUrl=${encodeURIComponent(callbackUrl)}`} className="font-bold text-primary hover:underline">
             Sign in
           </Link>
         </p>

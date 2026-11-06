@@ -52,7 +52,6 @@ export interface AdminOrderDetail {
   total: number;
   notes: string | null;
   createdAt: string;
-  updatedAt: string;
   items: Array<{
     id: string;
     productName: string;
@@ -70,7 +69,6 @@ export function AdminOrderView({ order }: { order: AdminOrderDetail }) {
   const router = useRouter();
   const [updating, startTransition] = useTransition();
   const [nextStatus, setNextStatus] = useState<OrderStatus | null>(null);
-  const [restockNote, setRestockNote] = useState(false);
 
   const current = order.status as OrderStatus;
   const allowed = ORDER_STATUS_TRANSITIONS[current] ?? [];
@@ -87,7 +85,6 @@ export function AdminOrderView({ order }: { order: AdminOrderDetail }) {
         if (!res.ok || !data.ok) throw new Error(data.error ?? "Update failed");
         toast.success(`Order moved to ${status}${status === "CANCELLED" ? " — stock restored where applicable" : ""}`);
         setNextStatus(null);
-        setRestockNote(false);
         router.refresh();
       } catch (e) {
         toast.error(e instanceof Error ? e.message : "Could not update status");
@@ -134,7 +131,6 @@ export function AdminOrderView({ order }: { order: AdminOrderDetail }) {
                 // all other permitted transitions apply immediately (FR-41)
                 if (s === "CANCELLED") {
                   setNextStatus(s);
-                  setRestockNote(true);
                 } else {
                   applyStatus(s);
                 }

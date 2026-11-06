@@ -20,16 +20,35 @@ import { getCartCount } from "@/services/cart.service";
 import { getRequestSession } from "@/lib/auth-guard";
 import { formatPKR } from "@/lib/utils";
 import { cn } from "@/lib/utils";
+import {
+  getPerformanceRequestId,
+  withPerformanceMeasurement,
+  withPerformanceTiming,
+} from "@/lib/performance-timing";
 
 export async function StoreHeader({ settings }: { settings: StoreSettings }) {
-  const [categories, session, cartCount] = await Promise.all([
-    getCategoryTree(),
-    getRequestSession(),
-    getCartCount(),
-  ]);
+  const requestId = getPerformanceRequestId();
+  return withPerformanceTiming("page.store-header", async () => {
+    const [categories, session, cartCount] = await Promise.all([
+      withPerformanceMeasurement(
+        "homepage.header.categories",
+        getCategoryTree,
+        requestId
+      ),
+      withPerformanceMeasurement(
+        "homepage.header.session",
+        getRequestSession,
+        requestId
+      ),
+      withPerformanceMeasurement(
+        "homepage.header.cart-count",
+        getCartCount,
+        requestId
+      ),
+    ]);
 
-  return (
-    <>
+    return (
+      <>
       {/* Announcement / trust bar — intentionally OUTSIDE the sticky header so it scrolls
           away, keeping the persistent mobile chrome compact (main header + search + chips) */}
       <div className="bg-brand-dark text-primary-foreground">
@@ -82,8 +101,9 @@ export async function StoreHeader({ settings }: { settings: StoreSettings }) {
         {/* Category navigation */}
         <CategoryNav categories={categories} />
       </header>
-    </>
-  );
+      </>
+    );
+  }, requestId);
 }
 
 function TrustMarqueeItems({

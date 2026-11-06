@@ -2,7 +2,7 @@
 
 // Product create/edit dialog (FR-39/40) — opens inline like Add Category.
 // SKU is system-assigned server-side; no manual entry field.
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
 import { Loader2, Trash2, Upload } from "lucide-react";
@@ -14,6 +14,11 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { slugify } from "@/lib/utils";
+import {
+  adminApiErrorMessage,
+  readAdminApiResponse,
+} from "@/lib/admin-api-response";
+import { MAX_PRODUCT_IMAGE_SIZE } from "@/lib/product-image-validation";
 
 export interface ProductDialogValues {
   id?: string;
@@ -52,6 +57,31 @@ export const EMPTY_PRODUCT: ProductDialogValues = {
   lowStockThreshold: 5,
 };
 
+const INLINE_PRODUCT_ERROR_FIELDS = new Set([
+  "name",
+  "categoryId",
+  "price",
+  "comparePrice",
+  "images",
+  "slug",
+]);
+
+function visibleProductErrors(errors: Record<string, string>) {
+  const visible: Record<string, string> = {};
+  const summary: string[] = [];
+
+  for (const [field, message] of Object.entries(errors)) {
+    if (field === "_" || INLINE_PRODUCT_ERROR_FIELDS.has(field)) {
+      visible[field] = message;
+    } else {
+      summary.push(`${field}: ${message}`);
+    }
+  }
+
+  if (summary.length) visible._ = [visible._, ...summary].filter(Boolean).join("\n");
+  return visible;
+}
+
 export function ProductDialog({
   open,
   initial,
@@ -72,14 +102,17 @@ export function ProductDialog({
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const savingRef = useRef(false);
+  const uploadingRef = useRef(false);
 
-  // Re-seed the draft each time the dialog opens.
-  useEffect(() => {
+  const [previousProps, setPreviousProps] = useState({ open, initial });
+  if (previousProps.open !== open || previousProps.initial !== initial) {
+    setPreviousProps({ open, initial });
     if (open) {
       setValues(initial);
       setErrors({});
     }
-  }, [open, initial]);
+  }
 
   function set<K extends keyof ProductDialogValues>(key: K, value: ProductDialogValues[K]) {
     setValues((v) => ({ ...v, [key]: value }));
@@ -90,17 +123,53 @@ export function ProductDialog({
   }
 
   async function uploadImage(file: File) {
+    if (uploadingRef.current || savingRef.current) return;
+    if (values.images.length >= 8) {
+      toast.error("A product can have up to eight images.");
+      return;
+    }
+    if (file.size > MAX_PRODUCT_IMAGE_SIZE) {
+      toast.error("Image size must not exceed 5 MB.");
+      if (fileRef.current) fileRef.current.value = "";
+      return;
+    }
+    if (!["image/jpeg", "image/png", "image/webp", "image/gif"].includes(file.type)) {
+      toast.error("Only JPEG, PNG, WebP and GIF images are allowed.");
+      if (fileRef.current) fileRef.current.value = "";
+      return;
+    }
+
+    uploadingRef.current = true;
     setUploading(true);
     try {
       const fd = new FormData();
       fd.append("file", file);
       const res = await fetch("/api/admin/upload", { method: "POST", body: fd });
-      const data = await res.json();
-      if (!res.ok || !data.ok) throw new Error(data.error ?? "Upload failed");
-      set("images", [...values.images, data.url].slice(0, 8));
+      const data = await readAdminApiResponse(res);
+      if (!res.ok || !data.ok) {
+        throw new Error(adminApiErrorMessage(res, data));
+      }
+      if (!data.url) {
+        throw new Error("The upload completed without returning an image URL.");
+      }
+      const imageUrl = data.url;
+      try {
+        const url = new URL(imageUrl);
+        if (url.protocol !== "https:" && url.protocol !== "http:") {
+          throw new Error("Invalid image URL protocol");
+        }
+      } catch {
+        throw new Error("The upload returned an invalid image URL.");
+      }
+      setValues((current) =>
+        current.images.length < 8
+          ? { ...current, images: [...current.images, imageUrl] }
+          : current
+      );
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Image upload failed");
     } finally {
+      uploadingRef.current = false;
       setUploading(false);
       if (fileRef.current) fileRef.current.value = "";
     }
@@ -108,6 +177,8 @@ export function ProductDialog({
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (savingRef.current || uploadingRef.current) return;
+    savingRef.current = true;
     setErrors({});
     setSaving(true);
     try {
@@ -132,18 +203,34 @@ export function ProductDialog({
           images: values.images,
         }),
       });
-      const data = await res.json();
+      const data = await readAdminApiResponse(res);
       if (!res.ok || !data.ok) {
-        setErrors(data.errors ?? { _: data.error ?? "Could not save product" });
-        toast.error(data.errors ? "Please correct the highlighted fields." : data.error ?? "Save failed");
+        if (data.errors) {
+          setErrors(visibleProductErrors(data.errors));
+          toast.error(
+            Object.values(data.errors)[0] ?? "Please correct the highlighted fields."
+          );
+        } else {
+          const message = adminApiErrorMessage(res, data);
+          setErrors({ _: message });
+          toast.error(message);
+        }
+        return;
+      }
+      if (!data.product || typeof data.product.id !== "string") {
+        setErrors({ _: "The server did not confirm the product was saved. Please try again." });
+        toast.error("The server returned an incomplete save response.");
         return;
       }
       toast.success(isEdit ? "Product updated" : "Product created");
       onClose();
       router.refresh();
-    } catch {
-      setErrors({ _: "Network error — please try again." });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Network error — please try again.";
+      setErrors({ _: message });
+      toast.error(message);
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   }
@@ -152,7 +239,12 @@ export function ProductDialog({
     "flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
   return (
-    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+    <Dialog
+      open={open}
+      onOpenChange={(o) => {
+        if (!o && !savingRef.current && !uploadingRef.current) onClose();
+      }}
+    >
       <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>{isEdit ? "Edit Product" : "Add Product"}</DialogTitle>
@@ -278,10 +370,21 @@ export function ProductDialog({
             <div className="mt-2 grid grid-cols-4 gap-2 sm:grid-cols-6">
               {values.images.map((url, i) => (
                 <div key={`${url}-${i}`} className="group relative aspect-square overflow-hidden rounded-lg border bg-muted">
-                  <Image src={url} alt={`Product image ${i + 1}`} fill sizes="100px" className="object-cover" />
+                  <Image
+                    src={url}
+                    alt={`Product image ${i + 1}`}
+                    fill
+                    sizes="100px"
+                    unoptimized
+                    className="object-cover"
+                  />
                   <button
                     type="button"
-                    onClick={() => set("images", values.images.filter((_, j) => j !== i))}
+                    disabled={saving || uploading}
+                    onClick={() => setValues((current) => ({
+                      ...current,
+                      images: current.images.filter((_, j) => j !== i),
+                    }))}
                     className="absolute right-1 top-1 flex h-6 w-6 items-center justify-center rounded-full bg-background/90 text-destructive opacity-0 transition group-hover:opacity-100"
                     aria-label={`Remove image ${i + 1}`}
                   >
@@ -296,7 +399,7 @@ export function ProductDialog({
                 <button
                   type="button"
                   onClick={() => fileRef.current?.click()}
-                  disabled={uploading}
+                  disabled={uploading || saving}
                   className="flex aspect-square flex-col items-center justify-center gap-1 rounded-lg border border-dashed text-xs text-muted-foreground transition hover:border-primary/50 hover:text-primary disabled:opacity-60"
                 >
                   {uploading ? <Loader2 className="h-5 w-5 animate-spin" /> : <Upload className="h-5 w-5" />}
@@ -315,12 +418,17 @@ export function ProductDialog({
             <Input
               placeholder="…or paste image URL (/images/products/example.png)"
               className="mt-2 h-9 text-xs"
+              disabled={saving}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();
                   const v = (e.target as HTMLInputElement).value.trim();
                   if (v) {
-                    set("images", [...values.images, v].slice(0, 8));
+                    if (values.images.length >= 8) {
+                      toast.error("A product can have up to eight images.");
+                      return;
+                    }
+                    set("images", [...values.images, v]);
                     (e.target as HTMLInputElement).value = "";
                   }
                 }
@@ -354,11 +462,16 @@ export function ProductDialog({
           </div>
 
           {errors._ && (
-            <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">{errors._}</p>
+            <p className="whitespace-pre-line rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">{errors._}</p>
           )}
 
           <div className="flex justify-end gap-2 pt-1">
-            <Button type="button" variant="ghost" onClick={onClose}>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={onClose}
+              disabled={saving || uploading}
+            >
               Cancel
             </Button>
             <Button type="submit" disabled={saving || uploading} className="gap-2">

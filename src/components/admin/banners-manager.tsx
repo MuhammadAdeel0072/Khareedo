@@ -4,7 +4,7 @@
 import Image from "next/image";
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { Image as ImageIcon, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
+import { Loader2, Pencil, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -53,7 +53,7 @@ const PLACEMENT_LABEL: Record<string, string> = {
 
 export function BannersManager({ initial }: { initial: AdminBanner[] }) {
   const router = useRouter();
-  const [banners, setBanners] = useState(initial);
+  const banners = initial;
   const [draft, setDraft] = useState<Draft | null>(null);
   const [deleting, setDeleting] = useState<AdminBanner | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});

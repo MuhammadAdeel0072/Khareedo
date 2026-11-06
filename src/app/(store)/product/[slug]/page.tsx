@@ -29,6 +29,7 @@ import {
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
 import { Separator } from "@/components/ui/separator";
+import { withPerformanceTiming } from "@/lib/performance-timing";
 
 export const dynamic = "force-dynamic";
 
@@ -37,17 +38,20 @@ interface PageProps {
 }
 
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
-  const { slug } = await params;
-  const product = await getProductMetadataBySlug(slug);
-  if (!product) return { title: "Product Not Found" };
-  return {
-    title: product.name,
-    description: product.description.slice(0, 160),
-    openGraph: { images: product.images[0] ? [product.images[0].url] : undefined },
-  };
+  return withPerformanceTiming("page.product-metadata", async () => {
+    const { slug } = await params;
+    const product = await getProductMetadataBySlug(slug);
+    if (!product) return { title: "Product Not Found" };
+    return {
+      title: product.name,
+      description: product.description.slice(0, 160),
+      openGraph: { images: product.images[0] ? [product.images[0].url] : undefined },
+    };
+  });
 }
 
 export default async function ProductPage({ params }: PageProps) {
+  return withPerformanceTiming("page.product-details", async () => {
   const { slug } = await params;
   const product = await getProductBySlug(slug);
   if (!product) notFound();
@@ -219,5 +223,6 @@ export default async function ProductPage({ params }: PageProps) {
         </section>
       )}
     </div>
-  );
+    );
+  });
 }

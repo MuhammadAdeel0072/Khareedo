@@ -4,6 +4,7 @@ import { useState } from "react";
 import { signIn } from "next-auth/react";
 import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { safeCallbackUrl } from "@/lib/auth-client";
 
 export function GoogleSignInButton({
   callbackUrl,
@@ -25,7 +26,9 @@ export function GoogleSignInButton({
     setLoading(true);
     onStart?.();
     try {
-      const result = await signIn("google", { callbackUrl });
+      const result = await signIn("google", {
+        callbackUrl: safeCallbackUrl(callbackUrl),
+      });
       if (result?.error) {
         onError?.("Google sign-in was not completed. You can try again or use email and password.");
         setLoading(false);

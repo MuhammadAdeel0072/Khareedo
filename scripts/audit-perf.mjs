@@ -5,7 +5,8 @@
  */
 import { chromium, devices } from "playwright";
 
-const BASE = "http://localhost:3000";
+const BASE = process.env.PERF_BASE_URL || "http://localhost:3000";
+const executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH;
 const RUNS = 3;
 
 const routes = [
@@ -83,6 +84,7 @@ async function runProfile(browser, label, device) {
       dcl: med("dcl"),
       load: med("load"),
     });
+    console.log(`${label}  ${r.name.padEnd(11)} samples=${JSON.stringify(samples)}`);
     console.log(`${label}  ${r.name.padEnd(11)} TTFB=${med("ttfb")}ms  FCP=${med("fcp")}ms  LCP=${med("lcp")}ms  CLS=${rows[rows.length - 1].cls}  DCL=${med("dcl")}ms  Load=${med("load")}ms`);
   }
   await context.close();
@@ -96,12 +98,12 @@ if (!slug) {
 }
 console.log(`# Phase 8 perf @ ${BASE} (production build) — ${RUNS} runs/route, median — slug=${slug}`);
 
-const browser = await chromium.launch();
+const browser = await chromium.launch(executablePath ? { executablePath } : {});
 const all = [];
 all.push(...(await runProfile(browser, "desktop", { viewport: { width: 1366, height: 768 } })));
 all.push(...(await runProfile(browser, "mobile", { ...devices["Pixel 7"] })));
 
-console.log("\n# Verdicts (p75-proxy = median of 3):");
+console.log(`\n# Verdicts (median of ${RUNS} samples):`);
 for (const r of all) {
   const lcpOk = r.lcp <= 2500 ? "OK" : "OVER";
   const clsOk = r.cls <= 0.1 ? "OK" : "OVER";

@@ -1,29 +1,30 @@
 // Checkout page (FR-19..22, FR-28/29).
 import type { Metadata } from "next";
-import Link from "next/link";
 import { redirect } from "next/navigation";
 import { CheckoutFlow, type CheckoutAddress } from "@/components/checkout/checkout-flow";
 import { getCartDetails } from "@/services/cart.service";
 import { getSettings } from "@/services/settings.service";
 import { listAddresses } from "@/services/users.service";
-import { getRequestSession, getSessionUser } from "@/lib/auth-guard";
+import { getSessionUser } from "@/lib/auth-guard";
+import { mergeGuestCart } from "@/services/cart.service";
+import { withPerformanceTiming } from "@/lib/performance-timing";
+import { isSafepaySandboxSessionConfigured } from "@/lib/safepay/config";
 
 export const metadata: Metadata = { title: "Checkout" };
 export const dynamic = "force-dynamic";
 
 export default async function CheckoutPage() {
-  const [cart, settings, session, user] = await Promise.all([
-    getCartDetails(),
-    getSettings(),
-    getRequestSession(),
-    getSessionUser(),
-  ]);
+  return withPerformanceTiming("page.checkout", async () => {
+  const user = await getSessionUser();
+  if (!user) redirect("/login?callbackUrl=%2Fcheckout&reason=checkout");
+
+  await mergeGuestCart(user.id);
+  const [cart, settings] = await Promise.all([getCartDetails(), getSettings()]);
   if (!cart || cart.items.length === 0) {
     redirect("/cart");
   }
 
-  const savedAddresses: CheckoutAddress[] = user
-    ? (await listAddresses(user.id)).map((a) => ({
+  const savedAddresses: CheckoutAddress[] = (await listAddresses(user.id)).map((a) => ({
         id: a.id,
         label: a.label,
         fullName: a.fullName,
@@ -34,8 +35,7 @@ export default async function CheckoutPage() {
         province: a.province,
         postalCode: a.postalCode,
         isDefault: a.isDefault,
-      }))
-    : [];
+      }));
 
   return (
     <div className="container-khd py-8">
@@ -46,29 +46,16 @@ export default async function CheckoutPage() {
         </p>
       </div>
 
-      {!session && (
-        <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-primary/20 bg-brand-50 px-4 py-3 text-sm">
-          <p>
-            Have an account?{" "}
-            <Link href="/login?callbackUrl=/checkout" className="font-bold text-primary hover:underline">
-              Sign in
-            </Link>{" "}
-            for faster checkout — or continue as a guest.
-          </p>
-          <span className="text-xs text-muted-foreground">Guest checkout is enabled ✓</span>
-        </div>
-      )}
-
       <CheckoutFlow
         cart={cart}
-        user={user ? { id: user.id, name: user.name, email: user.email } : null}
+        user={{ id: user.id, name: user.name, email: user.email }}
         savedAddresses={savedAddresses}
         initialName={user?.name ?? session?.user?.name ?? ""}
         initialEmail={user?.email ?? session?.user?.email ?? ""}
         config={{
           codEnabled: settings.cod_enabled,
           bankTransferEnabled: settings.bank_transfer_enabled,
-          onlinePaymentEnabled: settings.online_payment_enabled,
+          sandboxPaymentEnabled: isSafepaySandboxSessionConfigured(),
           giftWrapEnabled: settings.gift_wrap_enabled,
           giftWrapCharge: settings.gift_wrap_charge,
           giftWrapDescription: settings.gift_wrap_description,
@@ -80,5 +67,6 @@ export default async function CheckoutPage() {
         }}
       />
     </div>
-  );
+    );
+  });
 }

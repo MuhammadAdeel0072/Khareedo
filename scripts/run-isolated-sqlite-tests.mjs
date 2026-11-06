@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { DatabaseSync } from "node:sqlite";
 import {
   MARKER_NAME,
   assertDisposableTestDatabase,
@@ -120,6 +121,35 @@ function removeOwnTemporaryRoot(root, token) {
   fs.rmSync(canonicalRoot, { recursive: true, force: false });
 }
 
+function installSafepayTestConstraints(testEnvironment) {
+  // Authoring only in Phase 3: this function runs only when the existing isolated
+  // harness is explicitly executed. It cannot accept an application database path.
+  const databasePath = assertDisposableTestDatabase(testEnvironment.env);
+  assertOutsideProtectedRoots(path.dirname(databasePath));
+  if (databasePath !== canonicalPath(testEnvironment.databasePath)) {
+    throw new Error("Constraint target differs from the verified disposable database.");
+  }
+
+  const sql = fs.readFileSync(
+    path.join(projectRoot, "prisma", "sqlite-safepay-test-constraints.sql"),
+    "utf8"
+  );
+  const database = new DatabaseSync(databasePath);
+  try {
+    database.exec("PRAGMA foreign_keys = ON");
+    if (database.prepare("PRAGMA foreign_keys").get().foreign_keys !== 1) {
+      throw new Error("Disposable SQLite foreign-key enforcement is disabled.");
+    }
+    database.exec(sql);
+    if (database.prepare("PRAGMA foreign_key_check").all().length !== 0) {
+      throw new Error("Disposable SQLite schema contains foreign-key violations.");
+    }
+    console.log("SAFEPAY_TEST_CONSTRAINTS=INSTALLED (marked disposable SQLite only)");
+  } finally {
+    database.close();
+  }
+}
+
 function runPrisma(args, env) {
   const prismaCli = path.join(projectRoot, "node_modules", "prisma", "build", "index.js");
   const result = spawnSync(process.execPath, [prismaCli, ...args], {
@@ -130,6 +160,38 @@ function runPrisma(args, env) {
   });
   if (result.error) throw result.error;
   return result.status ?? 1;
+}
+
+function selectTestFiles(arguments_) {
+  const requested = arguments_.filter((argument) => argument !== "--check");
+  const files = requested.length
+    ? requested
+    : [
+        "tests/unit/integration.orders.test.ts",
+        "tests/unit/integration.payment-relations.test.ts",
+        "tests/unit/integration.safepay.test.ts",
+        "tests/unit/integration.safepay-reservations.test.ts",
+        "tests/unit/integration.payment-settlement.test.ts",
+      ];
+  const unitTestRoot = path.join(projectRoot, "tests", "unit");
+
+  return files.map((file) => {
+    const absolutePath = path.resolve(projectRoot, file);
+    const relativeToTests = path.relative(unitTestRoot, absolutePath);
+    if (
+      relativeToTests === "" ||
+      relativeToTests === ".." ||
+      relativeToTests.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(relativeToTests) ||
+      !relativeToTests.endsWith(".test.ts") ||
+      !fs.existsSync(absolutePath) ||
+      !fs.statSync(absolutePath).isFile()
+    ) {
+      throw new Error("Only existing .test.ts files inside tests/unit may be run.");
+    }
+
+    return path.relative(projectRoot, absolutePath).split(path.sep).join("/");
+  });
 }
 
 function safetyCheck() {
@@ -186,6 +248,7 @@ function main() {
     return 0;
   }
 
+  const testFiles = selectTestFiles(process.argv.slice(2));
   const appUrl = applicationDatabaseUrl();
   const { root, token } = makeMarkedRoot();
   let testEnvironment;
@@ -208,12 +271,15 @@ function main() {
       throw new Error("Prisma initialization did not create the verified disposable database.");
     }
 
+    installSafepayTestConstraints(testEnvironment);
+
     const testStatus = spawnSync(
       process.execPath,
       [
         path.join(projectRoot, "node_modules", "vitest", "vitest.mjs"),
         "run",
-        "tests/unit/integration.orders.test.ts",
+        "--no-file-parallelism",
+        ...testFiles,
       ],
       {
         cwd: projectRoot,

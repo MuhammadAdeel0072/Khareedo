@@ -61,7 +61,7 @@ export default async function ProductsPage({ searchParams }: PageProps) {
   const max = first(params.max);
   const inStockOnly = first(params.instock) === "1";
 
-  const [result, categories, session, user, activeCategory] = await Promise.all([
+ const [result, categories, user, activeCategory] = await Promise.all([
     listProducts({
       q,
       category,
@@ -73,7 +73,7 @@ export default async function ProductsPage({ searchParams }: PageProps) {
       perPage: 12,
     }),
     getCategoriesWithCounts(),
-    getRequestSession(),
+ 
     getSessionUser(),
     category ? getCategoryBySlug(category) : Promise.resolve(null),
   ]);

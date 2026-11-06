@@ -2,6 +2,7 @@
 // Credentials provider works out of the box with seeded accounts (D-11);
 // GoogleProvider activates automatically when OAuth env keys exist (FR-03).
 // Production note: swap to Supabase Auth behind the same interface (see docs).
+import { randomUUID } from "node:crypto";
 import type { NextAuthOptions } from "next-auth";
 import CredentialsProvider from "next-auth/providers/credentials";
 import GoogleProvider from "next-auth/providers/google";
@@ -13,8 +14,26 @@ import { findUserByEmail } from "@/services/auth-users.service";
 const googleId = process.env.GOOGLE_CLIENT_ID;
 const googleSecret = process.env.GOOGLE_CLIENT_SECRET;
 const googleEnabled = Boolean(googleId && googleSecret);
+const SLOW_AUTH_OPERATION_THRESHOLD_MS = 1_000;
 
 export const googleSignInEnabled = googleEnabled;
+
+async function timeGoogleAuthOperation<T>(
+  operation: string,
+  run: () => Promise<T>
+): Promise<T> {
+  const startedAt = performance.now();
+  try {
+    return await run();
+  } finally {
+    const durationMs = Math.round(performance.now() - startedAt);
+    if (durationMs >= SLOW_AUTH_OPERATION_THRESHOLD_MS) {
+      console.warn(
+        `[performance:slow] operation=google-auth-${operation} durationMs=${durationMs}`
+      );
+    }
+  }
+}
 
 // Fail fast on a missing auth secret — without it NextAuth's own handlers run
 // on an ephemeral key while getToken/getServerSession receive `undefined`,
@@ -74,70 +93,98 @@ export const authOptions: NextAuthOptions = {
     async signIn({ user, account, profile }) {
       if (account?.provider !== "google") return true;
 
-      const googleProfile = profile as (typeof profile & { email_verified?: boolean }) | undefined;
-      const email = user.email?.trim().toLowerCase();
-      if (!email || googleProfile?.email_verified !== true) return "/login?error=GoogleEmailNotVerified";
-
-      const providerAccountId = account.providerAccountId;
-      const linkedAccount = await db.oAuthAccount.findUnique({
-        where: {
-          provider_providerAccountId: {
-            provider: "google",
-            providerAccountId,
-          },
-        },
-        include: { user: true },
-      });
-
-      if (linkedAccount) {
-        user.id = linkedAccount.user.id;
-        user.role = linkedAccount.user.role;
-        return true;
-      }
-
-      const matchingUser = await findUserByEmail(email);
-      if (matchingUser) return "/login?error=OAuthAccountNotLinked";
-
+      const requestId = randomUUID();
+      const callbackStartedAt = performance.now();
       try {
-        const localUser = await db.$transaction(async (transaction) => {
-          const createdUser = await transaction.user.create({
-            data: {
-              email,
-              name: user.name ?? email.split("@")[0],
-              image: user.image,
-              emailVerified: new Date(),
-            },
-          });
-          await transaction.oAuthAccount.create({
-            data: {
-              userId: createdUser.id,
-              provider: "google",
-              providerAccountId,
-            },
-          });
-          return createdUser;
-        });
-        user.id = localUser.id;
-        user.role = localUser.role;
-        return true;
-      } catch (error) {
-        if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2002") {
-          throw error;
+        const googleProfile = profile as (typeof profile & { email_verified?: boolean }) | undefined;
+        const email = user.email?.trim().toLowerCase();
+        if (!email || googleProfile?.email_verified !== true) {
+          return "/login?error=GoogleEmailNotVerified";
         }
 
-        const racedAccount = await db.oAuthAccount.findUnique({
-          where: {
-            provider_providerAccountId: {
-              provider: "google",
-              providerAccountId,
-            },
-          },
-          include: { user: true },
-        });
-        if (!racedAccount) return "/login?error=OAuthAccountNotLinked";
-        user.id = racedAccount.user.id;
-        user.role = racedAccount.user.role;
-        return true;
+        const providerAccountId = account.providerAccountId;
+        const linkedAccount = await timeGoogleAuthOperation(
+          "oauth-account-lookup",
+          () =>
+            db.oAuthAccount.findUnique({
+              where: {
+                provider_providerAccountId: {
+                  provider: "google",
+                  providerAccountId,
+                },
+              },
+              include: { user: true },
+            })
+        );
+
+        if (linkedAccount) {
+          user.id = linkedAccount.user.id;
+          user.role = linkedAccount.user.role;
+          return true;
+        }
+
+        const matchingUser = await timeGoogleAuthOperation(
+          "existing-user-lookup",
+          () => findUserByEmail(email)
+        );
+        if (matchingUser) return "/login?error=OAuthAccountNotLinked";
+
+        try {
+          const localUser = await timeGoogleAuthOperation(
+            "user-and-oauth-account-creation-transaction",
+            () =>
+              db.$transaction(async (transaction) => {
+                const createdUser = await transaction.user.create({
+                  data: {
+                    email,
+                    name: user.name ?? email.split("@")[0],
+                    image: user.image,
+                    emailVerified: new Date(),
+                  },
+                });
+                await transaction.oAuthAccount.create({
+                  data: {
+                    userId: createdUser.id,
+                    provider: "google",
+                    providerAccountId,
+                  },
+                });
+                return createdUser;
+              })
+          );
+          user.id = localUser.id;
+          user.role = localUser.role;
+          return true;
+        } catch (error) {
+          if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2002") {
+            throw error;
+          }
+
+          const racedAccount = await timeGoogleAuthOperation(
+            "oauth-account-race-lookup",
+            () =>
+              db.oAuthAccount.findUnique({
+                where: {
+                  provider_providerAccountId: {
+                    provider: "google",
+                    providerAccountId,
+                  },
+                },
+                include: { user: true },
+              })
+          );
+          if (!racedAccount) return "/login?error=OAuthAccountNotLinked";
+          user.id = racedAccount.user.id;
+          user.role = racedAccount.user.role;
+          return true;
+        }
+      } finally {
+        const durationMs = Math.round(performance.now() - callbackStartedAt);
+        if (durationMs >= SLOW_AUTH_OPERATION_THRESHOLD_MS) {
+          console.warn(
+            `[performance:slow] operation=google-signin-callback durationMs=${durationMs}`
+          );
+        }
       }
     },
     async jwt({ token, user }) {

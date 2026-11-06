@@ -162,6 +162,11 @@ model Inventory {
   updatedAt         DateTime @updatedAt
 
   @@index([quantity])
+
+  // Available quantity keeps its existing meaning. All writers must honor version
+  // before reservations can be enabled; schema authoring does not enable them.
+  version Int @default(0)
+  reservations InventoryReservation[]
 }
 
 // ─────────────────────────────── Cart & Wishlist ───────────────────────────────
@@ -248,7 +253,7 @@ model Order {
   notes            String?
 
   items    OrderItem[]
-  payments Payment[]
+  payments Payment[] @relation("OrderPayments")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -257,6 +262,36 @@ model Order {
   @@index([status])
   @@index([status, createdAt])
   @@index([createdAt])
+
+  // Managed hosted-checkout metadata is NULL on historical/offline orders.
+  // Existing PKR snapshots and order/payment statuses retain their meaning.
+  paymentFlowVersion Int?
+  nextPaymentAttempt Int?
+  currency String?
+  checkoutOwnerKind String?
+  checkoutOwnerHash String?
+  checkoutFingerprint String?
+  // Keep the cuid() primary key out of relation fields: Prisma otherwise suppresses it.
+  // SQL requires this owner to equal id when either pointer is present, including NULL checks.
+  paymentOwnerOrderId String?
+  activePaymentId String?
+  acceptedPaymentId String?
+  checkoutCloseReason String?
+  paymentReviewStatus String?
+  paymentReviewReason String?
+  expiryLeaseToken String?
+  checkoutAccessExpiresAt DateTime?
+  reservationExpiresAt DateTime?
+  checkoutClosedAt DateTime?
+  expiryLeaseUntil DateTime?
+  version Int @default(0)
+  activePayment Payment? @relation("OrderActivePayment", fields: [paymentOwnerOrderId, activePaymentId], references: [orderId, id], onDelete: NoAction, onUpdate: NoAction)
+  acceptedPayment Payment? @relation("OrderAcceptedPayment", fields: [paymentOwnerOrderId, acceptedPaymentId], references: [orderId, id], onDelete: NoAction, onUpdate: NoAction)
+  couponReservation CouponReservation?
+  @@unique([paymentOwnerOrderId, activePaymentId])
+  @@unique([paymentOwnerOrderId, acceptedPaymentId])
+  @@index([paymentFlowVersion, status, reservationExpiresAt])
+  @@index([paymentFlowVersion, paymentReviewStatus, updatedAt])
 }
 
 model OrderItem {
@@ -276,12 +311,14 @@ model OrderItem {
 
   @@index([orderId])
   @@index([productId])
+
+  inventoryReservation InventoryReservation?
 }
 
 model Payment {
   id        String   @id @default(cuid())
   orderId   String
-  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  order Order @relation("OrderPayments", fields: [orderId], references: [id], onDelete: Cascade)
   provider  String   // COD | BANK_TRANSFER | <gateway name when enabled>
   amount    Int
   status    String   @default("PENDING") // PENDING | PAID | FAILED | REFUNDED
@@ -290,7 +327,167 @@ model Payment {
   updatedAt DateTime @updatedAt
 
   @@index([orderId])
+
+  // One row per managed payment attempt; legacy payment rows retain NULL metadata.
+  // Minor-unit values are separate from the existing whole-PKR amount.
+  // Tracker/retry identities are locally scoped keys, not provider idempotency promises.
+  attemptNumber Int?
+  attemptState String?
+  providerEnvironment String?
+  merchantAccountRef String?
+  trackerToken String?
+  providerState String?
+  currency String?
+  reconcileStatus String?
+  reconcileLeaseToken String?
+  lastErrorCode String?
+  providerStateObservedAt DateTime?
+  creationStartedAt DateTime?
+  trackerBoundAt DateTime?
+  paidVerifiedAt DateTime?
+  nextReconcileAt DateTime?
+  lastReconcileAt DateTime?
+  reconcileLeaseUntil DateTime?
+  lastErrorAt DateTime?
+  expectedAmountMinor BigInt?
+  capturedAmountMinor BigInt?
+  refundedAmountMinor BigInt?
+  retryRequestKey String? @unique
+  trackerIdentityKey String? @unique
+  reconcileAttempts Int @default(0)
+  version Int @default(0)
+  activeForOrder Order? @relation("OrderActivePayment")
+  acceptedForOrder Order? @relation("OrderAcceptedPayment")
+  webhookEvents PaymentWebhookEvent[]
+  evidence PaymentEvidence[]
+  @@unique([orderId, id])
+  @@unique([orderId, attemptNumber])
+  @@index([provider, reconcileStatus, nextReconcileAt])
+  @@index([reconcileStatus, reconcileLeaseUntil])
 }
+
+// Safepay persistence only. No provider state vocabulary, event-ID format,
+// signature profile, token TTL, or provider idempotency behavior is assumed.
+// One immutable allocation identity per order item; state changes must be transactional.
+model InventoryReservation {
+  id String @id @default(cuid())
+  orderItemId String @unique
+  inventoryId String
+  quantity Int
+  state String @default("HELD")
+  heldAt DateTime @default(now())
+  consumedAt DateTime?
+  releasedAt DateTime?
+  restoredAt DateTime?
+  releaseReason String?
+  version Int @default(0)
+  orderItem OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  inventory Inventory @relation(fields: [inventoryId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  @@index([inventoryId, state])
+}
+
+// One coupon hold per order. Committing moves held capacity into existing usedCount.
+model CouponReservation {
+  id String @id @default(cuid())
+  orderId String @unique
+  couponId String
+  state String @default("HELD")
+  heldAt DateTime @default(now())
+  committedAt DateTime?
+  releasedAt DateTime?
+  releaseReason String?
+  version Int @default(0)
+  order Order @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  coupon Coupon @relation(fields: [couponId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  @@index([couponId, state])
+}
+
+// Durable verified inbox. Nullable provider envelope fields permit quarantine without
+// inventing an event-ID/version contract. Hashes are local SHA-256 body digests,
+// not a definition of Safepay's signed representation. Payloads must be encrypted;
+// normalizedPayloadJson is allowlisted data only. Keys/secrets never belong here.
+model PaymentWebhookEvent {
+  id String @id @default(cuid())
+  provider String @default("SAFEPAY")
+  providerEnvironment String
+  merchantAccountRef String
+  providerEventId String?
+  eventType String?
+  eventVersion String?
+  dedupKey String @unique
+  trackerToken String?
+  trackerIdentityKey String?
+  paymentId String?
+  businessPayloadSha256 String?
+  leaseToken String?
+  lastErrorCode String?
+  reviewReason String?
+  providerOccurredAt DateTime?
+  leaseUntil DateTime?
+  processedAt DateTime?
+  firstReceivedAt DateTime @default(now())
+  lastReceivedAt DateTime @default(now())
+  deliveryCount Int @default(1)
+  processingStatus String @default("RECEIVED")
+  processingAttempts Int @default(0)
+  nextProcessAt DateTime @default(now())
+  reviewRequired Boolean @default(false)
+  updatedAt DateTime @updatedAt
+  firstPayloadSha256 String
+  lastPayloadSha256 String
+  payloadFormat String?
+  normalizedPayloadJson String?
+  payloadKeyId String?
+  signatureProfile String?
+  signingKeyId String?
+  signatureValue String?
+  payloadCiphertext Bytes?
+  payloadNonce Bytes?
+  payloadAuthTag Bytes?
+  payloadPurgedAt DateTime?
+  payment Payment? @relation(fields: [paymentId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  evidence PaymentEvidence[] @relation("WebhookEvidenceSource")
+  finalEvidence PaymentEvidence? @relation("WebhookEvidenceFinal")
+  @@index([processingStatus, nextProcessAt])
+  @@index([processingStatus, leaseUntil])
+  @@index([paymentId, firstReceivedAt])
+  @@index([trackerIdentityKey])
+  @@index([reviewRequired, firstReceivedAt])
+}
+
+// Append-only by service policy. detailsJson must be allowlisted, never raw secrets
+// or card data. Observed amounts preserve anomalies; validationStatus records trust.
+model PaymentEvidence {
+  id String @id @default(cuid())
+  paymentId String
+  source String
+  operation String
+  validationStatus String
+  decision String
+  sourceWebhookEventId String?
+  providerRequestId String?
+  providerContractVersion String?
+  observedProviderState String?
+  observedCurrency String?
+  rawPayloadSha256 String?
+  reasonCode String?
+  actorUserIdSnapshot String?
+  detailsJson String?
+  processedWebhookEventId String? @unique
+  providerOccurredAt DateTime?
+  observedQuoteMinor BigInt?
+  observedCapturedMinor BigInt?
+  observedRefundedMinor BigInt?
+  paymentVersion Int
+  orderVersion Int?
+  recordedAt DateTime @default(now())
+  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  sourceWebhook PaymentWebhookEvent? @relation("WebhookEvidenceSource", fields: [sourceWebhookEventId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  processedWebhook PaymentWebhookEvent? @relation("WebhookEvidenceFinal", fields: [processedWebhookEventId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  @@index([paymentId, recordedAt, id])
+  @@index([sourceWebhookEventId])
+}
+
 
 // ─────────────────────────────── Marketing ───────────────────────────────
 
@@ -324,6 +521,11 @@ model Coupon {
   updatedAt      DateTime  @updatedAt
 
   @@index([isActive])
+
+  // Held capacity is separate from committed usedCount; legacy usage is unchanged.
+  reservedCount Int @default(0)
+  version Int @default(0)
+  reservations CouponReservation[]
 }
 
 model Banner {

@@ -7,6 +7,7 @@ import { rateLimit } from "@/lib/rate-limit";
 import { EmailDeliveryNotConfiguredError, isEmailDeliveryConfigured } from "@/services/email.service";
 import { sendRegistrationVerification } from "@/services/email-verification.service";
 import { findUserByEmail } from "@/services/auth-users.service";
+import { withPerformanceTiming } from "@/lib/performance-timing";
 
 export async function registerUser(input: unknown) {
   const parsed = registerSchema.safeParse(input);
@@ -64,6 +65,54 @@ export async function getUserProfile(userId: string) {
   });
 }
 
+export async function adminListCustomerSummaries(limit = 100) {
+  const customers = await db.user.findMany({
+    where: { role: "CUSTOMER" },
+    orderBy: { createdAt: "desc" },
+    take: limit,
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      phone: true,
+      createdAt: true,
+      _count: { select: { addresses: true } },
+    },
+  });
+
+  if (customers.length === 0) return [];
+
+  const orderTotals = await db.order.groupBy({
+    by: ["userId"],
+    where: {
+      userId: { in: customers.map((customer) => customer.id) },
+      status: { not: "CANCELLED" },
+    },
+    _count: { _all: true },
+    _sum: { total: true },
+  });
+  const totalsByUser = new Map<string, { orders: number; totalSpent: number }>();
+  for (const row of orderTotals) {
+    if (row.userId) {
+      totalsByUser.set(row.userId, {
+        orders: row._count._all,
+        totalSpent: row._sum.total ?? 0,
+      });
+    }
+  }
+
+  return customers.map((customer) => ({
+    id: customer.id,
+    name: customer.name,
+    email: customer.email,
+    phone: customer.phone,
+    createdAt: customer.createdAt,
+    orderCount: totalsByUser.get(customer.id)?.orders ?? 0,
+    totalSpent: totalsByUser.get(customer.id)?.totalSpent ?? 0,
+    addressCount: customer._count.addresses,
+  }));
+}
+
 // ─── Addresses (FR-05) ───
 
 export async function listAddresses(userId: string) {
@@ -74,29 +123,33 @@ export async function listAddresses(userId: string) {
 }
 
 export async function createAddress(userId: string, input: unknown) {
+  return withPerformanceTiming("address.create", async () => {
   const parsed = addressSchema.safeParse(input);
   if (!parsed.success) return { ok: false as const, errors: fieldErrors(parsed.error) };
   const data = parsed.data;
   const count = await db.address.count({ where: { userId } });
-  return db.$transaction(async (tx) => {
-    if (data.isDefault || count === 0) {
-      await tx.address.updateMany({ where: { userId }, data: { isDefault: false } });
-    }
-    const address = await tx.address.create({
-      data: {
-        userId,
-        label: data.label,
-        fullName: data.fullName,
-        phone: data.phone,
-        line1: data.line1,
-        line2: data.line2 || null,
-        city: data.city,
-        province: data.province,
-        postalCode: data.postalCode || null,
-        isDefault: data.isDefault || count === 0,
-      },
-    });
-    return { ok: true as const, address };
+  return withPerformanceTiming("address.create.transaction", () =>
+    db.$transaction(async (tx) => {
+      if (data.isDefault || count === 0) {
+        await tx.address.updateMany({ where: { userId }, data: { isDefault: false } });
+      }
+      const address = await tx.address.create({
+        data: {
+          userId,
+          label: data.label,
+          fullName: data.fullName,
+          phone: data.phone,
+          line1: data.line1,
+          line2: data.line2 || null,
+          city: data.city,
+          province: data.province,
+          postalCode: data.postalCode || null,
+          isDefault: data.isDefault || count === 0,
+        },
+      });
+      return { ok: true as const, address };
+    })
+  );
   });
 }
 

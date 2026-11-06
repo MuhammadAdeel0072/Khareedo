@@ -2,6 +2,7 @@
 import { db } from "@/lib/db";
 import { getReportSummary } from "@/services/reports.service";
 import { getLowStockProducts } from "@/services/inventory.service";
+import { adminListCustomerSummaries } from "@/services/users.service";
 
 function fmtDate(d: Date | null | undefined): string {
   if (!d) return "—";
@@ -34,7 +35,16 @@ export interface ProductsExportRow {
 export async function getProductsExportData(limit = 500): Promise<ProductsExportRow[]> {
   const rows = await db.product.findMany({
     where: { deletedAt: null },
-    include: {
+    select: {
+      name: true,
+      sku: true,
+      brand: true,
+      price: true,
+      comparePrice: true,
+      status: true,
+      isFeatured: true,
+      rating: true,
+      createdAt: true,
       category: { select: { name: true } },
       inventory: { select: { quantity: true, lowStockThreshold: true } },
     },
@@ -89,9 +99,28 @@ export async function getOrdersExportData(
   const rows = await db.order.findMany({
     orderBy: { createdAt: "desc" },
     take: limit,
-    include: {
+    select: {
+      reference: true,
+      customerName: true,
+      customerEmail: true,
+      customerPhone: true,
+      shipCity: true,
+      subtotal: true,
+      discountTotal: true,
+      deliveryFee: true,
+      total: true,
+      paymentMethod: true,
+      paymentStatus: true,
+      status: true,
+      createdAt: true,
       items: {
-        include: { product: { select: { sku: true } } },
+        select: {
+          productName: true,
+          quantity: true,
+          unitPrice: true,
+          lineTotal: true,
+          product: { select: { sku: true } },
+        },
       },
     },
   });
@@ -139,29 +168,14 @@ export interface CustomersExportRow {
 }
 
 export async function getCustomersExportData(limit = 1000): Promise<CustomersExportRow[]> {
-  const rows = await db.user.findMany({
-    where: { role: "CUSTOMER" },
-    orderBy: { createdAt: "desc" },
-    take: limit,
-    select: {
-      name: true,
-      email: true,
-      phone: true,
-      createdAt: true,
-      orders: { select: { total: true, status: true } },
-      _count: { select: { orders: true, addresses: true } },
-    },
-  });
-  return rows.map((c) => {
-    const valid = c.orders.filter((o) => o.status !== "CANCELLED");
-    return {
-      name: c.name ?? "—",
-      email: c.email,
-      phone: c.phone ?? "—",
-      orders: valid.length,
-      totalSpent: valid.reduce((s, o) => s + o.total, 0),
-      addresses: c._count.addresses,
-      joined: fmtDate(c.createdAt),
-    };
-  });
+  const customers = await adminListCustomerSummaries(limit);
+  return customers.map((customer) => ({
+    name: customer.name ?? "—",
+    email: customer.email,
+    phone: customer.phone ?? "—",
+    orders: customer.orderCount,
+    totalSpent: customer.totalSpent,
+    addresses: customer.addressCount,
+    joined: fmtDate(customer.createdAt),
+  }));
 }

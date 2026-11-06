@@ -1,9 +1,11 @@
 // Product catalogue service — storefront reads (FR-07..13) + admin CRUD (FR-39/40).
 import { cache } from "react";
-import { Prisma } from "../../generated/postgres-client";
+import { Prisma, type Promotion } from "../../generated/postgres-client";
 import { db } from "@/lib/db";
+import { writeAvailableStock } from "@/services/reservation-writes";
 import { type ProductSort } from "@/lib/constants";
 import { slugify } from "@/lib/utils";
+import { withPerformanceTiming } from "@/lib/performance-timing";
 
 export interface ProductFilters {
   q?: string; // keyword search (FR-09)
@@ -75,16 +77,6 @@ function toListItem(p: ListRow): ProductListItem {
   };
 }
 
-/** Resolve a category slug to the category + its children ids (for nav filtering). */
-async function categoryScope(slug: string): Promise<string[] | null> {
-  const cat = await db.category.findUnique({
-    where: { slug },
-    include: { children: { select: { id: true } } },
-  });
-  if (!cat) return null;
-  return [cat.id, ...cat.children.map((c) => c.id)];
-}
-
 export async function listProducts(filters: ProductFilters) {
   const page = Math.max(1, filters.page ?? 1);
   const perPage = Math.min(48, Math.max(1, filters.perPage ?? 12));
@@ -105,9 +97,13 @@ export async function listProducts(filters: ProductFilters) {
     ];
   }
   if (filters.category) {
-    const ids = await categoryScope(filters.category);
-    if (!ids) return { items: [], total: 0, page, perPage, pages: 0 };
-    where.categoryId = { in: ids };
+    where.category = {
+      isActive: true,
+      OR: [
+        { slug: filters.category },
+        { parent: { slug: filters.category } },
+      ],
+    };
   }
   if (filters.brand) where.brand = filters.brand;
   if (filters.minPrice !== undefined || filters.maxPrice !== undefined) {
@@ -151,6 +147,7 @@ export async function listProducts(filters: ProductFilters) {
 
 export async function getFeaturedProducts(limit = 8): Promise<ProductListItem[]> {
   const rows = await db.product.findMany({
+     relationLoadStrategy: "join",
     where: { status: "PUBLISHED", deletedAt: null, isFeatured: true, category: { isActive: true } },
     select: listSelect,
     orderBy: [{ rating: "desc" }],
@@ -161,12 +158,88 @@ export async function getFeaturedProducts(limit = 8): Promise<ProductListItem[]>
 
 export async function getNewArrivals(limit = 8): Promise<ProductListItem[]> {
   const rows = await db.product.findMany({
-    where: { status: "PUBLISHED", deletedAt: null, category: { isActive: true } },
-    select: listSelect,
-    orderBy: [{ createdAt: "desc" }],
-    take: limit,
-  });
+  relationLoadStrategy: "join",
+  where: { status: "PUBLISHED", deletedAt: null, category: { isActive: true } },
+  select: listSelect,
+  orderBy: [{ createdAt: "desc" }],
+  take: limit,
+});
   return rows.map(toListItem);
+}
+
+type ProductJson = Omit<ProductListItem, "createdAt"> & { createdAt: string };
+type PromotionJson = Omit<Promotion, "createdAt" | "updatedAt" | "startsAt" | "endsAt"> & {
+  createdAt: string;
+  updatedAt: string;
+  startsAt: string | null;
+  endsAt: string | null;
+};
+
+function productRows(featured: boolean, orderBy: Prisma.Sql, limit: number) {
+  return Prisma.sql`
+    SELECT p."id", p."name", p."slug", p."price", p."comparePrice", p."brand",
+      p."rating", p."reviewCount", p."status", p."isFeatured",
+      p."createdAt" AT TIME ZONE 'UTC' AS "createdAt",
+      c."name" AS "categoryName", c."slug" AS "categorySlug",
+      image."url" AS "image", COALESCE(i."quantity", 0) AS "stock"
+    FROM "Product" p
+    JOIN "Category" c ON c."id" = p."categoryId"
+    LEFT JOIN "Inventory" i ON i."productId" = p."id"
+    LEFT JOIN LATERAL (
+      SELECT "url" FROM "ProductImage" WHERE "productId" = p."id"
+      ORDER BY "sortOrder" ASC LIMIT 1
+    ) image ON TRUE
+    WHERE p."status" = 'PUBLISHED' AND p."deletedAt" IS NULL
+      AND c."isActive" = TRUE ${featured ? Prisma.sql`AND p."isFeatured" = TRUE` : Prisma.empty}
+    ORDER BY ${orderBy} LIMIT ${limit}
+  `;
+}
+
+/**
+ * One read-only round trip for the homepage's two product lists and offers.
+ * Separate limited/sorted lists preserve their existing rules and overlap.
+ * Do not persistently cache prices, availability or time-bounded promotions.
+ */
+export async function getHomepageCatalog() {
+  const now = new Date();
+  const [data] = await db.$queryRaw<Array<{
+    featured: ProductJson[];
+    newArrivals: ProductJson[];
+    promotions: PromotionJson[];
+  }>>(Prisma.sql`
+    WITH featured AS (${productRows(true, Prisma.sql`p."rating" DESC`, 8)}),
+      arrivals AS (${productRows(false, Prisma.sql`p."createdAt" DESC`, 4)})
+    SELECT
+      COALESCE((SELECT jsonb_agg(featured ORDER BY "rating" DESC) FROM featured), '[]'::jsonb) AS "featured",
+      COALESCE((SELECT jsonb_agg(arrivals ORDER BY "createdAt" DESC) FROM arrivals), '[]'::jsonb) AS "newArrivals",
+      COALESCE((SELECT jsonb_agg(offers ORDER BY "createdAt" DESC) FROM (
+        SELECT "id", "title", "description", "type", "value", "minOrderAmount", "isActive",
+          "startsAt" AT TIME ZONE 'UTC' AS "startsAt",
+          "endsAt" AT TIME ZONE 'UTC' AS "endsAt",
+          "createdAt" AT TIME ZONE 'UTC' AS "createdAt",
+          "updatedAt" AT TIME ZONE 'UTC' AS "updatedAt"
+        FROM "Promotion"
+        WHERE "isActive" = TRUE
+          AND ("startsAt" IS NULL OR "startsAt" <= ${now})
+          AND ("endsAt" IS NULL OR "endsAt" >= ${now})
+        ORDER BY "createdAt" DESC LIMIT ${2}
+      ) offers), '[]'::jsonb) AS "promotions"
+  `);
+
+  const products = (rows: ProductJson[]): ProductListItem[] => rows.map(row => ({
+    ...row, createdAt: new Date(row.createdAt),
+  }));
+  return {
+    featured: products(data.featured),
+    newArrivals: products(data.newArrivals),
+    promotions: data.promotions.map((row): Promotion => ({
+      ...row,
+      startsAt: row.startsAt === null ? null : new Date(row.startsAt),
+      endsAt: row.endsAt === null ? null : new Date(row.endsAt),
+      createdAt: new Date(row.createdAt),
+      updatedAt: new Date(row.updatedAt),
+    })),
+  };
 }
 
 export interface ProductDetail {
@@ -188,68 +261,93 @@ export interface ProductDetail {
   category: { id: string; name: string; slug: string; parentName: string | null };
 }
 
-export async function getProductMetadataBySlug(slug: string) {
-  return db.product.findFirst({
-    where: { slug, status: "PUBLISHED", deletedAt: null, category: { isActive: true } },
+const productDetailSelect = {
+  id: true,
+  name: true,
+  slug: true,
+  description: true,
+  brand: true,
+  sku: true,
+  price: true,
+  comparePrice: true,
+  status: true,
+  rating: true,
+  reviewCount: true,
+  tags: true,
+  images: {
+    orderBy: { sortOrder: "asc" },
+    select: { url: true, alt: true },
+  },
+  inventory: { select: { quantity: true, lowStockThreshold: true } },
+  category: {
     select: {
+      id: true,
       name: true,
-      description: true,
-      images: {
-        take: 1,
-        orderBy: { sortOrder: "asc" },
-        select: { url: true },
-      },
+      slug: true,
+      parent: { select: { name: true } },
     },
+  },
+} satisfies Prisma.ProductSelect;
+
+export async function getProductMetadataBySlug(slug: string) {
+  return withPerformanceTiming("product.metadata", async () => {
+    const product = await getProductBySlug(slug);
+    if (!product) return null;
+    return {
+      name: product.name,
+      description: product.description,
+      images: product.images.slice(0, 1).map(({ url }) => ({ url })),
+    };
   });
 }
 
-export const getProductBySlug = cache(async (slug: string): Promise<ProductDetail | null> => {
-  const p = await db.product.findFirst({
-    where: { slug, status: "PUBLISHED", deletedAt: null, category: { isActive: true } },
-    include: {
-      images: { orderBy: { sortOrder: "asc" } },
-      inventory: true,
-      category: { include: { parent: { select: { name: true } } } },
-    },
-  });
-  if (!p) return null;
-  return {
-    id: p.id,
-    name: p.name,
-    slug: p.slug,
-    description: p.description,
-    brand: p.brand,
-    sku: p.sku,
-    price: p.price,
-    comparePrice: p.comparePrice,
-    status: p.status,
-    rating: p.rating,
-    reviewCount: p.reviewCount,
-    tags: (p.tags ?? "").split(",").map((t) => t.trim()).filter(Boolean),
-    images: p.images.map((i) => ({ url: i.url, alt: i.alt ?? p.name })),
-    stock: p.inventory?.quantity ?? 0,
-    lowStockThreshold: p.inventory?.lowStockThreshold ?? 5,
-    category: {
-      id: p.category.id,
-      name: p.category.name,
-      slug: p.category.slug,
-      parentName: p.category.parent?.name ?? null,
-    },
-  };
-});
+export const getProductBySlug = cache(async (slug: string): Promise<ProductDetail | null> =>
+  withPerformanceTiming("product.details", async () => {
+    const p = await db.product.findFirst({
+      where: { slug, status: "PUBLISHED", deletedAt: null, category: { isActive: true } },
+      select: productDetailSelect,
+    });
+    if (!p) return null;
+    return {
+      id: p.id,
+      name: p.name,
+      slug: p.slug,
+      description: p.description,
+      brand: p.brand,
+      sku: p.sku,
+      price: p.price,
+      comparePrice: p.comparePrice,
+      status: p.status,
+      rating: p.rating,
+      reviewCount: p.reviewCount,
+      tags: (p.tags ?? "").split(",").map((t) => t.trim()).filter(Boolean),
+      images: p.images.map((i) => ({ url: i.url, alt: i.alt ?? p.name })),
+      stock: p.inventory?.quantity ?? 0,
+      lowStockThreshold: p.inventory?.lowStockThreshold ?? 5,
+      category: {
+        id: p.category.id,
+        name: p.category.name,
+        slug: p.category.slug,
+        parentName: p.category.parent?.name ?? null,
+      },
+    };
+  })
+);
 
 export async function getRelatedProducts(
   categoryId: string,
   excludeId: string,
   limit = 4
 ): Promise<ProductListItem[]> {
-  const rows = await db.product.findMany({
-    where: { categoryId, status: "PUBLISHED", deletedAt: null, id: { not: excludeId } },
-    select: listSelect,
-    orderBy: [{ rating: "desc" }],
-    take: limit,
+  return withPerformanceTiming("product.related", async () => {
+    const rows = await db.product.findMany({
+      where: { categoryId, status: "PUBLISHED", deletedAt: null, id: { not: excludeId } },
+      select: listSelect,
+      orderBy: [{ rating: "desc" }],
+      take: limit,
+    });
+    return rows.map(toListItem);
   });
-  return rows.map(toListItem);
 }
 
 // ───────────────────────────── Admin operations (FR-39/40, BR-14) ─────────────────────────────
@@ -411,6 +509,7 @@ export async function adminCreateProduct(input: ProductWriteInput) {
 export async function adminUpdateProduct(id: string, input: ProductWriteInput) {
   const slug = await ensureUniqueSlug(input.slug || input.name, id);
   return db.$transaction(async (tx) => {
+    await writeAvailableStock(tx, { productId: id, quantity: input.stock, lowStockThreshold: input.lowStockThreshold ?? 5 });
     await tx.productImage.deleteMany({ where: { productId: id } });
     const product = await tx.product.update({
       where: { id },
@@ -434,17 +533,6 @@ export async function adminUpdateProduct(id: string, input: ProductWriteInput) {
         },
       },
     });
-    const inv = await tx.inventory.findUnique({ where: { productId: id } });
-    if (inv) {
-      await tx.inventory.update({
-        where: { productId: id },
-        data: { quantity: input.stock, lowStockThreshold: input.lowStockThreshold ?? 5 },
-      });
-    } else {
-      await tx.inventory.create({
-        data: { productId: id, quantity: input.stock, lowStockThreshold: input.lowStockThreshold ?? 5 },
-      });
-    }
     return product;
   });
 }
@@ -455,8 +543,4 @@ export async function adminArchiveProduct(id: string) {
     where: { id },
     data: { status: "ARCHIVED", isFeatured: false, deletedAt: new Date() },
   });
-}
-
-export async function adminDeleteProductImage(imageId: string) {
-  await db.productImage.delete({ where: { id: imageId } });
 }

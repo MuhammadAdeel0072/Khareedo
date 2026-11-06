@@ -31,7 +31,6 @@ export function HeroCarousel({ banners }: { banners: HeroBanner[] }) {
   useEffect(() => {
     if (!emblaApi) return;
     emblaApi.on("select", onSelect);
-    onSelect();
   }, [emblaApi, onSelect]);
 
   if (banners.length === 0) return null;
@@ -39,7 +38,7 @@ export function HeroCarousel({ banners }: { banners: HeroBanner[] }) {
   return (
     <div className="relative overflow-hidden rounded-2xl bg-cream" ref={emblaRef}>
       <div className="flex">
-        {banners.map((b) => (
+        {banners.map((b, index) => (
           <div key={b.id} className="relative min-w-0 flex-[0_0_100%]">
             {/* Min-height floors guarantee the text stack + CTA always fit inside the box
                 (fixed aspect alone clipped the eyebrow at top and Shop Now at bottom). */}
@@ -48,7 +47,7 @@ export function HeroCarousel({ banners }: { banners: HeroBanner[] }) {
                 src={b.imageUrl}
                 alt={b.title}
                 fill
-                priority
+                priority={index === 0}
                 sizes="(max-width: 1024px) 100vw, 66vw"
                 className="object-cover"
               />

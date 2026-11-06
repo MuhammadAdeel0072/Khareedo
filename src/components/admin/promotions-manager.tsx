@@ -53,7 +53,7 @@ function toInputDate(iso: string | null): string {
 
 export function PromotionsManager({ initial }: { initial: AdminPromotion[] }) {
   const router = useRouter();
-  const [promotions, setPromotions] = useState(initial);
+  const promotions = initial;
   const [draft, setDraft] = useState<Draft | null>(null);
   const [deleting, setDeleting] = useState<AdminPromotion | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});

@@ -9,6 +9,7 @@ import {
   setCartItemGiftWrap,
 } from "@/services/cart.service";
 import { parseBody, jsonError, jsonOk, handleRoute } from "@/lib/api";
+import { withPerformanceTiming } from "@/lib/performance-timing";
 
 const addSchema = z.object({
   productId: z.string().min(1),
@@ -41,17 +42,17 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  return handleRoute(async () => {
+  return withPerformanceTiming("api.cart.add", () => handleRoute(async () => {
     const parsed = await parseBody(request, addSchema);
     if (parsed.error) return parsed.error;
     const { productId, quantity } = parsed.data;
     try {
-      const details = await addToCart(productId, quantity);
-      return jsonOk(cartPayload(details));
+      const cart = await addToCart(productId, quantity);
+      return jsonOk({ cart });
     } catch (e) {
       return jsonError(e instanceof Error ? e.message : "Could not add to cart", 409);
     }
-  });
+  }));
 }
 
 export async function PATCH(request: Request) {

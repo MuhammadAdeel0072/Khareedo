@@ -65,7 +65,7 @@ export interface CheckoutAddress {
 export interface CheckoutConfig {
   codEnabled: boolean;
   bankTransferEnabled: boolean;
-  onlinePaymentEnabled: boolean;
+  sandboxPaymentEnabled: boolean;
   giftWrapEnabled: boolean;
   giftWrapCharge: number;
   giftWrapDescription: string;
@@ -157,7 +157,7 @@ export function CheckoutFlow({
   const [couponInput, setCouponInput] = useState("");
   const [couponCode, setCouponCode] = useState("");
   const [quote, setQuote] = useState<Quote | null>(null);
-  const [quoting, setQuoting] = useState(true);
+  const [completedQuoteRequest, setCompletedQuoteRequest] = useState<string | null>(null);
 
   const purchasable = useMemo(() => cartState.items.filter((i) => !i.outOfStock), [cartState.items]);
   const hasStockProblem = purchasable.length < cartState.items.length || cartState.items.some((i) => i.quantity > i.stock);
@@ -191,31 +191,38 @@ export function CheckoutFlow({
   }, []);
 
   // ─── Server quote (BR-06/07) — wrap flags already live on the server cart ───
-  const refreshQuote = useCallback(async () => {
-    setQuoting(true);
-    try {
-      const res = await fetch("/api/checkout/quote", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          deliveryMethod,
-          couponCode,
-        }),
-      });
-      const data = await res.json();
-      if (data.ok) setQuote(data.quote as Quote);
-    } catch {
-      toast.error("Could not update the order summary. Please retry.");
-    } finally {
-      setQuoting(false);
-    }
-  }, [deliveryMethod, couponCode]);
+  const quoteRequestKey = JSON.stringify([deliveryMethod, couponCode, wrappedUnits]);
+  const quoting = completedQuoteRequest !== quoteRequestKey;
 
   // Re-quote on mount, delivery/coupon change, and whenever the wrapped-unit
   // count changes (per-item gift wrap toggle).
   useEffect(() => {
-    refreshQuote();
-  }, [refreshQuote, wrappedUnits]);
+    let active = true;
+
+    async function refreshQuote() {
+      try {
+        const res = await fetch("/api/checkout/quote", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            deliveryMethod,
+            couponCode,
+          }),
+        });
+        const data = await res.json();
+        if (active && data.ok) setQuote(data.quote as Quote);
+      } catch {
+        if (active) toast.error("Could not update the order summary. Please retry.");
+      } finally {
+        if (active) setCompletedQuoteRequest(quoteRequestKey);
+      }
+    }
+
+    void refreshQuote();
+    return () => {
+      active = false;
+    };
+  }, [deliveryMethod, couponCode, quoteRequestKey]);
 
   // ─── Address form validation (client-side pre-check; server re-validates) ───
   function validateAddress(a: CheckoutAddress): boolean {
@@ -279,7 +286,8 @@ export function CheckoutFlow({
         await saveNewAddress();
       }
 
-      const res = await fetch("/api/checkout/place", {
+      const onlinePayment = paymentMethod === "ONLINE";
+      const res = await fetch(onlinePayment ? "/api/checkout/safepay/session" : "/api/checkout/place", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -315,6 +323,21 @@ export function CheckoutFlow({
         return;
       }
       window.dispatchEvent(new CustomEvent("cart:updated", { detail: { itemCount: 0 } }));
+      if (onlinePayment) {
+        let redirect: URL;
+        try {
+          redirect = new URL(data.redirectUrl);
+        } catch {
+          toast.error("Could not start secure checkout. Please try again.");
+          return;
+        }
+        if (redirect.origin !== "https://sandbox.api.getsafepay.com" || redirect.pathname !== "/embedded/") {
+          toast.error("Could not start secure checkout. Please try again.");
+          return;
+        }
+        window.location.assign(redirect.href);
+        return;
+      }
       router.push(`/order/${data.reference}`);
     } catch {
       toast.error("Network problem — your order was not placed. Please try again.");
@@ -642,16 +665,16 @@ export function CheckoutFlow({
                     desc="Direct bank transfer — details shared after ordering"
                   />
                 )}
-                {config.onlinePaymentEnabled && (
+                {config.sandboxPaymentEnabled && (
                   <PaymentOption
                     selected={paymentMethod === "ONLINE"}
                     onSelect={() => setPaymentMethod("ONLINE")}
                     icon={<CreditCard className="h-5 w-5" />}
-                    title="Online Payment"
-                    desc="Card / wallet — via secure payment provider"
+                    title="Online Payment (Sandbox)"
+                    desc="Test checkout using Safepay sandbox"
                   />
                 )}
-                {!config.onlinePaymentEnabled && (
+                {!config.sandboxPaymentEnabled && (
                   <div className="flex items-center gap-3 rounded-xl border border-dashed p-4 opacity-70">
                     <CreditCard className="h-5 w-5 text-muted-foreground" aria-hidden="true" />
                     <div className="flex-1">

@@ -1,6 +1,6 @@
 // Admin order detail page (FR-41).
 import { notFound } from "next/navigation";
-import { getOrderById } from "@/services/orders.service";
+import { adminGetOrderById } from "@/services/orders.service";
 import { AdminOrderView, type AdminOrderDetail } from "@/components/admin/admin-order-view";
 
 export const dynamic = "force-dynamic";
@@ -12,7 +12,7 @@ export default async function AdminOrderPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const order = await getOrderById(id);
+  const order = await adminGetOrderById(id);
   if (!order) notFound();
 
   const detail: AdminOrderDetail = {
@@ -43,7 +43,6 @@ export default async function AdminOrderPage({
     total: order.total,
     notes: order.notes,
     createdAt: order.createdAt.toISOString(),
-    updatedAt: order.updatedAt.toISOString(),
     userEmail: order.user?.email ?? null,
     items: order.items.map((i) => ({
       id: i.id,

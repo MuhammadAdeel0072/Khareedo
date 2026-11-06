@@ -1,6 +1,7 @@
 // Typed store settings service — DB-driven configuration (FR-44, FR-51, FR-32).
 import { cache } from "react";
 import { db } from "@/lib/db";
+import { Prisma } from "../../generated/postgres-client";
 
 export interface StoreSettings {
   store_name: string;
@@ -88,12 +89,16 @@ export const getSettings = cache(async (): Promise<StoreSettings> => {
 export async function saveSettings(
   values: Partial<Record<keyof StoreSettings, string | boolean | number>>
 ) {
-  const ops = Object.entries(values).map(([key, value]) =>
-    db.storeSetting.upsert({
-      where: { key },
-      update: { value: String(value) },
-      create: { key, value: String(value) },
-    })
+  const entries = Object.entries(values);
+  if (entries.length === 0) return;
+
+  const rows = entries.map(([key, value]) =>
+    Prisma.sql`(${key}, ${String(value)}, CURRENT_TIMESTAMP)`
   );
-  await db.$transaction(ops);
+  await db.$executeRaw(Prisma.sql`
+    INSERT INTO "StoreSetting" ("key", "value", "updatedAt")
+    VALUES ${Prisma.join(rows)}
+    ON CONFLICT ("key") DO UPDATE
+    SET "value" = EXCLUDED."value", "updatedAt" = CURRENT_TIMESTAMP
+  `);
 }

@@ -47,15 +47,9 @@ interface Draft {
   sortOrder: number | string;
 }
 
-export function CategoriesManager({
-  initial,
-  currentAdminId,
-}: {
-  initial: AdminCategory[];
-  currentAdminId?: string;
-}) {
+export function CategoriesManager({ initial }: { initial: AdminCategory[] }) {
   const router = useRouter();
-  const [categories, setCategories] = useState(initial);
+  const categories = initial;
   const [draft, setDraft] = useState<Draft | null>(null);
   const [deleting, setDeleting] = useState<AdminCategory | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});

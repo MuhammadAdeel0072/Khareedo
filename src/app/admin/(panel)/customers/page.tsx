@@ -1,32 +1,14 @@
 // Admin customers list (FR-45).
-import { getRecentCustomers } from "@/services/reports.service";
-import { db } from "@/lib/db";
+import { adminListCustomerSummaries } from "@/services/users.service";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { formatPKR, formatDate, initials } from "@/lib/utils";
-import { Badge } from "@/components/ui/badge";
-import { STATUS_BADGE_CLASSES } from "@/lib/constants";
 import { ExportButtons } from "@/components/admin/export-buttons";
-import { ShieldCheck } from "lucide-react";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Customers · Admin" };
 
 export default async function AdminCustomersPage() {
-  // Registered customers + their aggregated order stats (real data)
-  const customers = await db.user.findMany({
-    where: { role: "CUSTOMER" },
-    orderBy: { createdAt: "desc" },
-    take: 100,
-    select: {
-      id: true,
-      name: true,
-      email: true,
-      phone: true,
-      createdAt: true,
-      orders: { select: { total: true, status: true } },
-      _count: { select: { orders: true, addresses: true } },
-    },
-  });
+  const customers = await adminListCustomerSummaries();
 
   return (
     <div className="p-4 sm:p-6">
@@ -53,10 +35,7 @@ export default async function AdminCustomersPage() {
             </tr>
           </thead>
           <tbody className="divide-y">
-            {customers.map((c) => {
-              const valid = c.orders.filter((o) => o.status !== "CANCELLED");
-              const spent = valid.reduce((s, o) => s + o.total, 0);
-              return (
+            {customers.map((c) => (
                 <tr key={c.id} className="hover:bg-muted/40">
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-3">
@@ -73,14 +52,13 @@ export default async function AdminCustomersPage() {
                   </td>
                   <td className="px-4 py-3 text-muted-foreground">{c.phone ?? "—"}</td>
                   <td className="px-4 py-3">
-                    <span className="font-semibold">{valid.length}</span>
+                    <span className="font-semibold">{c.orderCount}</span>
                   </td>
-                  <td className="px-4 py-3 font-semibold">{formatPKR(spent)}</td>
-                  <td className="px-4 py-3 text-muted-foreground">{c._count.addresses}</td>
+                  <td className="px-4 py-3 font-semibold">{formatPKR(c.totalSpent)}</td>
+                  <td className="px-4 py-3 text-muted-foreground">{c.addressCount}</td>
                   <td className="px-4 py-3 text-xs text-muted-foreground">{formatDate(c.createdAt)}</td>
                 </tr>
-              );
-            })}
+            ))}
             {customers.length === 0 && (
               <tr>
                 <td colSpan={6} className="px-4 py-12 text-center text-sm text-muted-foreground">

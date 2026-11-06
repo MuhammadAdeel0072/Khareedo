@@ -10,6 +10,7 @@ import { getSettings } from "@/services/settings.service";
 import { reserveCoupon, validateCoupon } from "@/services/promotions.service";
 import { generateOrderReference } from "@/lib/utils";
 import type { PlaceOrderInput } from "@/lib/validation";
+import { withPerformanceTiming } from "@/lib/performance-timing";
 
 export interface QuoteInput {
   deliveryMethod: "STANDARD" | "EXPRESS";
@@ -36,6 +37,10 @@ export interface QuoteResult {
  * Reuses exactly the same pipeline as placeOrder (NFR-30).
  */
 export async function quoteOrder(input: QuoteInput): Promise<QuoteResult> {
+  return withPerformanceTiming("checkout.quote", () => quoteOrderImpl(input));
+}
+
+async function quoteOrderImpl(input: QuoteInput): Promise<QuoteResult> {
   const { getCartDetails } = await import("@/services/cart.service");
   const [settings, cart] = await Promise.all([getSettings(), getCartDetails()]);
   const items = (cart?.items ?? []).filter((i) => !i.outOfStock);
@@ -106,7 +111,7 @@ export interface PlaceOrderResult {
 export interface PlaceOrderError {
   ok: false;
   error: string;
-  code: "EMPTY_CART" | "OUT_OF_STOCK" | "DUPLICATE" | "VALIDATION" | "PAYMENT_DISABLED" | "ERROR";
+  code: "EMPTY_CART" | "OUT_OF_STOCK" | "DUPLICATE" | "VALIDATION" | "PAYMENT_DISABLED" | "AUTHENTICATION_REQUIRED" | "ERROR";
   reference?: string;
 }
 
@@ -120,8 +125,19 @@ export interface PlaceOrderError {
  */
 export async function placeOrder(
   input: PlaceOrderInput,
-  userId?: string
+  userId: string
 ): Promise<PlaceOrderResult | PlaceOrderError> {
+  return withPerformanceTiming("checkout.place", () => placeOrderImpl(input, userId));
+}
+
+async function placeOrderImpl(
+  input: PlaceOrderInput,
+  userId: string
+): Promise<PlaceOrderResult | PlaceOrderError> {
+  if (typeof userId !== "string" || !userId.trim()) {
+    return { ok: false, error: "Please sign in to place an order.", code: "AUTHENTICATION_REQUIRED" };
+  }
+
   const settings = await getSettings();
 
   // Payment method guards (BR-10, D-02): no fake online confirmations
@@ -139,9 +155,14 @@ export async function placeOrder(
   // Idempotency fast-path (FR-27): same key → return original order
   const existing = await db.order.findUnique({
     where: { idempotencyKey: input.idempotencyKey },
-    select: { reference: true, id: true },
+    select: { reference: true, id: true, userId: true, isGuest: true },
   });
-  if (existing) return { ok: true, reference: existing.reference, orderId: existing.id };
+  if (existing) {
+    if (existing.userId !== userId || existing.isGuest) {
+      return { ok: false, error: "This checkout request cannot be reused.", code: "DUPLICATE" };
+    }
+    return { ok: true, reference: existing.reference, orderId: existing.id };
+  }
 
   const { getCartDetails } = await import("@/services/cart.service");
   const cart = await getCartDetails();
@@ -182,7 +203,8 @@ export async function placeOrder(
   const reference = generateOrderReference();
 
   try {
-    const order = await db.$transaction(
+    const order = await withPerformanceTiming("checkout.place.transaction", () =>
+      db.$transaction(
       async (tx) => {
       const couponResult = input.couponCode
         ? await reserveCoupon(tx, input.couponCode, subtotal)
@@ -198,8 +220,8 @@ export async function placeOrder(
         data: {
           reference,
           idempotencyKey: input.idempotencyKey,
-          userId: userId ?? null,
-          isGuest: !userId,
+          userId,
+          isGuest: false,
           customerName: input.customer.name,
           customerEmail: input.customer.email,
           customerPhone: input.customer.phone,
@@ -252,7 +274,7 @@ export async function placeOrder(
       for (const item of purchasable) {
         const res = await tx.inventory.updateMany({
           where: { productId: item.productId, quantity: { gte: item.quantity } },
-          data: { quantity: { decrement: item.quantity } },
+          data: { quantity: { decrement: item.quantity }, version: { increment: 1 } },
         });
         if (res.count === 0) {
           throw new StockConflictError(item.name, item.stock);
@@ -265,11 +287,12 @@ export async function placeOrder(
     // 5s budget aborts queued transactions mid-flight (audit: race test).
     // 15s lets every queued writer finish and take the clean OUT_OF_STOCK path.
     { maxWait: 5_000, timeout: 15_000 }
-  );
+      )
+    );
 
     // Clear the cart after successful placement
     const { clearCart } = await import("@/services/cart.service");
-    await clearCart();
+    await clearCart(cart.id);
 
     return { ok: true, reference: order.reference, orderId: order.id };
   } catch (e) {
@@ -284,9 +307,11 @@ export async function placeOrder(
     if (typeof e === "object" && e !== null && "code" in e && (e as { code?: string }).code === "P2002") {
       const dup = await db.order.findUnique({
         where: { idempotencyKey: input.idempotencyKey },
-        select: { reference: true, id: true },
+        select: { reference: true, id: true, userId: true, isGuest: true },
       });
-      if (dup) return { ok: true, reference: dup.reference, orderId: dup.id };
+      if (dup && dup.userId === userId && !dup.isGuest) {
+        return { ok: true, reference: dup.reference, orderId: dup.id };
+      }
       return { ok: false, error: "Duplicate order submission detected.", code: "DUPLICATE" };
     }
     // Contention (SQLite single-writer / pool starvation under burst):

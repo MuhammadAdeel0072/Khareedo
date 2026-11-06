@@ -2,6 +2,7 @@
 import { Prisma } from "../../generated/postgres-client";
 import { db } from "@/lib/db";
 import { inventoryUpdateSchema } from "@/lib/validation";
+import { ReservationWriteConflict, writeAvailableStock } from "@/services/reservation-writes";
 
 export interface InventoryRow {
   productId: string;
@@ -20,9 +21,12 @@ export async function adminListInventory(q?: string, filter?: string) {
 
   const products = await db.product.findMany({
     where,
-    include: {
-      inventory: true,
+    select: {
+      id: true,
+      name: true,
+      status: true,
       category: { select: { name: true } },
+      inventory: { select: { quantity: true, lowStockThreshold: true } },
     },
     orderBy: [{ createdAt: "desc" }],
     take: 200,
@@ -55,7 +59,17 @@ export async function getLowStockProducts(limit = 6) {
       status: "PUBLISHED",
       inventory: { quantity: { lte: 5 } },
     },
-    include: { inventory: true, images: { take: 1, orderBy: { sortOrder: "asc" } } },
+    select: {
+      id: true,
+      name: true,
+      price: true,
+      inventory: { select: { quantity: true } },
+      images: {
+        take: 1,
+        orderBy: { sortOrder: "asc" },
+        select: { url: true },
+      },
+    },
     orderBy: { inventory: { quantity: "asc" } },
     take: limit,
   });
@@ -79,23 +93,11 @@ export async function adminUpdateInventory(input: {
     return { ok: false as const, error: parsed.error.issues[0]?.message ?? "Invalid stock value" };
   }
   const { productId, quantity, lowStockThreshold } = parsed.data;
-  const existing = await db.inventory.findUnique({ where: { productId } });
-  if (existing) {
-    await db.inventory.update({
-      where: { productId },
-      data: {
-        quantity,
-        ...(lowStockThreshold !== undefined ? { lowStockThreshold } : {}),
-      },
-    });
-  } else {
-    await db.inventory.create({
-      data: {
-        productId,
-        quantity,
-        lowStockThreshold: lowStockThreshold ?? 5,
-      },
-    });
+  try {
+    await db.$transaction(tx => writeAvailableStock(tx, { productId, quantity, lowStockThreshold }));
+  } catch (error) {
+    if (error instanceof ReservationWriteConflict) return { ok: false as const, error: error.message };
+    throw error;
   }
   return { ok: true as const };
 }

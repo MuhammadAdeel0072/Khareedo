@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { withPerformanceTiming } from "@/lib/performance-timing";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Order Details" };
@@ -22,6 +23,7 @@ export default async function OrderDetailPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
+  return withPerformanceTiming("page.order-details", async () => {
   const user = await getSessionUser();
   if (!user) redirect("/login?callbackUrl=/account/orders");
   const { id } = await params;
@@ -169,5 +171,6 @@ export default async function OrderDetailPage({
         <Link href="/account/orders">← Back to My Orders</Link>
       </Button>
     </div>
-  );
+    );
+  });
 }

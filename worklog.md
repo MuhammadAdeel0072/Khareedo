@@ -203,3 +203,32 @@ Work Log:
 
 Stage Summary:
 - All 15 phases executed with real evidence; 2 P0-class defects fixed (auth secret wipe, session-degradation class), 1 P1 (tx contention), 2 P2 (empty-cart quote, test-data pollution), 1 P3 (.env.example); every gate green at close: tsc/eslint/vitest 43/build/Playwright 28/matrix 37/race 7/CWV 12/responsive 48/a11y 4
+
+## 2026-11-03 — Current working-tree performance audit
+
+- Scope: application-code optimizations authorized by the new master prompt; existing edits in 27 tracked files plus performance-timing.ts treated as baseline and preserved. Initial hashes and the two targeted service snapshots are retained outside the repository in the master-performance artifact directory.
+- Baseline production build and TypeScript passed; 44 existing non-database tests passed. No server was listening on port 3000, so the baseline build runs only on audit port 3102.
+- Confirmed: cart details use five SQL queries; the separate badge path uses four, including overlapping product/inventory reads. Category tree/counts use two SQL queries although active children already exist in the shared flat result. Existing production pool limit/TLS/settings are retained.
+- Baseline direct-service warm medians: details 1150.40 ms; count 681.43 ms; category tree 389.61 ms. Baseline production warm medians: cart 1696.03 ms, checkout 1083.17 ms, quote 1641.57 ms. These are current fixtures and include remote transport, not pure PostgreSQL execution.
+- Focused changes in progress: keep original cart-item query/order; batch bounded product/image/inventory reads into parameterized SQL; retain the separate narrow badge/post-add stock-clamped count through one joined read; rebuild category children from already-loaded active rows. No persistent private-data cache, UI, schema, migration, API-handler, auth, pool, or environment edits.
+- PostgreSQL read-only comparisons match every cart/category output hash. First temporary SQLite run exposed invalid fractional test fixtures for integer-price models; fixtures corrected. Native SQLite required an unsandboxed marked temporary directory; isolation checks remained intact. 20 checks passed before the final post-add query refinement. A later parallel browser/test run hit the existing 5-second test timeout; final tests will run without concurrent browser load.
+- No application database writes, db push/reset/migrations/seed scripts, dependency installation, commits, or pushes. Final measurements and verification pending.
+
+### Final verification — 2026-11-03
+
+- Final strategy retains the separate narrow badge read; an intermediate full-detail badge reuse experiment was rejected because badge-only requests loaded extra fields. Cart identity and full details keep their existing request memoization.
+- Refreshed before/after direct medians: details 906.73 → 577.99 ms (5 → 3 SQL); badge 660.05 → 407.00 ms (4 → 2); post-add count read 705.83 → 155.94 ms (3 → 1); category tree 492.97 → 245.73 ms (2 → 1). Every service output hash matches.
+- Production HTTP medians: cart 1696.03 → 1550.69 ms; checkout 1083.17 → 915.73 ms; quote 1641.57 → 922.08 ms. Cart API worsened 899.79 → 1309.54 ms, and the unchanged products control worsened 1327.09 → 2605.91 ms. First homepage request worsened 5453.80 → 6352.49 ms. HTTP variation and cold-start/pool-wait causes remain unresolved; no overall speed or pool-fix claim.
+- New PostgreSQL read plans execute in 0.042–0.186 ms; no index/migration is justified. Five concurrent read-only cart requests returned five identical 200 responses in 2454.65 ms overall; this is not a capacity guarantee.
+- Final checks: production build, full lint, TypeScript, 44 existing non-DB tests, 11 existing integration tests and 12 new marked-temporary-DB regressions pass (67 total). Test initialization used CREATE-only SQLite metadata, no application rows; all marked temporary directories were verified and cleaned up.
+- Browser: four 200 pages, zero page errors/mutations, identical visible content and original four mobile destinations. Cart/checkout/mobile screenshots byte-identical; homepage has only two one-level RGB differences at the search-input border. Strict byte comparison reports that difference; reviewed images show no layout/content change.
+- Full report: docs/PERFORMANCE-ENGINEERING.md. Evidence/helpers/source snapshots: allowed visualization master-performance directory. Source changes limited to cart/categories services, the new opt-in regression file, this work log and the report. Existing unrelated changes preserved; no credentials/environment/pool/auth/schema/dependency/UI/transaction/commit/push changes.
+
+## 2026-11-03 — Product listing/detail follow-up
+
+- Captured a SHA-256 manifest and recoverable copy of the pre-existing worktree changes in session storage; `.env` and `.env.example` were excluded.
+- Reproduced read-only production-build baselines: seven homepage GETs returned 200 (median 2,436 ms, range 1,817–4,624 ms); Edge three-run medians included desktop product-detail TTFB/LCP 2,901/3,024 ms and mobile 1,750/1,904 ms.
+- Removed the separate category-scope lookup from filtered product listing queries and made product metadata reuse the canonical request-cached detail read; narrowed product detail selection to displayed fields.
+- Extended the disposable SQLite runner to select only test files under `tests/unit`; ran 44 unit tests, 13 order/inventory integration tests, and 12 cart/category SQL regressions successfully.
+- TypeScript and full ESLint passed. Existing production build passed before these follow-up edits.
+- Did not run a post-change production build or browser comparison: a shared Next.js process held the `.next` lock, and I left it undisturbed. No latency improvement is claimed pending that comparison. No application database writes, migrations, seeds, or deployments occurred.

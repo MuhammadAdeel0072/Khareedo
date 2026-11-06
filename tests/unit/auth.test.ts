@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// These cases reject invalid tokens before database access. Keep their imports
+// independent of application database configuration and fail if they query it.
+vi.mock("@/lib/db", () => ({ db: {} }));
 import { safeCallbackUrl } from "@/lib/auth-client";
 import {
   hashVerificationToken,

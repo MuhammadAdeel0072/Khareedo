@@ -27,6 +27,7 @@ import {
   getRecentCustomers,
   getRevenueByDay,
   getTopSellingProducts,
+  getPendingOrdersCount,
 } from "@/services/reports.service";
 import { getLowStockProducts } from "@/services/inventory.service";
 import { RevenueChart, StatusDonut } from "@/components/admin/dashboard-charts";
@@ -36,7 +37,7 @@ export const dynamic = "force-dynamic";
 export const metadata = { title: "Admin Dashboard" };
 
 export default async function AdminDashboardPage() {
-  const [stats, statusCounts, revenueByDay, recentOrders, topProducts, lowStock, newCustomers] =
+  const [stats, statusCounts, revenueByDay, recentOrders, topProducts, lowStock, newCustomers, pendingOrders] =
     await Promise.all([
       getDashboardStats(),
       getOrderStatusCounts(),
@@ -45,6 +46,7 @@ export default async function AdminDashboardPage() {
       getTopSellingProducts(5),
       getLowStockProducts(4),
       getRecentCustomers(4),
+      getPendingOrdersCount(),
     ]);
 
   const statusColors: Record<string, string> = {
@@ -301,7 +303,7 @@ export default async function AdminDashboardPage() {
               <p className="text-xs text-muted-foreground">revenue this month</p>
             </div>
             <div>
-              <p className="text-sm font-bold text-amber-600">{stats.pendingOrders} pending</p>
+              <p className="text-sm font-bold text-amber-600">{pendingOrders} pending</p>
               <p className="text-xs text-muted-foreground">orders awaiting confirmation</p>
             </div>
           </CardContent>

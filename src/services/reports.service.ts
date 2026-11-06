@@ -8,7 +8,6 @@ export interface DashboardStats {
   totalCustomers: number;
   totalProducts: number;
   totalRevenue: number;
-  pendingOrders: number;
   lowStockCount: number;
   revenueThisMonth: number;
   ordersThisMonth: number;
@@ -24,46 +23,38 @@ export async function getDashboardStats(): Promise<DashboardStats> {
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
   const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
 
-  const [
-    totalOrders,
-    totalCustomers,
-    totalProducts,
-    revenueAgg,
-    pendingOrders,
-    lowStockCount,
-    revenueThisMonthAgg,
-    ordersThisMonth,
-    ordersLastMonth,
-  ] = await Promise.all([
-    db.order.count({ where: { status: { not: "CANCELLED" } } }),
-    db.user.count({ where: { role: "CUSTOMER" } }),
-    db.product.count({ where: { deletedAt: null } }),
-    db.order.aggregate({
-      where: { status: { not: "CANCELLED" } },
-      _sum: { total: true },
-    }),
-    getPendingOrdersCount(),
-    db.inventory.count({ where: { quantity: { lte: 5 } } }),
-    db.order.aggregate({
-      where: { status: { not: "CANCELLED" }, createdAt: { gte: monthStart } },
-      _sum: { total: true },
-    }),
-    db.order.count({ where: { createdAt: { gte: monthStart } } }),
-    db.order.count({
-      where: { createdAt: { gte: lastMonthStart, lt: monthStart } },
-    }),
-  ]);
+  const [row] = await db.$queryRaw<Array<{
+    totalOrders: bigint;
+    totalCustomers: bigint;
+    totalProducts: bigint;
+    totalRevenue: bigint;
+    lowStockCount: bigint;
+    revenueThisMonth: bigint;
+    ordersThisMonth: bigint;
+    ordersLastMonth: bigint;
+  }>>`
+    SELECT
+      (SELECT COUNT(*) FROM "Order" WHERE "status" <> 'CANCELLED') AS "totalOrders",
+      (SELECT COUNT(*) FROM "User" WHERE "role" = 'CUSTOMER') AS "totalCustomers",
+      (SELECT COUNT(*) FROM "Product" WHERE "deletedAt" IS NULL) AS "totalProducts",
+      (SELECT COALESCE(SUM("total"), 0) FROM "Order" WHERE "status" <> 'CANCELLED') AS "totalRevenue",
+      (SELECT COUNT(*) FROM "Inventory" WHERE "quantity" <= 5) AS "lowStockCount",
+      (SELECT COALESCE(SUM("total"), 0) FROM "Order"
+        WHERE "status" <> 'CANCELLED' AND "createdAt" >= ${monthStart}) AS "revenueThisMonth",
+      (SELECT COUNT(*) FROM "Order" WHERE "createdAt" >= ${monthStart}) AS "ordersThisMonth",
+      (SELECT COUNT(*) FROM "Order"
+        WHERE "createdAt" >= ${lastMonthStart} AND "createdAt" < ${monthStart}) AS "ordersLastMonth"
+  `;
 
   return {
-    totalOrders,
-    totalCustomers,
-    totalProducts,
-    totalRevenue: revenueAgg._sum.total ?? 0,
-    pendingOrders,
-    lowStockCount,
-    revenueThisMonth: revenueThisMonthAgg._sum.total ?? 0,
-    ordersThisMonth,
-    ordersLastMonth,
+    totalOrders: Number(row.totalOrders),
+    totalCustomers: Number(row.totalCustomers),
+    totalProducts: Number(row.totalProducts),
+    totalRevenue: Number(row.totalRevenue),
+    lowStockCount: Number(row.lowStockCount),
+    revenueThisMonth: Number(row.revenueThisMonth),
+    ordersThisMonth: Number(row.ordersThisMonth),
+    ordersLastMonth: Number(row.ordersLastMonth),
   };
 }
 
@@ -81,19 +72,20 @@ export async function getRevenueByDay(days = 30) {
   const since = new Date();
   since.setDate(since.getDate() - days);
   since.setHours(0, 0, 0, 0);
-  const orders = await db.order.findMany({
-    where: { createdAt: { gte: since }, status: { not: "CANCELLED" } },
-    select: { total: true, createdAt: true },
-  });
+  const totals = await db.$queryRaw<Array<{ date: string; total: bigint | number }>>`
+    SELECT SUBSTR(CAST("createdAt" AS TEXT), 1, 10) AS "date", SUM("total") AS "total"
+    FROM "Order"
+    WHERE "createdAt" >= ${since} AND "status" <> 'CANCELLED'
+    GROUP BY SUBSTR(CAST("createdAt" AS TEXT), 1, 10)
+  `;
   const byDay = new Map<string, number>();
   for (let i = 0; i < days; i++) {
     const d = new Date(since);
     d.setDate(since.getDate() + i);
     byDay.set(d.toISOString().slice(0, 10), 0);
   }
-  for (const o of orders) {
-    const key = o.createdAt.toISOString().slice(0, 10);
-    if (byDay.has(key)) byDay.set(key, (byDay.get(key) ?? 0) + o.total);
+  for (const row of totals) {
+    if (byDay.has(row.date)) byDay.set(row.date, Number(row.total));
   }
   return Array.from(byDay.entries()).map(([date, total]) => ({ date, total }));
 }
@@ -119,13 +111,21 @@ export async function getRecentOrders(limit = 6) {
   const rows = await db.order.findMany({
     orderBy: { createdAt: "desc" },
     take: limit,
-    include: { items: { select: { id: true } } },
+    select: {
+      id: true,
+      reference: true,
+      customerName: true,
+      total: true,
+      status: true,
+      createdAt: true,
+      _count: { select: { items: true } },
+    },
   });
   return rows.map((o) => ({
     id: o.id,
     reference: o.reference,
     customerName: o.customerName,
-    itemCount: o.items.length,
+    itemCount: o._count.items,
     total: o.total,
     status: o.status,
     createdAt: o.createdAt,

@@ -6,6 +6,8 @@ import {
   STOCK_RESTORING_STATUSES,
   type OrderStatus,
 } from "@/lib/constants";
+import { withPerformanceTiming } from "@/lib/performance-timing";
+import { ReservationIntegrityError, updateManagedOrderStatus } from "@/services/safepay-reservations.service";
 
 export interface OrderSummaryRow {
   id: string;
@@ -22,6 +24,7 @@ export interface OrderSummaryRow {
 
 /** Customer's own orders — scoped by session userId server-side (FR-26, NFR-11). */
 export async function getUserOrders(userId: string, page = 1, perPage = 10) {
+  return withPerformanceTiming("orders.history", async () => {
   const [rows, total] = await Promise.all([
     db.order.findMany({
       where: { userId },
@@ -49,33 +52,38 @@ export async function getUserOrders(userId: string, page = 1, perPage = 10) {
     page,
     pages: Math.ceil(total / perPage),
   };
+  });
 }
 
 /** Fetch a single order for customer-or-guest viewing. */
 export async function getOrderByReference(reference: string, userId?: string) {
-  const order = await db.order.findUnique({
-    where: { reference },
-    include: {
-      items: true,
-      payments: { orderBy: { createdAt: "desc" }, take: 1 },
-      user: { select: { id: true, email: true } },
-    },
-  });
-  if (!order) return null;
-  // Guests may view via reference (know-only link); customers must own the order (NFR-11)
-  if (order.userId && order.userId !== userId) return null;
-  return order;
-}
+    return withPerformanceTiming("orders.confirmation", async () => {
+      const order = await db.order.findUnique({
+        where: { reference },
+        include: {
+          items: true,
+          payments: { orderBy: { createdAt: "desc" }, take: 1 },
+          user: { select: { id: true, email: true } },
+        },
+      });
+      if (!order) return null;
+      // Guests may view via reference (know-only link); customers must own the order (NFR-11)
+      if (order.userId && order.userId !== userId) return null;
+      return order;
+    });
+  }
 
-export async function getOrderById(id: string) {
-  return db.order.findUnique({
-    where: { id },
-    include: {
-      items: true,
-      payments: { orderBy: { createdAt: "desc" } },
-      user: { select: { id: true, email: true, name: true } },
-    },
-  });
+  export async function getOrderById(id: string) {
+    return withPerformanceTiming("orders.details", () =>
+      db.order.findUnique({
+        where: { id },
+        include: {
+          items: true,
+          payments: { orderBy: { createdAt: "desc" } },
+          user: { select: { id: true, email: true, name: true } },
+        },
+      })
+    );
 }
 
 // ───────────────────────────── Admin (FR-41, BR-11, BR-14) ─────────────────────────────
@@ -84,6 +92,54 @@ export interface AdminOrderFilters {
   status?: string;
   q?: string; // reference or customer name/email/phone
   page?: number;
+}
+
+export async function adminGetOrderById(id: string) {
+  return db.order.findUnique({
+    where: { id },
+    select: {
+      id: true,
+      reference: true,
+      status: true,
+      paymentMethod: true,
+      paymentStatus: true,
+      customerName: true,
+      customerEmail: true,
+      customerPhone: true,
+      isGuest: true,
+      shipFullName: true,
+      shipPhone: true,
+      shipLine1: true,
+      shipLine2: true,
+      shipCity: true,
+      shipProvince: true,
+      shipPostalCode: true,
+      subtotal: true,
+      discountTotal: true,
+      deliveryFee: true,
+      deliveryMethod: true,
+      giftWrapCharge: true,
+      giftWrapSelected: true,
+      giftWrapMessage: true,
+      couponCode: true,
+      total: true,
+      notes: true,
+      createdAt: true,
+      items: {
+        select: {
+          id: true,
+          productName: true,
+          productSlug: true,
+          imageUrl: true,
+          unitPrice: true,
+          quantity: true,
+          lineTotal: true,
+          giftWrap: true,
+        },
+      },
+      user: { select: { email: true } },
+    },
+  });
 }
 
 export async function adminListOrders(filters: AdminOrderFilters) {
@@ -106,7 +162,19 @@ export async function adminListOrders(filters: AdminOrderFilters) {
       orderBy: { createdAt: "desc" },
       skip: (page - 1) * perPage,
       take: perPage,
-      include: { items: { select: { id: true } } },
+      select: {
+        id: true,
+        reference: true,
+        status: true,
+        paymentMethod: true,
+        paymentStatus: true,
+        total: true,
+        createdAt: true,
+        customerName: true,
+        customerEmail: true,
+        isGuest: true,
+        _count: { select: { items: true } },
+      },
     }),
     db.order.count({ where }),
   ]);
@@ -118,7 +186,7 @@ export async function adminListOrders(filters: AdminOrderFilters) {
       paymentMethod: o.paymentMethod,
       paymentStatus: o.paymentStatus,
       total: o.total,
-      itemCount: o.items.length,
+      itemCount: o._count.items,
       createdAt: o.createdAt,
       customerName: o.customerName,
       customerEmail: o.customerEmail,
@@ -151,6 +219,20 @@ export async function adminUpdateOrderStatus(
   });
   if (!order) return { ok: false, error: "Order not found." };
 
+  // Managed payments must never enter the legacy cancellation/restock/mark-failed branch.
+  if (order.paymentFlowVersion !== null) {
+    try {
+      return await db.$transaction(tx => updateManagedOrderStatus(tx, orderId, next, new Date()),
+        { isolationLevel: "Serializable", maxWait: 5_000, timeout: 15_000 });
+    } catch (error) {
+      if (error instanceof ReservationIntegrityError)
+        return { ok: false, error: "Reservation integrity requires review. No changes were committed." };
+      throw error;
+    }
+  }
+  if (order.paymentMethod === "ONLINE" && order.paymentStatus !== "PAID" && next !== "CANCELLED")
+    return { ok: false, error: "Unpaid online orders cannot be fulfilled." };
+
   const current = order.status as OrderStatus;
   const allowed = ORDER_STATUS_TRANSITIONS[current] ?? [];
   if (!allowed.includes(next)) {
@@ -168,8 +250,8 @@ export async function adminUpdateOrderStatus(
           : order.paymentStatus;
 
     const claimed = await tx.order.updateMany({
-      where: { id: orderId, status: current },
-      data: { status: next, paymentStatus },
+      where: { id: orderId, status: current, version: order.version, paymentFlowVersion: null },
+      data: { status: next, paymentStatus, version: { increment: 1 } },
     });
     if (claimed.count !== 1) return false;
 
@@ -181,7 +263,7 @@ export async function adminUpdateOrderStatus(
         if (!item.productId) continue;
         const restored = await tx.inventory.updateMany({
           where: { productId: item.productId },
-          data: { quantity: { increment: item.quantity } },
+          data: { quantity: { increment: item.quantity }, version: { increment: 1 } },
         });
         if (restored.count !== 1) {
           throw new Error(

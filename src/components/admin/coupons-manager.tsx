@@ -57,7 +57,7 @@ function toInputDate(iso: string | null): string {
 
 export function CouponsManager({ initial }: { initial: AdminCoupon[] }) {
   const router = useRouter();
-  const [coupons, setCoupons] = useState(initial);
+  const coupons = initial;
   const [draft, setDraft] = useState<Draft | null>(null);
   const [deleting, setDeleting] = useState<AdminCoupon | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});

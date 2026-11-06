@@ -11,11 +11,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { WhatsAppIcon } from "@/components/layout/whatsapp-icon";
+import { GoogleSignInButton } from "@/components/auth/google-sign-in-button";
 import { safeCallbackUrl } from "@/lib/auth-client";
 
-export function LoginForm() {
+export function LoginForm({ googleEnabled }: { googleEnabled: boolean }) {
   const params = useSearchParams();
   const callbackUrl = safeCallbackUrl(params.get("callbackUrl"));
+  const checkoutRequired = params.get("reason") === "checkout";
   const providerError = params.get("error");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -62,6 +64,11 @@ export function LoginForm() {
         <p className="mt-1 text-sm text-muted-foreground">
           Sign in to your Khareedo account
         </p>
+        {checkoutRequired && (
+          <p className="mt-4 rounded-lg border border-primary/20 bg-brand-50 px-3 py-2 text-sm text-foreground">
+            Sign in is required to place your order. Your cart will be kept, and you can continue checkout after signing in.
+          </p>
+        )}
 
         <form onSubmit={onSubmit} className="mt-6 space-y-4" noValidate>
           <div>
@@ -104,6 +111,29 @@ export function LoginForm() {
             Sign In
           </Button>
         </form>
+
+        {googleEnabled && (
+          <div className="mt-4 space-y-4">
+            <div className="flex items-center gap-3" aria-hidden="true">
+              <span className="h-px flex-1 bg-border" />
+              <span className="text-xs text-muted-foreground">or</span>
+              <span className="h-px flex-1 bg-border" />
+            </div>
+            <GoogleSignInButton
+              callbackUrl={callbackUrl}
+              className="h-11 w-full gap-2"
+              disabled={loading}
+              onStart={() => {
+                setError(null);
+                setLoading(true);
+              }}
+              onError={(message) => {
+                setError(message);
+                setLoading(false);
+              }}
+            />
+          </div>
+        )}
 
         <p className="mt-6 text-center text-sm text-muted-foreground">
           New to Khareedo?{" "}

@@ -5,42 +5,86 @@ import { ArrowRight, Sparkles } from "lucide-react";
 import { HeroCarousel } from "@/components/home/hero-carousel";
 import { ProductCard } from "@/components/products/product-card";
 import { Button } from "@/components/ui/button";
-import { GoogleSignInPrompt } from "@/components/auth/google-sign-in-prompt";
-import { isGoogleEnabled } from "@/lib/auth";
-import { getSettings } from "@/services/settings.service";
 import { getActiveBanners } from "@/services/banners.service";
 import { getCategoriesWithCounts } from "@/services/categories.service";
-import { getFeaturedProducts, getNewArrivals } from "@/services/products.service";
-import { getActivePromotions, describePromotion } from "@/services/promotions.service";
+import { getHomepageCatalog } from "@/services/products.service";
+import { describePromotion } from "@/services/promotions.service";
 import { getWishlistProductIds } from "@/services/wishlist.service";
 import { getSessionUser } from "@/lib/auth-guard";
+import { after } from "next/server";
+import {
+  getPerformanceRequestId,
+  isPerformanceLoggingEnabled,
+  withPerformanceMeasurement,
+} from "@/lib/performance-timing";
 
 export const dynamic = "force-dynamic";
 
 export default async function HomePage() {
-  const [settings, heroBanners, sideBanners, categories, featured, newArrivals, promotions, user] =
-    await Promise.all([
-      getSettings(),
-      getActiveBanners("HERO", 3),
-      getActiveBanners("SIDE", 2),
-      getCategoriesWithCounts(),
-      getFeaturedProducts(8),
-      getNewArrivals(4),
-      getActivePromotions(2),
-      getSessionUser(),
-    ]);
+  const requestId = getPerformanceRequestId();
+  const startedAt = performance.now();
+  if (isPerformanceLoggingEnabled) {
+    after(() => {
+      const durationMs = Math.round(performance.now() - startedAt);
+      if (durationMs >= 1_000) {
+        console.warn(
+          `[performance:slow] operation=homepage.response durationMs=${durationMs}`
+        );
+      }
+    });
+  }
 
-  const wishlistIds = user ? await getWishlistProductIds(user.id) : [];
+  return withPerformanceMeasurement(
+    "homepage.component",
+    () => renderHomePage(requestId),
+    requestId
+  );
+}
+
+async function renderHomePage(requestId: string) {
+  // Wishlist depends only on the verified user, not on the public catalogue reads.
+  const personalization = withPerformanceMeasurement(
+    "homepage.session-user",
+    getSessionUser,
+    requestId
+  ).then(async (user) => ({
+    user,
+    wishlistIds: await withPerformanceMeasurement(
+      "homepage.wishlist",
+      () => user ? getWishlistProductIds(user.id) : [],
+      requestId
+    ),
+  }));
+
+  const [heroBanners, sideBanners, categories, { featured, newArrivals, promotions }, { user, wishlistIds }] =
+    await withPerformanceMeasurement("homepage.data-fetch", () => Promise.all([
+      withPerformanceMeasurement(
+        "homepage.banners.hero",
+        () => getActiveBanners("HERO", 3),
+        requestId
+      ),
+      withPerformanceMeasurement(
+        "homepage.banners.side",
+        () => getActiveBanners("SIDE", 2),
+        requestId
+      ),
+      withPerformanceMeasurement(
+        "homepage.categories",
+        getCategoriesWithCounts,
+        requestId
+      ),
+      withPerformanceMeasurement(
+        "homepage.catalog",
+        getHomepageCatalog,
+        requestId
+      ),
+      personalization,
+    ]), requestId);
 
   return (
     <div className="pb-14">
       {/* Single page-level h1 (hero slide titles are h2 — multiple h1s per page hurt a11y/SEO) */}
       <h1 className="sr-only">Khareedo — Everyday essentials. Better choices.</h1>
-      {isGoogleEnabled() && (
-        <div className="container-khd flex justify-end pt-3">
-          <GoogleSignInPrompt />
-        </div>
-      )}
       {/* Hero + side promos */}
       <section className="container-khd mt-4 lg:mt-6" aria-label="Featured promotions">
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
@@ -154,13 +198,12 @@ export default async function HomePage() {
           </Button>
         </div>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 lg:gap-4">
-          {featured.map((p, i) => (
+          {featured.map((p) => (
             <ProductCard
               key={p.id}
               product={p}
               wished={wishlistIds.includes(p.id)}
               isSignedIn={Boolean(user)}
-              priority={i < 4}
             />
           ))}
         </div>

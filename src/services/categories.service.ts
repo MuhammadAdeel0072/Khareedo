@@ -21,17 +21,6 @@ const storefrontCategorySelect = {
   imageUrl: true,
   parentId: true,
   sortOrder: true,
-  children: {
-    where: { isActive: true },
-    orderBy: { sortOrder: "asc" },
-    select: {
-      id: true,
-      name: true,
-      slug: true,
-      description: true,
-      imageUrl: true,
-    },
-  },
   _count: {
     select: {
       products: { where: { status: "PUBLISHED", deletedAt: null } },
@@ -50,6 +39,21 @@ const getActiveStorefrontCategories = cache(() =>
 /** Parent/leaf tree for storefront navigation (only active categories, FR-07). */
 export async function getCategoryTree(): Promise<CategoryNode[]> {
   const cats = await getActiveStorefrontCategories();
+  const childrenByParent = new Map<string, CategoryNode[]>();
+  // Every active child is already present in this sort-ordered flat result.
+  for (const category of cats) {
+    if (!category.parentId) continue;
+    const children = childrenByParent.get(category.parentId) ?? [];
+    children.push({
+      id: category.id,
+      name: category.name,
+      slug: category.slug,
+      description: category.description,
+      imageUrl: category.imageUrl,
+      children: [],
+    });
+    childrenByParent.set(category.parentId, children);
+  }
   const roots = cats.filter((c) => !c.parentId);
   return roots.map((c) => ({
     id: c.id,
@@ -57,14 +61,7 @@ export async function getCategoryTree(): Promise<CategoryNode[]> {
     slug: c.slug,
     description: c.description,
     imageUrl: c.imageUrl,
-    children: c.children.map((ch) => ({
-      id: ch.id,
-      name: ch.name,
-      slug: ch.slug,
-      description: ch.description,
-      imageUrl: ch.imageUrl,
-      children: [],
-    })),
+    children: childrenByParent.get(c.id) ?? [],
   }));
 }
 
