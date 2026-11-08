@@ -7,6 +7,7 @@ import { createSafepayCheckoutService } from "@/services/safepay-checkout.servic
 import { createSafepayPendingOrderService } from "@/services/safepay-pending-order.service";
 import { createPrismaSafepayStore, type PaymentDatabase } from "@/services/safepay-attempt.store";
 import { loadSafepayConfig, SafepayConfigurationError } from "@/lib/safepay/config";
+import { SAFEPAY_RETURN_STATE_COOKIE } from "@/lib/safepay/return-input";
 import { createSafepayProvider } from "@/lib/safepay/provider";
 import { SAFEPAY_SANDBOX_SESSION_ENABLED } from "@/lib/safepay/readiness";
 import { placeOrderSchema } from "@/lib/validation";
@@ -91,9 +92,17 @@ export async function POST(request: Request) {
     return blocked(session.code, status);
   }
 
+  // The local signed return state travels in a first-party HttpOnly cookie so the
+  // return page never depends on how Safepay merges query params into redirect_url.
+  const stateCookie = [
+    `${SAFEPAY_RETURN_STATE_COOKIE}=${session.state}`,
+    "Path=/", "HttpOnly", "SameSite=Lax", "Max-Age=900",
+    ...(config.siteOrigin.startsWith("https:") ? ["Secure"] : []),
+  ].join("; ");
+
   return Response.json({
     ok: true,
     reference: pending.reference,
     redirectUrl: session.redirect.location(),
-  }, { headers: noStore });
+  }, { headers: { ...noStore, "Set-Cookie": stateCookie } });
 }

@@ -1,9 +1,11 @@
 import Link from "next/link";
+import { cookies } from "next/headers";
 import { getSessionUser } from "@/lib/auth-guard";
 import {
   loadSafepayConfig,
   SafepayConfigurationError,
 } from "@/lib/safepay/config";
+import { parseSafepayReturnContext, SAFEPAY_RETURN_STATE_COOKIE } from "@/lib/safepay/return-input";
 import { db } from "@/lib/db";
 import {
   createSafepayReturnService,
@@ -21,19 +23,20 @@ export default async function SafepayReturnPage({
 }) {
   const params = await searchParams;
   const user = await getSessionUser();
+  const cookieStore = await cookies();
+  const context = parseSafepayReturnContext(params, cookieStore.get(SAFEPAY_RETURN_STATE_COOKIE)?.value);
 
+  // Diagnostics intentionally log sources and presence only — never param values.
   console.info("[Safepay return] REQUEST_CHECK", {
     hasUser: Boolean(user),
-    hasState: typeof params.state === "string",
-    hasTracker: typeof params.tracker === "string",
+    contextKind: context.kind,
+    trackerSource: "trackerSource" in context ? context.trackerSource : null,
+    stateSource: "stateSource" in context ? context.stateSource : null,
   });
+
   let result: SafepayReturnResult = { kind: "invalid" };
 
-  if (
-    user &&
-    typeof params.state === "string" &&
-    typeof params.tracker === "string"
-  ) {
+  if (user && context.kind !== "empty") {
     let config;
     try {
       config = loadSafepayConfig();
@@ -45,61 +48,72 @@ export default async function SafepayReturnPage({
     if (config) {
       const readReturn = createSafepayReturnService(
         config,
-        async ({ orderId, paymentId, trackerToken, owner }) => {
+        async input => {
+          if (input.mode === "tracker") {
+            // Provider echo identifies the attempt; the order binding comes from the
+            // server session, never from browser-supplied identifiers.
+            const payment = await db.payment.findFirst({
+              where: {
+                provider: "SAFEPAY",
+                providerEnvironment: config.environment,
+                merchantAccountRef: config.merchantAccountRef,
+                trackerToken: input.trackerToken,
+                order: {
+                  is: {
+                    userId: input.owner.userId,
+                    isGuest: false,
+                    checkoutOwnerKind: input.owner.kind,
+                    checkoutOwnerHash: input.owner.hash,
+                    paymentFlowVersion: 1,
+                    paymentMethod: "ONLINE",
+                  },
+                },
+              },
+              select: {
+                id: true, status: true, attemptState: true, reconcileStatus: true,
+                paidVerifiedAt: true,
+                order: { select: { reference: true, paymentStatus: true, acceptedPaymentId: true } },
+              },
+            });
+            return payment ? snapshotFrom(payment) : null;
+          }
           const payment = await db.payment.findFirst({
             where: {
-              id: paymentId,
-              orderId,
+              id: input.paymentId,
+              orderId: input.orderId,
               provider: "SAFEPAY",
               providerEnvironment: config.environment,
               merchantAccountRef: config.merchantAccountRef,
-              trackerToken,
+              ...(input.trackerToken ? { trackerToken: input.trackerToken } : {}),
               order: {
                 is: {
-                  userId: owner.userId,
+                  userId: input.owner.userId,
                   isGuest: false,
-                  checkoutOwnerKind: owner.kind,
-                  checkoutOwnerHash: owner.hash,
+                  checkoutOwnerKind: input.owner.kind,
+                  checkoutOwnerHash: input.owner.hash,
                   paymentFlowVersion: 1,
                   paymentMethod: "ONLINE",
                 },
               },
             },
             select: {
-              id: true,
-              status: true,
-              attemptState: true,
-              reconcileStatus: true,
+              id: true, status: true, attemptState: true, reconcileStatus: true,
               paidVerifiedAt: true,
-              order: {
-                select: {
-                  reference: true,
-                  paymentStatus: true,
-                  acceptedPaymentId: true,
-                },
-              },
+              order: { select: { reference: true, paymentStatus: true, acceptedPaymentId: true } },
             },
           });
-          console.info("[Safepay return] DATABASE_LOOKUP", {
-            matched: Boolean(payment),
-          });
-          if (!payment) return null;
-          return {
-            paymentId: payment.id,
-            paymentStatus: payment.status,
-            attemptState: payment.attemptState,
-            reconcileStatus: payment.reconcileStatus,
-            paidVerifiedAt: payment.paidVerifiedAt,
-            orderPaymentStatus: payment.order.paymentStatus,
-            acceptedPaymentId: payment.order.acceptedPaymentId,
-            reference: payment.order.reference,
-          };
+          if (payment) {
+            console.info("[Safepay return] DATABASE_LOOKUP", { matched: true });
+            return snapshotFrom(payment);
+          }
+          console.info("[Safepay return] DATABASE_LOOKUP", { matched: false });
+          return null;
         },
       );
 
       result = await readReturn({
-        state: params.state,
-        tracker: params.tracker,
+        ...(context.kind === "state-only" || context.kind === "full" ? { state: context.state } : {}),
+        ...(context.kind === "tracker-only" || context.kind === "full" ? { tracker: context.trackerToken } : {}),
         owner: { kind: "USER", userId: user.id },
       });
     }
@@ -156,4 +170,26 @@ export default async function SafepayReturnPage({
       </section>
     </main>
   );
+}
+
+type PaymentRow = {
+  id: string;
+  status: string;
+  attemptState: string | null;
+  reconcileStatus: string | null;
+  paidVerifiedAt: Date | null;
+  order: { reference: string; paymentStatus: string; acceptedPaymentId: string | null };
+};
+
+function snapshotFrom(payment: PaymentRow) {
+  return {
+    paymentId: payment.id,
+    paymentStatus: payment.status,
+    attemptState: payment.attemptState,
+    reconcileStatus: payment.reconcileStatus,
+    paidVerifiedAt: payment.paidVerifiedAt,
+    orderPaymentStatus: payment.order.paymentStatus,
+    acceptedPaymentId: payment.order.acceptedPaymentId,
+    reference: payment.order.reference,
+  };
 }

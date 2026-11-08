@@ -6,7 +6,7 @@ import { prepareHostedRedirect, signReturnState, type HostedCheckoutRedirect } f
 import { bindCheckoutOwner, type OwnerBinding, type TrustedCheckoutOwner, type SafepayAttemptStore } from "./safepay-attempt.store";
 
 export type SafepaySessionResult =
-  { kind: "ready"; redirect: HostedCheckoutRedirect } |
+  { kind: "ready"; redirect: HostedCheckoutRedirect; state: string } |
   { kind: "blocked" | "uncertain"; code: string };
 
 // Only consumes an authenticated user's server-priced order with HELD reservations and a READY attempt.
@@ -75,7 +75,9 @@ export function createSafepayCheckoutService(deps: {
         await deps.store.review(claim, "CHECKOUT_NOT_ELIGIBLE");
         return { kind: "blocked", code: "CHECKOUT_NOT_ELIGIBLE" };
       }
-      return { kind: "ready", redirect };
+      // The signed state is also returned so the route can carry it to the return page
+      // in a first-party cookie: provider query appending must never be load-bearing.
+      return { kind: "ready", redirect, state };
     } catch {
       await deps.store.review(claim, "UNEXPECTED_SESSION_ERROR");
       return { kind: "uncertain", code: "SESSION_UNCERTAIN" };

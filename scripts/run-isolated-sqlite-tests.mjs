@@ -171,6 +171,7 @@ function selectTestFiles(arguments_) {
         "tests/unit/integration.payment-relations.test.ts",
         "tests/unit/integration.safepay.test.ts",
         "tests/unit/integration.safepay-reservations.test.ts",
+        "tests/unit/integration.safepay-webhook.test.ts",
         "tests/unit/integration.payment-settlement.test.ts",
       ];
   const unitTestRoot = path.join(projectRoot, "tests", "unit");

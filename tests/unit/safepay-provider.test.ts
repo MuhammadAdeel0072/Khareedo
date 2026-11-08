@@ -3,6 +3,14 @@ import { loadSafepayConfig } from "@/lib/safepay/config";
 import { checkoutRequestSchema, wholePkrToMinor } from "@/lib/safepay/contracts";
 import { AuthenticationToken, createSafepayProvider, type HttpTransport } from "@/lib/safepay/provider";
 import { prepareHostedRedirect, signReturnState, verifyReturnState } from "@/lib/safepay/redirect";
+
+// The session route imports the application database at module scope; these adapter
+// tests never reach persistence, so a stub keeps the suite runnable in fresh clones.
+vi.mock("@/lib/db", () => ({ db: { $transaction: vi.fn() } }));
+// The activated route authenticates before parsing the body; requests outside the
+// Next runtime cannot resolve a session, so the guard is stubbed to "no session".
+vi.mock("@/lib/auth-guard", () => ({ getSessionUser: vi.fn(async () => null) }));
+
 import { POST } from "@/app/api/checkout/safepay/session/route";
 
 const env = {
@@ -234,12 +242,13 @@ describe("local return state and hosted redirection", () => {
       expect(checkoutRequestSchema.safeParse({ ...request, ...change }).success).toBe(false);
     }
   });
-  it("rejects an invalid session request before touching config or HTTP", async () => {
+  it("rejects an unauthenticated session request before touching config or HTTP", async () => {
     const http = vi.spyOn(globalThis, "fetch");
     const result = await POST(new Request("http://localhost/api/checkout/safepay/session", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
     }));
-    expect(result.status).toBe(422);
+    // The activated route authenticates first: no session means 401 and no provider I/O.
+    expect(result.status).toBe(401);
     expect(http).not.toHaveBeenCalled();
   });
 });

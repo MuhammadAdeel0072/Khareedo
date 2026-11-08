@@ -1,8 +1,40 @@
-# Safepay server integration — inactive preparation
+# Safepay server integration — sandbox verification phase
 
-Status: documented server primitives and durable attempt orchestration implemented.
-The public endpoint always returns 503. No setting/environment variable enables it.
-No migration, real provider call, settlement, fulfilment or customer UI activation is part of this phase.
+Status: sandbox hosted sessions, browser return, authenticated evidence adapters, the
+webhook endpoint and the manual maintenance trigger are implemented. Production remains
+code-gated (lib/safepay/readiness.ts). No migration rehearsal, live provider call or
+production activation is part of this phase.
+
+## Verified provider contract (2026-11-08 update)
+
+The following points were confirmed against official Safepay documentation and are now
+implemented (src/lib/safepay/verification.ts, src/app/api/webhooks/safepay/route.ts):
+
+- Post-payment redirect: the hosted checkout appends the tracker to the redirect URL
+  ("Get the `tracker` that is appended to the return URL"). Because the documented
+  example redirect_url is query-free and Safepay appends with a bare `?`, a return URL
+  that already carries `?state=` folds the tracker into the state value
+  (`?state=S?tracker=T`). The return flow therefore no longer depends on provider query
+  merging: the signed state also travels in an HttpOnly first-party cookie
+  (`khd_sfpay_return`, 15 min), and the tracker is accepted from the query param, from
+  the folded form, or from the locally stored tracker binding as a last resort.
+- Webhook authenticity: `X-SFPY-SIGNATURE`, HMAC-SHA512 over the raw request body bytes,
+  hex digest, keyed by the dashboard "Developers > Endpoints" shared secret. A newer
+  platform generation documents HMAC-SHA256 over `timestamp.body` with five X-SFPY-*
+  headers; that contract is deliberately NOT accepted here — unrecognized events or
+  signature profiles are quarantined for review, never processed.
+- Webhook events: JSON envelope `type` ("payment.succeeded"/"payment.failed") plus a
+  `data` payment object; tracker facts are parsed from `data.tracker` (object or token
+  string). Any other type or shape is quarantined with the original encrypted bytes.
+- Success finality: only tracker state `TRACKER_ENDED` classifies as CAPTURE_CONFIRMED.
+  `TRACKER_STARTED` is PENDING; every other state stays UNCERTAIN or REVIEW_REQUIRED.
+  No failure/expiration state is guessed.
+- Status lookup: GET /reporter/api/v1/payments/{tracker} with X-SFPY-MERCHANT-SECRET,
+  used by the reconciliation channel (admin maintenance trigger) for independent
+  server-side verification.
+- Delivery semantics: acknowledge 2xx within the 10-second window after durable
+  storage; 4xx is terminal, 5xx/503 re-enters the provider retry queue. Inbox
+  processing runs out of band, never inside the delivery window.
 
 ## Contract sources and implementation boundary
 
@@ -103,8 +135,10 @@ Return state uses a separate APPLICATION HMAC-SHA256 key, random nonce, bound or
 a local deadline capped at 15 minutes and the reservation/access deadlines. This is NOT a Safepay webhook
 signature and NOT a provider token lifetime. Verification also requires current server-derived owner context.
 
-Return/cancel pages are not implemented yet. They must not trust query tracker/state as proof of payment,
-change settlement status, or grant access based only on the signed state. Redirect replay remains read-only.
+Return/cancel pages are read-only. They never treat query tracker/state as proof of
+payment, never change settlement status, and grant access only after the signed state
+(or the tracker echo plus the server-derived session owner) re-validates the managed
+attempt in the database. Redirect replay remains read-only.
 
 ## Public endpoint and UI prerequisites
 

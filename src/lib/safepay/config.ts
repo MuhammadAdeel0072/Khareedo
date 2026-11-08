@@ -81,3 +81,18 @@ export function isSafepaySandboxSessionConfigured(
     throw error;
   }
 }
+
+// Safepay dashboard "Developers > Endpoints" shared webhook secret. Kept separate from
+// loadSafepayConfig: hosted-session activation and webhook activation are independent phases.
+// Returns null when unset; a set-but-invalid secret throws SafepayConfigurationError.
+export function loadSafepayWebhookSecret(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): string | null {
+  if (env.SAFEPAY_WEBHOOK_SECRET === undefined) return null;
+  try {
+    return opaque(env.SAFEPAY_WEBHOOK_SECRET, 16);
+  } catch (error) {
+    if (error instanceof SafepayConfigurationError) throw error;
+    throw new SafepayConfigurationError();
+  }
+}

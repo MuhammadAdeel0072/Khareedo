@@ -132,9 +132,11 @@ async function providerErrorDetails(response: Response, credentials: string[]) {
 
 // No automatic POST retries. A transport failure does not prove that a tracker was not created.
 export function createSafepayProvider(config: SafepayConfig, transport: HttpTransport = (url, init) => fetch(url, init)) {
-  async function post(path: string, body?: unknown, parseJson = true): Promise<{
-    status: number; ok: boolean; json?: unknown; providerErrorCode?: string; providerMessage?: string;
-  }> {
+  type ProviderReply = {
+    status: number; ok: boolean; json?: unknown; bodyBytes?: Uint8Array;
+    providerErrorCode?: string; providerMessage?: string;
+  };
+  async function send(method: "POST" | "GET", path: string, body?: unknown, parseJson = true): Promise<ProviderReply> {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -144,7 +146,7 @@ export function createSafepayProvider(config: SafepayConfig, transport: HttpTran
         let response: Response;
         try {
           response = await transport(new URL(path, config.apiOrigin), {
-            method: "POST", headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+            method, headers, ...(body === undefined || method === "GET" ? {} : { body: JSON.stringify(body) }),
             signal: controller.signal, redirect: "manual", cache: "no-store", credentials: "omit",
           });
         } catch { throw new TransportFailure("NETWORK_ERROR"); }
@@ -158,7 +160,9 @@ export function createSafepayProvider(config: SafepayConfig, transport: HttpTran
           void response.body?.cancel().catch(() => {});
           return { status: response.status, ok: true };
         }
-        return { status: response.status, ok: true, json: await boundedJson(response) };
+        // Reporter evidence keeps the exact response bytes; the parsed value is only a view.
+        const json = await boundedJson(response);
+        return { status: response.status, ok: true, json, bodyBytes: json === undefined ? undefined : encodeJsonBytes(json) };
       };
       return await Promise.race([
         work(),
@@ -171,6 +175,8 @@ export function createSafepayProvider(config: SafepayConfig, transport: HttpTran
       controller.abort();
     }
   }
+  // Preserves the documented POST contract, including no-retry semantics.
+  const post = (path: string, body?: unknown, parseJson = true) => send("POST", path, body, parseJson);
 
   return Object.freeze({
     async createTracker(input: { orderId: string; paymentId: string; amountMinor: bigint }): Promise<
@@ -237,6 +243,29 @@ export function createSafepayProvider(config: SafepayConfig, transport: HttpTran
         return { kind: "failed", code: error instanceof TransportFailure ? error.code : "INVALID_RESPONSE" };
       }
     },
+    // Documented status lookup: GET /reporter/api/v1/payments/{tracker} (Express Checkout guide,
+    // "Get the outcome"). GET is side-effect-free, so transport failures are "failed", not "uncertain".
+    async fetchTracker(input: { trackerToken: string }): Promise<
+      { kind: "fetched"; status: number; json: unknown; bodyBytes: Uint8Array } | ProviderFailure
+    > {
+      if (!input.trackerToken || input.trackerToken.length > 2048 ||
+          /[\u0000-\u0020\u007f]/.test(input.trackerToken)) {
+        return { kind: "failed", code: "INVALID_REQUEST" };
+      }
+      try {
+        const response = await send("GET", `/reporter/api/v1/payments/${encodeURIComponent(input.trackerToken)}`);
+        if (!response.ok || response.json === undefined || response.bodyBytes === undefined) {
+          return {
+            kind: "failed", code: response.ok ? "INVALID_RESPONSE" : "HTTP_ERROR", httpStatus: response.status,
+            ...(response.providerErrorCode ? { providerErrorCode: response.providerErrorCode } : {}),
+            ...(response.providerMessage ? { providerMessage: response.providerMessage } : {}),
+          };
+        }
+        return { kind: "fetched", status: response.status, json: response.json, bodyBytes: response.bodyBytes };
+      } catch (error) {
+        return { kind: "failed", code: error instanceof TransportFailure ? error.code : "INVALID_RESPONSE" };
+      }
+    },
     async authenticate(): Promise<{ kind: "authenticated"; token: AuthenticationToken } | ProviderFailure> {
       try {
         // Documented merchant-secret POST with no body; no assumed token lifetime.
@@ -256,3 +285,9 @@ export function createSafepayProvider(config: SafepayConfig, transport: HttpTran
   });
 }
 export type SafepayProvider = ReturnType<typeof createSafepayProvider>;
+
+// Canonical re-encoding of a parsed JSON value. Used only where the caller needs byte-stable
+// reconciliation evidence derived from the bounded provider response it just received.
+function encodeJsonBytes(json: unknown): Uint8Array {
+  return Buffer.from(JSON.stringify(json), "utf8");
+}

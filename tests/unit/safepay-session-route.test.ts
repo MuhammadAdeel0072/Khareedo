@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => {
     config: {
       environment: "sandbox",
       merchantAccountRef: "synthetic-account",
+      siteOrigin: "https://shop.example.invalid",
       signReturnState: () => Buffer.from("synthetic-stable-guest-token".padEnd(32, "x")),
     },
     loadSafepayConfig: vi.fn(),
@@ -77,7 +78,8 @@ describe("Safepay checkout session route", () => {
     });
     mocks.checkout.mockImplementation(async () => {
       mocks.events.push("tracker-and-auth");
-      return { kind: "ready", redirect: { location: () => "https://sandbox.api.getsafepay.com/embedded/?tracker=synthetic" } };
+      return { kind: "ready", state: "synthetic-signed-state",
+        redirect: { location: () => "https://sandbox.api.getsafepay.com/embedded/?tracker=synthetic" } };
     });
     mocks.pendingServiceFactory.mockReturnValue(mocks.pendingOrder);
     mocks.checkoutServiceFactory.mockReturnValue(mocks.checkout);
@@ -93,6 +95,9 @@ describe("Safepay checkout session route", () => {
       redirectUrl: "https://sandbox.api.getsafepay.com/embedded/?tracker=synthetic",
     });
     expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(response.headers.get("Set-Cookie")).toBe(
+      "khd_sfpay_return=synthetic-signed-state; Path=/; HttpOnly; SameSite=Lax; Max-Age=900; Secure",
+    );
     expect(mocks.events).toEqual(["pending", "tracker-and-auth"]);
     expect(mocks.pendingOrder).toHaveBeenCalledWith(
       expect.objectContaining({ paymentMethod: "ONLINE", idempotencyKey: body.idempotencyKey }),

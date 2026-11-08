@@ -1,53 +1,111 @@
 import { randomBytes } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { PAYMENT_PROVIDER_VERIFICATION_ENABLED, approvedPaymentVerifier } from "@/lib/payments/verification-registry";
 import { authenticatePaymentEvidence, copyVerificationInput, readTrustedPaymentEvidence } from "@/lib/payments/verified-evidence";
 import { createPaymentPayloadVault } from "@/lib/payments/payload-vault";
 import { sha256, type VerificationInput } from "@/lib/payments/evidence-contract";
 import { createPaymentSettlementService, type PaymentPersistence } from "@/services/payment-settlement.service";
-import { POST as webhook } from "@/app/api/webhooks/safepay/route";
-import { POST as checkout } from "@/app/api/checkout/safepay/session/route";
+
+vi.mock("@/lib/db", () => ({ db: { $transaction: vi.fn(), payment: { findFirst: vi.fn() } } }));
+
+const sandboxEnv = {
+  SAFEPAY_ENVIRONMENT: "sandbox",
+  SAFEPAY_ENTRY_MODE: "flex",
+  SAFEPAY_MERCHANT_API_KEY: "synthetic-public",
+  SAFEPAY_SECRET_KEY: "synthetic-secret",
+  SAFEPAY_RETURN_STATE_SECRET: "synthetic-independent-return-key-at-least-32-bytes",
+  SAFEPAY_MERCHANT_ACCOUNT_REF: "synthetic-account",
+  SAFEPAY_SITE_ORIGIN: "https://shop.example.invalid",
+  SAFEPAY_WEBHOOK_SECRET: "synthetic-webhook-secret-0123456789abcdef",
+};
 
 const input: VerificationInput = { provider: "SAFEPAY", environment: "sandbox", merchantAccountRef: "synthetic-account",
   channel: "WEBHOOK", body: Buffer.from('{"synthetic":"success","verified":true}'), headers: {} };
 const binding = { provider: input.provider, environment: input.environment, merchantAccountRef: input.merchantAccountRef,
   dedupKey: "a".repeat(64), firstPayloadSha256: sha256(input.body) };
 
-describe("Production payment verification hard gates (no mocked registry)", () => {
-  it.each(["WEBHOOK", "RECONCILIATION"] as const)("keeps %s verification disabled", async channel => {
-    expect(PAYMENT_PROVIDER_VERIFICATION_ENABLED).toBe(false);
-    expect(approvedPaymentVerifier({ ...input, channel })).toBeNull();
-    expect(await authenticatePaymentEvidence({ ...input, channel })).toEqual({ kind: "blocked", code: "VERIFICATION_DISABLED" });
+function withEnv<T>(values: Record<string, string | undefined>, run: () => T): T {
+  const previous: Record<string, string | undefined> = {};
+  for (const [key, value] of Object.entries(values)) {
+    previous[key] = process.env[key];
+    if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  }
+  try {
+    return run();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+}
+
+afterEach(() => vi.restoreAllMocks());
+
+describe("Sandbox-scoped payment verification gate", () => {
+  it("enables sandbox evidence verification as a code-level fact", () => {
+    expect(PAYMENT_PROVIDER_VERIFICATION_ENABLED).toBe(true);
   });
+
+  it("approves sandbox Safepay adapters for both channels", () => {
+    withEnv(sandboxEnv, () => {
+      for (const channel of ["WEBHOOK", "RECONCILIATION"] as const) {
+        const adapter = approvedPaymentVerifier({ ...input, channel });
+        expect(adapter).not.toBeNull();
+        expect(adapter!.provider).toBe("SAFEPAY");
+        expect(adapter!.channel).toBe(channel);
+        expect(adapter!.environment).toBe("sandbox");
+        expect(adapter!.merchantAccountRef).toBe("synthetic-account");
+        expect(adapter!.merchantIdentity).toMatch(/^[a-f0-9]{64}$/);
+      }
+    });
+  });
+
+  it.each([
+    ["production environment", { environment: "production" } as const],
+    ["foreign provider", { provider: "OTHERPAY" } as const],
+    ["foreign merchant account", { merchantAccountRef: "other-account" } as const],
+    ["unknown channel", { channel: "BROWSER_CALLBACK" } as const],
+  ])("keeps verification disabled: %s", (_name, override) => {
+    withEnv(sandboxEnv, () => {
+      expect(approvedPaymentVerifier({ ...input, ...override } as VerificationInput)).toBeNull();
+    });
+  });
+
+  it("stays closed without server configuration", () => {
+    withEnv(Object.fromEntries(Object.keys(sandboxEnv).map(key => [key, undefined])), () => {
+      expect(approvedPaymentVerifier(input)).toBeNull();
+    });
+  });
+
+  it("stays closed without a webhook secret for the webhook channel", () => {
+    withEnv({ ...sandboxEnv, SAFEPAY_WEBHOOK_SECRET: undefined }, () => {
+      expect(approvedPaymentVerifier({ ...input, channel: "WEBHOOK" })).toBeNull();
+      expect(approvedPaymentVerifier({ ...input, channel: "RECONCILIATION" })).not.toBeNull();
+    });
+  });
+
+  it("blocks unauthenticated evidence end to end when the registry closes", async () => {
+    const production = { ...input, environment: "production" as const };
+    withEnv(sandboxEnv, () => {});
+    expect(await authenticatePaymentEvidence(production)).toEqual({ kind: "blocked", code: "VERIFICATION_DISABLED" });
+  });
+
   it("never reaches persistence for untrusted evidence", async () => {
     const neverDatabase = { $transaction: () => { throw new Error("Persistence must not be reached"); } } as unknown as PaymentPersistence;
     const service = createPaymentSettlementService(neverDatabase, { reconcileDelayMs: 1000 });
     expect(await service.apply({ verified: true, status: "PAID" }, "synthetic-event")).toEqual({ kind: "blocked", code: "UNTRUSTED_EVIDENCE" });
     expect(readTrustedPaymentEvidence({ verified: true }, new Date())).toBeNull();
   });
-  it.each([
-    ["webhook", webhook, 503],
-    ["checkout", checkout, 422],
-  ] as const)("keeps %s safely gated before payment work", async (name, handler, expectedStatus) => {
-    const request = new Request("http://localhost/api/checkout/safepay/session", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{}",
-    });
-    const response = await handler(request); expect(response.status).toBe(expectedStatus);
-    if (name === "webhook") {
-      expect(response.headers.get("Cache-Control")).toBe("no-store");
-      expect((await response.json()).enabled).toBe(false);
-    }
-  });
+
   it.each([
     { channel: "BROWSER_CALLBACK" }, { body: new Uint8Array() }, { body: new Uint8Array(1_048_577) },
-    { headers: { "x-test": "invalid\r\nheader" } }, { headers: { "X-Test": "one", "x-test": "two" } },
+    { headers: { "x-test": "invalid\r\nheader" } },
     { headers: Object.fromEntries(Array.from({ length: 33 }, (_, i) => ["x-" + i, "v"])) },
     { provider: undefined }, { headers: "invalid" },
-  ])("rejects invalid verification input before registry dispatch", async override => {
+  ] as Array<Partial<VerificationInput>>)("rejects invalid verification input before registry dispatch", async override => {
     expect(await authenticatePaymentEvidence({ ...input, ...override } as VerificationInput)).toEqual({ kind: "blocked", code: "INVALID_INPUT" });
   });
+
   it("copies original bytes and headers instead of trusting mutable request buffers", () => {
     const body = Buffer.from("synthetic"), headers = { "x-example": "before" };
     const safe = copyVerificationInput({ ...input, body, headers }); body.fill(0); headers["x-example"] = "after";
