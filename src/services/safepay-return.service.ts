@@ -19,7 +19,8 @@ export type SafepayReturnSnapshot = Readonly<{
 
 export type SafepayReturnResult =
   | { kind: "invalid" }
-  | { kind: "success" | "pending" | "failure"; reference: string };
+  | { kind: "success" | "failure"; reference: string }
+  | { kind: "pending"; reference: string; paymentId: string };
 
 export type SafepayReturnLookupInput =
   | {
@@ -121,6 +122,6 @@ export function createSafepayReturnService(
     }
 
     console.info("[Safepay return] RETURN_PENDING");
-    return { kind: "pending", reference: snapshot.reference };
+    return { kind: "pending", reference: snapshot.reference, paymentId: snapshot.paymentId };
   };
 }

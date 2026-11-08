@@ -190,3 +190,43 @@ TypeScript and scoped ESLint passed. HTTP was mocked and JavaScript network acce
 Only fresh, marked disposable SQLite test databases were initialized; no migration was applied and no
 production/Supabase/Safepay API was contacted. PostgreSQL execution and role checks remain unverified.
 
+
+## Verification loop completion (2026-11-09 update)
+
+Audit finding: settlement evidence previously had only two entry points — Safepay webhooks
+(impossible on origins Safepay cannot reach, e.g. localhost/preview) and the admin maintenance
+sweep (never scheduled). A customer who paid at the hosted checkout and returned to the store
+stayed PENDING forever; the admin fulfilment gate correctly answered 409. Three connected
+additions close that gap without weakening any check:
+
+1. **Targeted verification** (`src/services/payment-verification.service.ts`): ONE server-initiated
+   reporter lookup (`GET /reporter/api/v1/payments/{tracker}`, merchant secret) for a single
+   payment whose id was resolved from a trusted, owner-validated context. The tracker token always
+   comes from the database; the exact response bytes flow through the approved reconciliation
+   adapter → inbox → settlement pipeline (identity, amounts, currency, environment and reservation
+   integrity are re-validated inside the settlement transaction). Transport failures only schedule
+   capped exponential retry backoff (60s → 15min) on scheduling fields — financial state is never
+   touched and no failure is ever invented from a timeout.
+2. **Return-page trigger**: the read-only return page still never trusts the browser redirect, but
+   a PENDING snapshot now triggers exactly one targeted verification for that owner's payment and
+   re-reads the snapshot, so a successful sandbox payment shows "Payment verified" on return.
+3. **Scheduled maintenance worker** (`src/instrumentation.ts` → `payment-maintenance-worker.service.ts`):
+   the same bounded, idempotent actions as the admin maintenance endpoint (reservation expiry,
+   webhook-inbox processing, reconciliation sweep) run every ~60s in-process, single-flight,
+   unref'd timer, batches 10/10/5. Opt out with `PAYMENT_MAINTENANCE_WORKER=off` (serverless
+   deploys should schedule `POST /api/admin/payments/maintenance` externally instead).
+   The admin endpoint gained a scoped `verify_order_payment` action (admin session mandatory,
+   optional `x-khd-maintenance-token`, rate-limited) — a re-check, never a manual status override.
+4. **Admin diagnostics** (read-only): the admin order detail page shows the managed payment's
+   attempt/reconciliation/verification state, review reason, reservation and coupon states, inbox
+   event processing states and recent evidence — no tracker tokens, no signatures, no payload
+   bytes, no secrets — plus the guarded "Re-check payment with Safepay" action.
+
+`loadSafepayApiOnlyConfig` derives an API-only config (non-routable placeholder origin) for
+background sweeps; the reconciliation channel never builds customer-facing URLs. New tests:
+`tests/unit/payment-verification.test.ts`, `tests/unit/payment-maintenance-worker.test.ts`,
+rewritten `tests/unit/admin-payments-maintenance.test.ts` (route semantics against the shared
+runner) and `tests/unit/integration.safepay-return-verify.test.ts` (real disposable persistence:
+pending → targeted verify → settled → reservations consumed → coupon committed → the previously
+409 fulfilment gate allows processing; replay is a no-op; pending provider states stay pending with
+one scheduled retry; transport failures schedule capped backoff without inventing finality).

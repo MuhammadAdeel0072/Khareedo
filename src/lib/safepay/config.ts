@@ -87,6 +87,17 @@ export function isSafepaySandboxSessionConfigured(
   }
 }
 
+// Background sweeps (reconciliation retries) run without a request, so no visitor
+// origin exists to derive. The reconciliation channel only calls the reporter API and
+// never builds customer-facing URLs, so a non-routable placeholder origin keeps the
+// same validation while making it structurally impossible to hand this config to a
+// redirect/return builder and produce a usable link.
+export function loadSafepayApiOnlyConfig(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): SafepayConfig {
+  return loadSafepayConfig(env, "https://api-only-sweep.invalid/");
+}
+
 // Safepay dashboard "Developers > Endpoints" shared webhook secret. Kept separate from
 // loadSafepayConfig: hosted-session activation and webhook activation are independent phases.
 // Returns null when unset; a set-but-invalid secret throws SafepayConfigurationError.
