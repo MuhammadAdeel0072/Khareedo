@@ -1,7 +1,10 @@
 import "server-only";
 import type { SafepayConfig } from "@/lib/safepay/config";
 import { verifyReturnStateForOwner } from "@/lib/safepay/redirect";
-import { bindCheckoutOwner, type TrustedCheckoutOwner } from "./safepay-attempt.store";
+import {
+  bindCheckoutOwner,
+  type TrustedCheckoutOwner,
+} from "./safepay-attempt.store";
 
 export type SafepayReturnSnapshot = Readonly<{
   paymentId: string;
@@ -33,19 +36,38 @@ export function createSafepayReturnService(
     owner: TrustedCheckoutOwner;
     now?: number;
   }): Promise<SafepayReturnResult> => {
-    if (typeof input.state !== "string" || typeof input.tracker !== "string" ||
-        input.tracker.length < 1 || input.tracker.length > 2048 ||
-        /[^\x21-\x7e]/.test(input.tracker)) return { kind: "invalid" };
+    if (
+      typeof input.state !== "string" ||
+      typeof input.tracker !== "string" ||
+      input.tracker.length < 1 ||
+      input.tracker.length > 2048 ||
+      /[^\x21-\x7e]/.test(input.tracker)
+    ) {
+      console.warn("[Safepay return] RETURN_INPUT_REJECTED");
+      return { kind: "invalid" };
+    }
 
     let owner: ReturnType<typeof bindCheckoutOwner>;
     try {
       owner = bindCheckoutOwner(input.owner);
     } catch {
+      console.warn("[Safepay return] RETURN_OWNER_REJECTED");
       return { kind: "invalid" };
     }
 
-    const claims = verifyReturnStateForOwner(config, input.state, owner.hash, input.now);
-    if (!claims) return { kind: "invalid" };
+    const claims = verifyReturnStateForOwner(
+      config,
+      input.state,
+      owner.hash,
+      input.now,
+    );
+
+    if (!claims) {
+      console.warn("[Safepay return] RETURN_STATE_REJECTED");
+      return { kind: "invalid" };
+    }
+
+    console.info("[Safepay return] RETURN_STATE_VERIFIED");
 
     const snapshot = await lookup({
       orderId: claims.orderId,
@@ -53,19 +75,35 @@ export function createSafepayReturnService(
       trackerToken: input.tracker,
       owner,
     });
-    if (!snapshot || snapshot.paymentId !== claims.paymentId) return { kind: "invalid" };
 
-    if (snapshot.paymentStatus === "PAID" && snapshot.orderPaymentStatus === "PAID" &&
-        snapshot.acceptedPaymentId === snapshot.paymentId && snapshot.paidVerifiedAt !== null &&
-        snapshot.reconcileStatus === "VERIFIED" && snapshot.attemptState === "SETTLED") {
+    if (!snapshot || snapshot.paymentId !== claims.paymentId) {
+      console.warn("[Safepay return] PAYMENT_LOOKUP_MISS");
+      return { kind: "invalid" };
+    }
+
+    console.info("[Safepay return] PAYMENT_LOOKUP_MATCHED");
+
+    if (
+      snapshot.paymentStatus === "PAID" &&
+      snapshot.orderPaymentStatus === "PAID" &&
+      snapshot.acceptedPaymentId === snapshot.paymentId &&
+      snapshot.paidVerifiedAt !== null &&
+      snapshot.reconcileStatus === "VERIFIED" &&
+      snapshot.attemptState === "SETTLED"
+    ) {
       return { kind: "success", reference: snapshot.reference };
     }
 
-    if (snapshot.paymentStatus === "FAILED" && snapshot.orderPaymentStatus === "FAILED" &&
-        snapshot.reconcileStatus === "FAILED" && snapshot.attemptState === "FAILED") {
+    if (
+      snapshot.paymentStatus === "FAILED" &&
+      snapshot.orderPaymentStatus === "FAILED" &&
+      snapshot.reconcileStatus === "FAILED" &&
+      snapshot.attemptState === "FAILED"
+    ) {
       return { kind: "failure", reference: snapshot.reference };
     }
 
+    console.info("[Safepay return] RETURN_PENDING");
     return { kind: "pending", reference: snapshot.reference };
   };
 }
