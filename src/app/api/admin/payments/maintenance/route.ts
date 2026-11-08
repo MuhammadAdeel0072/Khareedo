@@ -11,6 +11,7 @@ import { requireAdmin, AuthError } from "@/lib/auth-guard";
 import { rateLimit } from "@/lib/rate-limit";
 import { parseBody, jsonOk, handleRoute } from "@/lib/api";
 import { loadSafepayConfig, SafepayConfigurationError } from "@/lib/safepay/config";
+import { requestOrigin } from "@/lib/request-origin";
 import { createSafepayProvider } from "@/lib/safepay/provider";
 import { createSafepayReservationService } from "@/services/safepay-reservations.service";
 import { createPaymentWebhookService } from "@/services/payment-webhook.service";
@@ -90,7 +91,7 @@ export async function POST(request: Request) {
     // endpoint for every due managed attempt, then authenticated-observation processing.
     let config;
     try {
-      config = loadSafepayConfig();
+      config = loadSafepayConfig(process.env, requestOrigin(request.headers) ?? undefined);
     } catch (error) {
       if (!(error instanceof SafepayConfigurationError)) throw error;
       return Response.json({ ok: false, code: "SAFEPAY_CONFIGURATION_UNAVAILABLE",

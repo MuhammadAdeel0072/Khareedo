@@ -56,6 +56,26 @@ describe("server-only Safepay configuration", () => {
   ])("rejects unsafe configuration %#", (change) => expect(() => loadSafepayConfig({ ...env, ...change })).toThrow());
 });
 
+describe("request-scoped site origin override", () => {
+  it("prefers the request-derived origin over the pinned environment value", () => {
+    const config = loadSafepayConfig(env, "https://preview-abc.space-z.ai");
+    expect(config.siteOrigin).toBe("https://preview-abc.space-z.ai");
+  });
+  it("substitutes the derived origin when the environment value is absent", () => {
+    const noOrigin = { ...env, SAFEPAY_SITE_ORIGIN: undefined };
+    expect(loadSafepayConfig(noOrigin, "https://preview-abc.space-z.ai").siteOrigin)
+      .toBe("https://preview-abc.space-z.ai");
+    expect(loadSafepayConfig(noOrigin, "http://localhost:3000").siteOrigin)
+      .toBe("http://localhost:3000");
+  });
+  it("applies the same origin safety rules to overrides as to the environment value", () => {
+    const noOrigin = { ...env, SAFEPAY_SITE_ORIGIN: undefined };
+    expect(() => loadSafepayConfig(noOrigin, "http://evil.example.invalid")).toThrow();
+    expect(() => loadSafepayConfig(noOrigin, "https://shop.example.invalid/path")).toThrow();
+    expect(() => loadSafepayConfig(noOrigin)).toThrow();
+  });
+});
+
 describe("verified Safepay POST adapter", () => {
   it("creates a tracker using the merchant secret, explicit mode and PKR paisas", async () => {
     const http = vi.fn<HttpTransport>(async () => response(tracker()));

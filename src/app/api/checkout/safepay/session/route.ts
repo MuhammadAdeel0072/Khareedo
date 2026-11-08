@@ -7,6 +7,7 @@ import { createSafepayCheckoutService } from "@/services/safepay-checkout.servic
 import { createSafepayPendingOrderService } from "@/services/safepay-pending-order.service";
 import { createPrismaSafepayStore, type PaymentDatabase } from "@/services/safepay-attempt.store";
 import { loadSafepayConfig, SafepayConfigurationError } from "@/lib/safepay/config";
+import { requestOrigin } from "@/lib/request-origin";
 import { SAFEPAY_RETURN_STATE_COOKIE } from "@/lib/safepay/return-input";
 import { createSafepayProvider } from "@/lib/safepay/provider";
 import { SAFEPAY_SANDBOX_SESSION_ENABLED } from "@/lib/safepay/readiness";
@@ -43,7 +44,9 @@ export async function POST(request: Request) {
 
   let config;
   try {
-    config = loadSafepayConfig();
+    // Origin follows the visitor's host (proxy-aware) so hosted-checkout return
+    // URLs land back on the same origin the checkout started from.
+    config = loadSafepayConfig(process.env, requestOrigin(request.headers) ?? undefined);
   } catch (error) {
     if (error instanceof SafepayConfigurationError) return blocked("SAFEPAY_CONFIGURATION_UNAVAILABLE", 503);
     throw error;

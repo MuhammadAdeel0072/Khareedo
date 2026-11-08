@@ -268,3 +268,17 @@ Work Log:
 - E2E rows were removed FK-safely afterwards (order payment pointers nulled first); inventory restored to 25; the pre-existing quarantined dev payments were untouched.
 - Merged fix/safepay-verification into main by fast-forward (c6d59cd..9606b08) and pushed; production build rebuilt from main; storefront verified in a real browser (renders, zero page/console errors).
 - Honest limits: Safepay cannot deliver webhooks to localhost, so webhook delivery was simulated with a genuine signature locally; reconciliation channel covers live verification until a public URL is configured in the Safepay dashboard. Production activation remains code-gated by design.
+## Task ID: 12 (Google sign-in dead click on preview — origin pinning root cause)
+Agent: Z.ai main agent
+Task: "when i sign in continue with google, it nothing show after clicking the continue with google button"
+
+Work Log:
+- Reproduced on localhost:3000 with the merchant's real .env: the button DOES navigate to Google's account chooser (client registered redirect_uri http://localhost:3000/api/auth/callback/google is accepted). So the button and provider wiring are correct.
+- Root cause of the user's symptom: the app was accessed through the platform preview proxy while NEXTAUTH_URL pinned every auth URL to http://localhost:3000. NextAuth v4 detectOrigin() ignores x-forwarded-host unless VERCEL or AUTH_TRUST_HOST is set, so Google always sent the user back to localhost:3000 on their own machine — a dead end ("nothing shows").
+- Same bug class found in Safepay: SAFEPAY_SITE_ORIGIN pinned hosted-checkout return/cancel URLs to localhost, which would break checkout on any non-localhost origin.
+- Fixes: (1) .env — NEXTAUTH_URL and SAFEPAY_SITE_ORIGIN unset locally, AUTH_TRUST_HOST=true added so NextAuth derives the origin per request; (2) new src/lib/request-origin.ts derives the public origin from x-forwarded-host/proto with strict validation; (3) loadSafepayConfig(env, siteOriginOverride) — request-derived origin wins over the (now optional) env value, identical safety rules applied (HTTPS anywhere, http+localhost sandbox-only); (4) session/webhook/maintenance routes and the return page thread the derived origin; (5) .env.example documents the optionality and the Google Console callback registration requirement; (6) scripts/start-preview.sh resolves its repo root from its own location instead of a hardcoded sandbox path.
+- Verification: dev server — direct access yields http://localhost:3000, forwarded headers yield https://<preview-host>; full csrf→signin/google POST returns redirect_uri of the forwarded origin; browser click on localhost still reaches Google's chooser; tsc clean; eslint clean on changed files; unit 64/64 in touched suites (new request-origin + config override tests); DB suite 196/196 (one transient SQLite socket-timeout flake passed on re-run); production build PASS.
+- User-side requirement outside the repo: add https://<preview-host>/api/auth/callback/google to the Google Cloud OAuth client's Authorized redirect URIs before Google sign-in can complete on the preview origin.
+
+Stage Summary:
+- Authentication and payment return origins are now fully request-derived (proxy-aware) with explicit env pinning still supported for fixed production domains; Google sign-in works on localhost and can work on the preview once the origin is registered in Google Cloud Console.

@@ -1,4 +1,5 @@
 import { loadSafepayConfig, loadSafepayWebhookSecret, SafepayConfigurationError } from "@/lib/safepay/config";
+import { requestOrigin } from "@/lib/request-origin";
 import { createPaymentWebhookService } from "@/services/payment-webhook.service";
 import { createPaymentPayloadVault } from "@/lib/payments/payload-vault";
 import { loadPaymentPayloadVaultKeys } from "@/lib/payments/vault-env";
@@ -28,7 +29,7 @@ const retainedRequestHeaders = ["content-type", "user-agent", "x-sfpy-signature"
 export async function POST(request: Request) {
   let config, webhookSecret: string;
   try {
-    config = loadSafepayConfig();
+    config = loadSafepayConfig(process.env, requestOrigin(request.headers) ?? undefined);
     const secret = loadSafepayWebhookSecret();
     if (!secret) throw new SafepayConfigurationError();
     webhookSecret = secret;

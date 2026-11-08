@@ -1,11 +1,12 @@
 import Link from "next/link";
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { getSessionUser } from "@/lib/auth-guard";
 import {
   loadSafepayConfig,
   SafepayConfigurationError,
 } from "@/lib/safepay/config";
 import { parseSafepayReturnContext, SAFEPAY_RETURN_STATE_COOKIE } from "@/lib/safepay/return-input";
+import { requestOrigin } from "@/lib/request-origin";
 import { db } from "@/lib/db";
 import {
   createSafepayReturnService,
@@ -39,7 +40,7 @@ export default async function SafepayReturnPage({
   if (user && context.kind !== "empty") {
     let config;
     try {
-      config = loadSafepayConfig();
+      config = loadSafepayConfig(process.env, requestOrigin(await headers()) ?? undefined);
     } catch (error) {
       console.warn("[Safepay return] CONFIGURATION_UNAVAILABLE");
       if (!(error instanceof SafepayConfigurationError)) throw error;

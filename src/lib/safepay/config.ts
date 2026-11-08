@@ -38,7 +38,12 @@ function opaque(value: string | undefined, min = 1, max = 4096): string {
 }
 
 // Lazy loading only. Never serialize env, validation inputs, credentials or request headers.
-export function loadSafepayConfig(env: Readonly<Record<string, string | undefined>> = process.env): SafepayConfig {
+// siteOriginOverride (request-scoped, e.g. derived from proxy headers) wins over the
+// SAFEPAY_SITE_ORIGIN env var, which remains for fixed-domain production deploys.
+export function loadSafepayConfig(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  siteOriginOverride?: string,
+): SafepayConfig {
   const environment = env.SAFEPAY_ENVIRONMENT;
   const entryMode = env.SAFEPAY_ENTRY_MODE;
   if ((environment !== "sandbox" && environment !== "production") || (entryMode !== "flex" && entryMode !== "raw")) {
@@ -50,7 +55,7 @@ export function loadSafepayConfig(env: Readonly<Record<string, string | undefine
   const merchantAccountRef = opaque(env.SAFEPAY_MERCHANT_ACCOUNT_REF, 1, 128);
   if (stateSecret === secretKey || stateSecret === publicKey) throw new SafepayConfigurationError();
   let site: URL;
-  try { site = new URL(env.SAFEPAY_SITE_ORIGIN ?? ""); } catch { throw new SafepayConfigurationError(); }
+  try { site = new URL(siteOriginOverride ?? env.SAFEPAY_SITE_ORIGIN ?? ""); } catch { throw new SafepayConfigurationError(); }
   if (site.username || site.password || site.search || site.hash || site.pathname !== "/" ||
       (site.protocol !== "https:" && !(environment === "sandbox" && site.protocol === "http:" &&
         (site.hostname === "localhost" || site.hostname === "127.0.0.1")))) {
