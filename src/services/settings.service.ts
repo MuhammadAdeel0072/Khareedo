@@ -1,5 +1,6 @@
 // Typed store settings service — DB-driven configuration (FR-44, FR-51, FR-32).
 import { cache } from "react";
+import { revalidateTag, unstable_cache } from "next/cache";
 import { db } from "@/lib/db";
 import { Prisma } from "../../generated/postgres-client";
 
@@ -77,13 +78,36 @@ function parse(raw: Record<string, string>): StoreSettings {
   };
 }
 
-/** Read all settings. */
+/** Read all settings. Always-fresh variant — REQUIRED for checkout, pricing
+ *  and payment paths where a stale fee/flag must never be used (BR-06, BR-10). */
 export const getSettings = cache(async (): Promise<StoreSettings> => {
   const rows = await db.storeSetting.findMany();
   const raw: Record<string, string> = {};
   for (const r of rows) raw[r.key] = r.value;
   return parse(raw);
 });
+
+const SETTINGS_CACHE_TAG = "store-settings";
+
+// Display-only settings (layout header/footer, contact, PDP WhatsApp link,
+// order confirmation). Public, admin-authored content — same trust level as
+// banners. Invalidated synchronously by saveSettings; checkout/pricing paths
+// intentionally keep the always-fresh getSettings() above.
+const readSettingsCached = unstable_cache(
+  async (): Promise<StoreSettings> => {
+    const rows = await db.storeSetting.findMany();
+    const raw: Record<string, string> = {};
+    for (const r of rows) raw[r.key] = r.value;
+    return parse(raw);
+  },
+  ["store-settings"],
+  { revalidate: 300, tags: [SETTINGS_CACHE_TAG] }
+);
+
+/** Cached settings read for display-only storefront paths. */
+export async function getCachedSettings(): Promise<StoreSettings> {
+  return readSettingsCached();
+}
 
 /** Upsert a batch of settings (admin only — guarded at route level, BR-14). */
 export async function saveSettings(
@@ -101,4 +125,5 @@ export async function saveSettings(
     ON CONFLICT ("key") DO UPDATE
     SET "value" = EXCLUDED."value", "updatedAt" = CURRENT_TIMESTAMP
   `);
+  revalidateTag(SETTINGS_CACHE_TAG, { expire: 0 });
 }

@@ -4,9 +4,8 @@ import { z } from "zod";
 import {
   getCartDetails,
   addToCart,
-  updateCartItem,
   removeCartItem,
-  setCartItemGiftWrap,
+  applyCartItemUpdate,
 } from "@/services/cart.service";
 import { parseBody, jsonError, jsonOk, handleRoute } from "@/lib/api";
 import { withPerformanceTiming } from "@/lib/performance-timing";
@@ -61,14 +60,8 @@ export async function PATCH(request: Request) {
     if (parsed.error) return parsed.error;
     const { itemId, quantity, giftWrap } = parsed.data;
     try {
-      // Wrap toggles are per-item; quantity updates unchanged. Both can be sent together.
-      let details = null as Awaited<ReturnType<typeof getCartDetails>>;
-      if (giftWrap !== undefined) {
-        details = await setCartItemGiftWrap(itemId, giftWrap);
-      }
-      if (quantity !== undefined) {
-        details = await updateCartItem(itemId, quantity);
-      }
+      // One pass, one cart-details re-fetch even when both fields are sent.
+      const details = await applyCartItemUpdate(itemId, { quantity, giftWrap });
       return jsonOk(cartPayload(details));
     } catch (e) {
       return jsonError(e instanceof Error ? e.message : "Could not update cart", 409);

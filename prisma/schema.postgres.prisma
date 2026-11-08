@@ -141,6 +141,12 @@ model Product {
   @@index([status])
   @@index([isFeatured])
   @@index([price])
+  // Storefront hot-path composites (perf/system-optimization): list/featured/
+  // new-arrival/related reads filter on status+deletedAt(+category) and sort by
+  // isFeatured+createdAt or rating — see migration 20261109000000.
+  @@index([status, deletedAt, categoryId])
+  @@index([isFeatured, createdAt])
+  @@index([rating])
 }
 
 model ProductImage {
@@ -263,6 +269,8 @@ model Order {
   @@index([status])
   @@index([status, createdAt])
   @@index([createdAt])
+  // Order history: WHERE userId = ? ORDER BY createdAt DESC (perf/system-optimization)
+  @@index([userId, createdAt])
 
   // Managed hosted-checkout metadata is NULL on historical/offline orders.
   // Existing PKR snapshots and order/payment statuses retain their meaning.

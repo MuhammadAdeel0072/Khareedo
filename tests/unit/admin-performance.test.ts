@@ -8,6 +8,13 @@ const database = vi.hoisted(() => ({
   orderFindMany: vi.fn(),
 }));
 
+vi.mock("next/cache", () => ({
+  // saveSettings invalidates the display-settings cache; outside a request scope
+  // (like these unit tests) Next's revalidateTag needs a store that does not exist.
+  revalidateTag: vi.fn(),
+  unstable_cache: (fn: unknown) => fn,
+}));
+
 vi.mock("@/lib/db", () => ({
   db: {
     $executeRaw: database.executeRaw,

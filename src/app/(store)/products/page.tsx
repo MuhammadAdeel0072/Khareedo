@@ -61,7 +61,8 @@ export default async function ProductsPage({ searchParams }: PageProps) {
   const max = first(params.max);
   const inStockOnly = first(params.instock) === "1";
 
- const [result, categories, user, activeCategory] = await Promise.all([
+  const userPromise = getSessionUser();
+  const [result, categories, user, activeCategory, wishlistIds] = await Promise.all([
     listProducts({
       q,
       category,
@@ -73,12 +74,12 @@ export default async function ProductsPage({ searchParams }: PageProps) {
       perPage: 12,
     }),
     getCategoriesWithCounts(),
- 
-    getSessionUser(),
-    category ? getCategoryBySlug(category) : Promise.resolve(null),
-  ]);
 
-  const wishlistIds = user ? await getWishlistProductIds(user.id) : [];
+    userPromise,
+    category ? getCategoryBySlug(category) : Promise.resolve(null),
+    // Wishlist ids ride the same batch instead of a follow-up round trip.
+    userPromise.then((u) => (u ? getWishlistProductIds(u.id) : [])),
+  ]);
 
   // Count of active filters for the mobile filter button badge
   const activeFilterCount =

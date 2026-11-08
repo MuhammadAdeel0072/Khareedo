@@ -2,14 +2,14 @@
 import type { Metadata } from "next";
 import { Mail, MapPin, Phone } from "lucide-react";
 import { WhatsAppIcon } from "@/components/layout/whatsapp-icon";
-import { getSettings } from "@/services/settings.service";
+import { getCachedSettings } from "@/services/settings.service";
 import { buildInquiryMessage } from "@/lib/whatsapp-messages";
 
 export const metadata: Metadata = { title: "Contact Us" };
 export const dynamic = "force-dynamic";
 
 export default async function ContactPage() {
-  const settings = await getSettings();
+  const settings = await getCachedSettings();
   const waHref = `https://wa.me/${settings.whatsapp_number.replace(/\D/g, "")}?text=${encodeURIComponent(buildInquiryMessage(settings.store_name))}`;
 
   return (

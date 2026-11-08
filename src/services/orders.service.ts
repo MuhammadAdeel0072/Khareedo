@@ -31,7 +31,8 @@ export async function getUserOrders(userId: string, page = 1, perPage = 10) {
       orderBy: { createdAt: "desc" },
       skip: (page - 1) * perPage,
       take: perPage,
-      include: { items: { select: { id: true } } },
+      // _count avoids materializing one row per item just to show item counts
+      include: { _count: { select: { items: true } } },
     }),
     db.order.count({ where: { userId } }),
   ]);
@@ -43,7 +44,7 @@ export async function getUserOrders(userId: string, page = 1, perPage = 10) {
       paymentMethod: o.paymentMethod,
       paymentStatus: o.paymentStatus,
       total: o.total,
-      itemCount: o.items.length,
+      itemCount: o._count.items,
       createdAt: o.createdAt,
       customerName: o.customerName,
       isGuest: o.isGuest,

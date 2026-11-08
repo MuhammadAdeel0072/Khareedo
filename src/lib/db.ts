@@ -86,6 +86,8 @@ function createPrismaClient() {
 
 export const db = globalForPrisma.prisma ?? createPrismaClient();
 
-if (process.env.NODE_ENV !== "production") {
-  globalForPrisma.prisma = db;
-}
+// Cache the client on globalThis in EVERY environment: the standalone prod
+// server can evaluate this module more than once (per server bundle), and a
+// fresh PrismaClient per evaluation would open its own pool — connection
+// storms and serialized queries under load. Harmless in dev, protective in prod.
+globalForPrisma.prisma = db;

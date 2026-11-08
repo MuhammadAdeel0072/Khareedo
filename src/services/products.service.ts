@@ -77,6 +77,21 @@ function toListItem(p: ListRow): ProductListItem {
   };
 }
 
+// Case-insensitive text search (perf/system-optimization): PostgreSQL `contains` maps
+// to a case-sensitive LIKE, so the explicit `insensitive` mode is required there. The
+// disposable SQLite test harness rejects the `mode` flag — its LIKE is already
+// ASCII-case-insensitive, so the plain predicate gives the same user-visible behavior
+// there. Detection uses the harness's own marker rather than env URLs: importing
+// next/cache can leak .env values into process.env in test workers, so URL presence is
+// not a reliable datasource signal.
+const TEXT_SEARCH_MODE =
+  process.env.KHAREEDO_DISPOSABLE_SQLITE_TEST === "1" ? undefined : ("insensitive" as const);
+function containsQuery(value: string): Prisma.StringFilter {
+  return TEXT_SEARCH_MODE
+    ? { contains: value, mode: TEXT_SEARCH_MODE }
+    : { contains: value };
+}
+
 export async function listProducts(filters: ProductFilters) {
   const page = Math.max(1, filters.page ?? 1);
   const perPage = Math.min(48, Math.max(1, filters.perPage ?? 12));
@@ -90,10 +105,10 @@ export async function listProducts(filters: ProductFilters) {
   if (filters.q) {
     const q = filters.q.trim();
     where.OR = [
-      { name: { contains: q } },
-      { description: { contains: q } },
-      { brand: { contains: q } },
-      { tags: { contains: q } },
+      { name: containsQuery(q) },
+      { description: containsQuery(q) },
+      { brand: containsQuery(q) },
+      { tags: containsQuery(q) },
     ];
   }
   if (filters.category) {
@@ -363,7 +378,7 @@ export async function adminListProducts(filters: AdminProductFilters) {
   const page = Math.max(1, filters.page ?? 1);
   const perPage = 15;
   const where: Prisma.ProductWhereInput = { deletedAt: null };
-  if (filters.q) where.name = { contains: filters.q.trim() };
+  if (filters.q) where.name = containsQuery(filters.q.trim());
   if (filters.status) where.status = filters.status;
   if (filters.categoryId) where.categoryId = filters.categoryId;
 

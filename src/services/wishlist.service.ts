@@ -71,3 +71,9 @@ export async function getWishlistProductIds(userId: string): Promise<string[]> {
   });
   return rows.map((r) => r.productId);
 }
+
+/** Cheap wishlist size for the account overview — a count instead of joining
+ *  product + image + inventory for every row just to read `.length`. */
+export async function getWishlistCount(userId: string): Promise<number> {
+  return db.wishlistItem.count({ where: { userId } });
+}

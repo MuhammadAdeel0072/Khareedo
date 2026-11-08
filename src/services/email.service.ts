@@ -1,5 +1,30 @@
 import nodemailer from "nodemailer";
 
+// One transporter per process: connection pooling + no per-email setup cost.
+let cachedTransporter: ReturnType<typeof nodemailer.createTransport> | null = null;
+
+function getTransporter(config: {
+  host: string;
+  port: number;
+  secure: boolean;
+  auth?: { user: string; pass: string };
+}) {
+  if (!cachedTransporter) {
+    cachedTransporter = nodemailer.createTransport({
+      host: config.host,
+      port: config.port,
+      secure: config.secure,
+      auth: config.auth,
+      // Bound every phase of the SMTP conversation so a slow/broken SMTP host
+      // cannot stall registration for the platform's default (minutes-long) timeout.
+      connectionTimeout: 10_000,
+      greetingTimeout: 10_000,
+      socketTimeout: 20_000,
+    });
+  }
+  return cachedTransporter;
+}
+
 export class EmailDeliveryNotConfiguredError extends Error {
   constructor() {
     super("Email delivery is not configured.");
@@ -59,12 +84,7 @@ export async function sendVerificationEmail(input: {
   const greeting = input.name ? `Hello ${escapeHtml(input.name)},` : "Hello,";
   const link = escapeHtml(verificationUrl.toString());
 
-  const transporter = nodemailer.createTransport({
-    host: config.host,
-    port: config.port,
-    secure: config.secure,
-    auth: config.auth,
-  });
+  const transporter = getTransporter(config);
   await transporter.sendMail({
     from: config.from,
     to: input.email,
