@@ -232,3 +232,23 @@ Stage Summary:
 - Extended the disposable SQLite runner to select only test files under `tests/unit`; ran 44 unit tests, 13 order/inventory integration tests, and 12 cart/category SQL regressions successfully.
 - TypeScript and full ESLint passed. Existing production build passed before these follow-up edits.
 - Did not run a post-change production build or browser comparison: a shared Next.js process held the `.next` lock, and I left it undisturbed. No latency improvement is claimed pending that comparison. No application database writes, migrations, seeds, or deployments occurred.
+
+---
+Task ID: 10 (Safepay engineering brief — tracker loss, trusted verification, settlement, webhook, audit)
+Agent: Z.ai main agent
+Task: Fix Safepay return tracker loss; add independent provider verification, webhook integration and reconciliation; secure manual maintenance trigger; sandbox-only, deployment-configurable.
+
+Work Log:
+- Root cause (tracker loss): Safepay appends `?tracker=` to redirect_url (documented); the pre-seeded `?state=` query makes the bare-`?` append fold the tracker INTO the state value (`?state=S?tracker=T`) — matches the `hasUser/hasState=true, hasTracker=false` diagnostic exactly.
+- Fix: return context parser (query param / folded state / first-party HttpOnly cookie `khd_sfpay_return` set by the session route / DB-stored tracker as last resort); return service now supports claimed, state-only and tracker-only lookups with unchanged DB owner + invariant checks; signed state still HMAC-verified when present; diagnostics log presence/sources only.
+- Trusted verification implemented per official docs (express checkout guide, verify-HMAC page, official PHP/Node SDKs): webhook = X-SFPY-SIGNATURE HMAC-SHA512 hex over raw body with the dashboard Endpoints secret; events payment.succeeded/failed; reporter GET /reporter/api/v1/payments/{tracker} with X-SFPY-MERCHANT-SECRET; success only from TRACKER_ENDED; all unknown shapes/states quarantined or uncertain — nothing invented.
+- Registry (src/lib/payments/verification-registry.ts) now approves the Safepay webhook + reconciliation adapters for the sandbox environment only; production remains hard-gated (readiness.ts). Local identity (orderId/paymentId/owner) resolves by unique trackerIdentityKey; every provider fact comes from the authenticated payload; settlement re-validates everything.
+- Webhook route activated: bounded raw-body intake, mandatory encrypted payload custody (AES-256-GCM via PAYMENT_PAYLOAD_KEY) before acknowledgment, documented delivery semantics (2xx ack after durable store, 400 terminal, 503 retryable), out-of-band processing only.
+- New manual maintenance trigger POST /api/admin/payments/maintenance: requireAdmin + optional SAFEPAY_MAINTENANCE_TOKEN header (constant-time) + rate limit; bounded actions expire_reservations / process_webhook_inbox / reconcile_due_payments; no cron, no public path; future Vercel Cron can call it with the token.
+- Config/deployment: SAFEPAY_WEBHOOK_SECRET, PAYMENT_PAYLOAD_KEY(_ID), SAFEPAY_MAINTENANCE_TOKEN documented in .env.example; all origins/webhook URLs derive from env (SAFEPAY_SITE_ORIGIN); no localhost/production domain hardcoded; integration doc updated with the verified contract section.
+- Tests: new unit suites for adapters (HMAC happy/tamper/unknown-type/foreign-env/non-PKR), reporter classification, return parsing, registry scoping, webhook route semantics, maintenance guards; new SQLite integration test proving signed webhook → HMAC auth → inbox → settlement → order PAID → stock consumed → idempotent replay → quarantined tamper. Full non-DB suite 239/239; DB suite 195/196 — the single failure is the pre-existing SQLite 5s contention flake ("serializes expiration, reconciliation and settlement...") that fails identically on unmodified main.
+- Gates: tsc clean, eslint 0 errors (2 pre-existing warnings in unrelated auth forms), production build PASS (with local .env; page-data collection needs env vars in any fresh clone — same on main).
+- Not done (honest): production activation, migration rehearsal, live sandbox run (no real sandbox credentials in this environment), refund automation; webhook contract generation fork (SHA512 hosted generation implemented; newer platform generation quarantined by design).
+
+Stage Summary:
+- The end-to-end sandbox lifecycle Checkout → Hosted Payment → Return → Trusted Verification → Settlement → Reconciliation is now wired and integration-proven; the browser redirect is finally treated as informational only, and every money-moving transition requires authenticated Safepay evidence.
