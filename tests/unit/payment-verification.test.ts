@@ -91,7 +91,7 @@ describe("Targeted Safepay payment verification", () => {
     const bodyBytes = new Uint8Array([7, 8, 9]);
     const d = deps({
       row: eligibleRow(),
-      fetched: { kind: "fetched", status: 200, json: { data: { tracker: {} } }, bodyBytes },
+      fetched: { kind: "fetched", status: 200, json: { ok: true, data: { token: "TCKR-1" } }, bodyBytes },
       observed: { kind: "settled" },
     });
     await expect(d.service.verifyPaymentNow("pay-1")).resolves.toEqual({ kind: "settled" });

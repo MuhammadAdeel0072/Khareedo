@@ -80,11 +80,34 @@ async function fixture() {
   return { order, paymentId: payment.id, token, product, userId: user.id };
 }
 
-function signedDelivery(token: string, type = "payment.succeeded"): VerificationInput {
-  const body = JSON.stringify({ type, data: {
-    tracker: { token, state: type === "payment.succeeded" ? "TRACKER_ENDED" : "TRACKER_STARTED",
-      purchase_totals: { quote_amount: { currency: "PKR", amount: 100000 } } },
-  } });
+function signedDelivery(token: string, type = "payment.succeeded", failedState = "TRACKER_ENROLLED"): VerificationInput {
+  // Documented hosted-checkout webhook shapes (getsafepay/safepay-docs):
+  // data.tracker is a STRING with state/amount/currency as siblings; payment.succeeded
+  // carries the financial fields, payment.failed does not.
+  const body = JSON.stringify({
+    token: "evt_" + token.slice(-12),
+    version: "2.0.0",
+    merchant_api_key: "synthetic-public",
+    type,
+    endpoint: "https://shop.example.invalid/api/webhooks/safepay",
+    data: type === "payment.succeeded" ? {
+      tracker: token,
+      intent: "CYBERSOURCE",
+      state: "TRACKER_ENDED",
+      amount: 100000,
+      currency: "PKR",
+      charged_at: { seconds: 1698754230, nanos: 752997627 },
+    } : {
+      tracker: token,
+      intent: "CYBERSOURCE",
+      state: failedState,
+      category: "PAYMENT_METHOD_ERROR",
+      code: 403,
+      message: "The card you have used has been flagged as either stolen or lost.",
+      failed_at: { seconds: 1698754648, nanos: 494424793 },
+    },
+    created_at: { seconds: 1698754230, nanos: 912705711 },
+  });
   return {
     provider: "SAFEPAY", environment: "sandbox", merchantAccountRef: "synthetic-account",
     channel: "WEBHOOK", body: Buffer.from(body),
@@ -170,5 +193,58 @@ describe("Signed webhook to settled order", () => {
     expect(order.status).toBe("PENDING");
     const payment = await db.payment.findUniqueOrThrow({ where: { id: f.paymentId } });
     expect(payment.status).toBe("PENDING");
+  });
+
+  it("records a documented payment.failed observation without releasing reservations", async () => {
+    const f = await fixture();
+    const received = await inbox.receive(signedDelivery(f.token, "payment.failed"));
+    if (received.kind !== "stored") throw new Error("Expected durable storage: " + JSON.stringify(received));
+    events.push(received.eventId);
+    const processed = await inbox.process(received.eventId);
+    expect(processed).toEqual({ kind: "recorded" });
+    const order = await db.order.findUniqueOrThrow({ where: { id: f.order.id }, include: {
+      items: { include: { inventoryReservation: true } } } });
+    expect(order.status).toBe("PENDING");
+    expect(order.paymentStatus).toBe("PENDING");
+    expect(order.items[0].inventoryReservation!.state).toBe("HELD");
+    const payment = await db.payment.findUniqueOrThrow({ where: { id: f.paymentId } });
+    expect(payment.status).toBe("PENDING");
+    expect(payment.reconcileStatus).toBe("UNCERTAIN");
+    expect(payment.nextReconcileAt).not.toBeNull();
+    const evidence = await db.paymentEvidence.findMany({ where: { paymentId: f.paymentId } });
+    expect(evidence.some(row => row.source === "WEBHOOK" && row.decision === "OBSERVATION_RECORDED")).toBe(true);
+  });
+
+  it("routes contradictory failure evidence (failed while TRACKER_ENDED) to review and retains holds", async () => {
+    const f = await fixture();
+    const received = await inbox.receive(signedDelivery(f.token, "payment.failed", "TRACKER_ENDED"));
+    if (received.kind !== "stored") throw new Error("Expected durable storage: " + JSON.stringify(received));
+    events.push(received.eventId);
+    const processed = await inbox.process(received.eventId);
+    expect(processed).toEqual({ kind: "review_required" });
+    const order = await db.order.findUniqueOrThrow({ where: { id: f.order.id }, include: {
+      items: { include: { inventoryReservation: true } } } });
+    expect(order.status).toBe("PENDING");
+    expect(order.paymentReviewStatus).toBe("REQUIRED");
+    expect(order.items[0].inventoryReservation!.state).toBe("HELD");
+  });
+
+  it("quarantines capture evidence whose amount contradicts the expected attempt amount", async () => {
+    const f = await fixture();
+    const delivery = signedDelivery(f.token);
+    const wrongAmount = JSON.parse(new TextDecoder().decode(delivery.body));
+    wrongAmount.data.amount = 1;
+    const body = Buffer.from(JSON.stringify(wrongAmount));
+    const tamperedAmount: VerificationInput = { ...delivery, body,
+      headers: { "x-sfpy-signature": createHmac("sha512", process.env.SAFEPAY_WEBHOOK_SECRET!)
+        .update(body).digest("hex") } };
+    const received = await inbox.receive(tamperedAmount);
+    if (received.kind === "blocked") throw new Error("Unexpected blocked delivery");
+    expect(received.kind).toBe("quarantined");
+    events.push(received.eventId);
+    expect(await inbox.process(received.eventId)).toEqual({ kind: "review_required" });
+    const order = await db.order.findUniqueOrThrow({ where: { id: f.order.id } });
+    expect(order.paymentStatus).toBe("PENDING");
+    expect(order.status).toBe("PENDING");
   });
 });

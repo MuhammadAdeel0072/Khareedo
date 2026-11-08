@@ -26,8 +26,12 @@ function identityMatches(order: ManagedOrder | null, payment: Payment | null, o:
 function validMoney(order: ManagedOrder, payment: Payment, o: PaymentObservation) {
   return Number.isSafeInteger(order.total) && order.total > 0 && payment.amount === order.total &&
     payment.expectedAmountMinor === BigInt(order.total) * BigInt(100) &&
-    payment.expectedAmountMinor === BigInt(o.amountMinor) &&
-    (o.kind !== "CAPTURE_CONFIRMED" || (o.capturedMinor === o.amountMinor && (o.refundMinor === null || o.refundMinor === "0")));
+    // The provider-reported amount, when the documented payload carried one, must equal
+    // the attempt's expected amount. A null amount (documented shapes without financial
+    // fields) has nothing to compare and is never treated as a match or a mismatch.
+    (o.amountMinor === null || payment.expectedAmountMinor === BigInt(o.amountMinor)) &&
+    (o.kind !== "CAPTURE_CONFIRMED" || (o.amountMinor !== null && o.capturedMinor === o.amountMinor &&
+      (o.refundMinor === null || o.refundMinor === "0")));
 }
 function validSnapshot(order: ManagedOrder) {
   return order.items.length > 0 && order.items.every(item => Number.isSafeInteger(item.quantity) && item.quantity > 0 &&
@@ -95,7 +99,8 @@ export function createPaymentSettlementService(database: PaymentPersistence, opt
                 operation: "PAYMENT_OBSERVATION", validationStatus: "AUTHENTICATED", decision, reasonCode: reason,
                 sourceWebhookEventId: event.id, processedWebhookEventId: event.id,
                 providerContractVersion: verified.contractVersion, rawPayloadSha256: verified.rawSha256,
-                observedCurrency: o.currency, observedQuoteMinor: BigInt(o.amountMinor),
+                observedCurrency: o.currency,
+                observedQuoteMinor: o.amountMinor === null ? null : BigInt(o.amountMinor),
                 observedCapturedMinor: o.capturedMinor === null ? null : BigInt(o.capturedMinor),
                 observedRefundedMinor: o.refundMinor === null ? null : BigInt(o.refundMinor),
                 providerOccurredAt: o.occurredAt === null ? null : new Date(o.occurredAt),

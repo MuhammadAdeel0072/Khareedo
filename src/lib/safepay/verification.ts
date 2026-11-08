@@ -9,25 +9,45 @@ import type {
 } from "@/lib/payments/evidence-contract";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Contract sources (verified against official Safepay documentation):
-// - Webhook verification: https://safepay-docs.netlify.app/developers/webhooks/
-//   verify-hmac-signatures — HMAC-SHA512 over the raw request body bytes, hex digest,
-//   delivered in the X-SFPY-SIGNATURE header, keyed by the dashboard "Endpoints"
-//   shared secret. The official PHP SDK (getsafepay/sfpy-php Webhook::constructEvent)
-//   implements the same contract for the hosted-payments generation.
-// - Webhook events: X-SFPY-SIGNATURE + JSON body with a `type` ("payment.succeeded",
-//   "payment.failed", ...) and a `data` payment object. Only documented types are
-//   classified; every other shape is REJECTED into the review quarantine.
-// - Tracker status: https://safepay-docs.netlify.app/build-your-integration/
-//   express-checkout/ — GET /reporter/api/v1/payments/{tracker} with
-//   X-SFPY-MERCHANT-SECRET. Success is only ever derived from tracker state
-//   TRACKER_ENDED ("Confirm checkout success only when the tracker state becomes
-//   TRACKER_ENDED" — official guidance). All other states stay non-final.
+// Contract sources (verified 2026-11-09 against the official Safepay card-payment
+// documentation, source: github.com/getsafepay/safepay-docs, site:
+// safepay-docs.netlify.app — the generation this merchant's hosted checkout uses):
 //
-// A newer Safepay platform generation documents a different webhook contract
-// (HMAC-SHA256 over "timestamp.body", five X-SFPY-* headers). That generation is
-// NOT implemented here: an unrecognized event or signature profile is quarantined
-// for manual review, never processed, and never invents semantics.
+// - Webhook authenticity — developers/webhooks/verify-hmac-signatures:
+//   X-SFPY-SIGNATURE carries HMAC-SHA512 over the raw request body bytes as a hex
+//   digest ("crypto.createHmac("sha512", secret).update(data).digest("hex")"), keyed
+//   by the endpoint shared secret from Dashboard > Developers > Endpoints. This
+//   generation documents NO signed delivery-timestamp header, so timestamp freshness
+//   is deliberately NOT enforced: the documented retry model redelivers queued events
+//   (old created_at), and no tolerance is documented. Replay resistance comes from the
+//   signature plus durable event-id dedup in the inbox.
+// - Webhook events — developers/webhooks/webhook-types: envelope {type, version,
+//   token, merchant_api_key, endpoint, data, created_at, delivery_attempts,
+//   next_attempt_at}. payment.succeeded is "fired when a payment is captured" and its
+//   data carries data.tracker as a tracker-token STRING with state/amount/currency as
+//   sibling fields (example: state "TRACKER_ENDED", amount 45000, currency "PKR",
+//   charged_at {seconds,nanos}). payment.failed is "fired when an error occurs" and
+//   its documented data carries tracker/intent/state/customer_email/metadata/
+//   category/code/message/failed_at — NO amount or currency fields; the official
+//   example state is "TRACKER_ENROLLED" (a pre-authorization state). Docs explicitly
+//   instruct accepting event types and state values beyond the documented list.
+// - Tracker states — concepts/tracker-states: TRACKER_STARTED, TRACKER_AUTHORIZED,
+//   TRACKER_ENROLLED, TRACKER_ENDED ("The tracker has been paid."), TRACKER_CANCELLED,
+//   TRACKER_EXPIRED, TRACKER_REFUNDED, TRACKER_PARTIAL_REFUND, TRACKER_DISPUTED,
+//   TRACKER_REVERSED, TRACKER_VOIDED. TRACKER_ENDED is the ONLY documented paid state
+//   and NO state is documented as payment-failure finality. Failure classification is
+//   therefore conservative: a payment.failed webhook never yields FAILURE_CONFIRMED
+//   (explicit merchant-support blocker, see docs/SAFEPAY-SERVER-INTEGRATION.md).
+// - Status lookup — concepts/fetch-tracker: GET /reporter/api/v1/payments/{tracker};
+//   the documented response is {ok: true, data: {token, environment, state, intent,
+//   mode, entry_mode, ..., purchase_totals: {quote_amount: {currency, amount}}}} —
+//   the tracker fields sit DIRECTLY under data (no "tracker" wrapper, no status.errors).
+//
+// The newer Raastwire platform generation (safepay.mintlify.app: HMAC-SHA256 over
+// "timestamp.body", five X-SFPY-* headers, aggregator event envelopes) is NOT this
+// merchant's hosted-checkout contract and is deliberately not implemented: any event
+// that does not match the documented card-payment shapes is quarantined for manual
+// review, never processed, and never invents semantics.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const SAFEPAY_EVIDENCE_CONTRACT_VERSION = "SAFEPAY-HOSTED-V1";
@@ -56,6 +76,8 @@ export type SafepayAttemptContext = Readonly<{
   paymentId: string;
   attemptNumber: number;
   currency: string;
+  /** Locally expected amount in PKR minor units (paisa), as an exact decimal string. */
+  expectedAmountMinor: string;
   owner: PaymentObservation["owner"];
 }>;
 export type SafepayTrackerResolver = (
@@ -81,9 +103,11 @@ function observation(input: {
   trackerToken: string;
   observationId: string;
   kind: PaymentObservation["kind"];
-  amountMinor: string;
+  /** Provider-reported amount, or null when the documented payload carries none. */
+  amountMinor: string | null;
   capturedMinor: string | null;
   refundMinor: string | null;
+  occurredAt: string | null;
 }): PaymentObservation {
   return {
     provider: "SAFEPAY",
@@ -101,35 +125,89 @@ function observation(input: {
     kind: input.kind,
     capturedMinor: input.capturedMinor,
     refundMinor: input.refundMinor,
-    occurredAt: null, // No documented provider timestamp on either channel; never fabricated.
+    occurredAt: input.occurredAt,
   };
 }
 
-// Finality is derived ONLY from documented states. Anything unlisted stays uncertain:
-// guessing a failure could release reservations; guessing success could settle nothing.
-function classifyTrackerState(state: string | undefined): PaymentObservation["kind"] | "UNPARSABLE" {
-  if (state === undefined) return "UNPARSABLE";
+// Documented tracker state vocabulary (concepts/tracker-states). States whose documented
+// interpretation is still "payment actions may run" are non-final-pending; everything
+// else unlisted stays uncertain: guessing a failure could release reservations, guessing
+// success could settle nothing.
+const NON_FINAL_TRACKER_STATES: ReadonlySet<string> = new Set([
+  "TRACKER_STARTED", "TRACKER_AUTHORIZED", "TRACKER_ENROLLED",
+]);
+
+// Webhook classification (developers/webhooks/webhook-types + concepts/tracker-states).
+// - payment.succeeded is documented as "fired when a payment is captured", but capture
+//   finality additionally requires the one documented paid state TRACKER_ENDED. A
+//   missing, unknown or non-final state never becomes capture confirmation — it goes to
+//   manual review instead of guessing.
+// - payment.failed has NO documented failure-final state (the official example itself
+//   carries TRACKER_ENROLLED), so a failed event NEVER becomes FAILURE_CONFIRMED here:
+//   contradiction with the paid state goes to review, everything else stays UNCERTAIN.
+function classifyWebhookObservation(
+  eventType: "payment.succeeded" | "payment.failed",
+  state: string | undefined,
+): PaymentObservation["kind"] {
+  const captured = state === "TRACKER_ENDED";
+  if (eventType === "payment.succeeded") return captured ? "CAPTURE_CONFIRMED" : "REVIEW_REQUIRED";
+  return captured ? "REVIEW_REQUIRED" : "UNCERTAIN";
+}
+
+// Reconciliation classification from the same documented vocabulary: only TRACKER_ENDED
+// is paid; documented in-progress states stay pending; all other values stay uncertain.
+function classifyTrackerState(state: string): PaymentObservation["kind"] {
   if (state === "TRACKER_ENDED") return "CAPTURE_CONFIRMED";
-  if (state === "TRACKER_STARTED") return "PENDING";
+  if (NON_FINAL_TRACKER_STATES.has(state)) return "PENDING";
   return "UNCERTAIN";
 }
 
 // ─────────────────────────── Webhook channel ───────────────────────────
 
+// Documented {seconds, nanos} protobuf timestamp used across webhook payloads.
+const protobufTimestampSchema = z.object({
+  seconds: z.number().int().safe(),
+  nanos: z.number().int().min(0).max(999_999_999),
+}).passthrough();
+
+// Returns undefined when the field is absent (tolerated), null when present but
+// malformed (caller rejects the undocumented shape), or a bounded ISO-8601 string.
+// Bounded to 2001-09..2100-01 so Date arithmetic stays in the safe integer range.
+function documentedTimestamp(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined;
+  const parsed = protobufTimestampSchema.safeParse(value);
+  if (!parsed.success) return null;
+  const { seconds, nanos } = parsed.data;
+  if (seconds <= 1_000_000_000 || seconds >= 4_102_444_800) return null;
+  return new Date(seconds * 1000 + Math.floor(nanos / 1_000_000)).toISOString();
+}
+
+// Documented webhook envelope (developers/webhooks/webhook-types). type and data are
+// the only universally-present fields; the rest are validated whenever they appear.
 const webhookEventSchema = z.object({
   type: z.string().min(1).max(128),
   data: z.unknown(),
+  token: printableToken.max(256).optional(),
+  version: z.literal("2.0.0").optional(),
+  merchant_api_key: z.string().min(1).max(256).regex(/^[\x21-\x7e]+$/).optional(),
+  created_at: protobufTimestampSchema.optional(),
+  delivery_attempts: z.number().int().min(0).max(1_000_000).optional(),
+  next_attempt_at: protobufTimestampSchema.optional(),
 }).passthrough();
 
-const webhookTrackerObjectSchema = z.object({
-  token: printableToken,
+// Documented payment-event data: data.tracker is a tracker-token STRING and
+// state/amount/currency are sibling fields. amount/currency only exist on the
+// documented payment.succeeded shape and are enforced per event type. The tracker
+// OBJECT form belongs to the Fetch Tracker response, not to webhook payloads, and is
+// deliberately not accepted here.
+const webhookPaymentDataSchema = z.object({
+  tracker: printableToken,
   state: z.string().min(1).max(128).optional(),
-  purchase_totals: z.object({
-    quote_amount: z.object({
-      currency: z.string().regex(/^[A-Z]{3}$/),
-      amount: z.number(),
-    }).passthrough(),
-  }).passthrough().optional(),
+  intent: z.string().min(1).max(64).optional(),
+  amount: z.number().optional(),
+  currency: z.string().optional(),
+  charged_at: protobufTimestampSchema.optional(),
+  failed_at: protobufTimestampSchema.optional(),
 }).passthrough();
 
 function signatureHeader(value: string | undefined): string | null {
@@ -138,29 +216,19 @@ function signatureHeader(value: string | undefined): string | null {
   return /^[a-f0-9]+$/.test(normalized) ? normalized : null;
 }
 
-function trackerFactsFromData(data: unknown): {
-  token: string; state?: string; amountMinor?: string; currency?: string;
-} | null {
-  if (data === null || typeof data !== "object" || Array.isArray(data)) return null;
-  const tracker = (data as Record<string, unknown>)["tracker"];
-  if (typeof tracker === "string") {
-    return printableToken.safeParse(tracker).success ? { token: tracker } : null;
-  }
-  const parsed = webhookTrackerObjectSchema.safeParse(tracker);
-  if (!parsed.success) return null;
-  const quote = parsed.data.purchase_totals?.quote_amount;
-  let amountMinor: string | undefined;
-  if (quote) {
-    const minor = minorFromAmount(quote.amount);
-    if (minor === null) return null;
-    amountMinor = minor;
-  }
-  return {
-    token: parsed.data.token,
-    ...(parsed.data.state !== undefined ? { state: parsed.data.state } : {}),
-    ...(amountMinor !== undefined ? { amountMinor } : {}),
-    ...(quote ? { currency: quote.currency } : {}),
-  };
+function dataField(data: unknown, key: string): unknown {
+  return data !== null && typeof data === "object" && !Array.isArray(data)
+    ? (data as Record<string, unknown>)[key]
+    : undefined;
+}
+
+// Documented event identity order: envelope event token, then a printable
+// X-SFPY-EVENT-ID header, then the body digest. All three are stable across identical
+// at-least-once redeliveries of the same signed payload.
+function webhookObservationId(event: z.infer<typeof webhookEventSchema>, headerEventId: string | undefined, body: Uint8Array): string {
+  if (event.token) return event.token;
+  if (headerEventId && /^[\x21-\x7e]{1,256}$/.test(headerEventId)) return headerEventId;
+  return createHash("sha256").update(Buffer.from(body)).digest("hex");
 }
 
 export function createSafepayWebhookAdapter(
@@ -200,50 +268,58 @@ export function createSafepayWebhookAdapter(
       if (event.type !== "payment.succeeded" && event.type !== "payment.failed") {
         return { kind: "rejected" as const };
       }
-      const facts = trackerFactsFromData(event.data);
-      if (!facts) return { kind: "rejected" as const };
-      const attempt = await resolveAttempt(resolveTracker, facts.token);
-      if (!attempt) return { kind: "rejected" as const };
+      // Documented account binding: a foreign merchant_api_key is not evidence about
+      // this account. Absence is tolerated — the endpoint signature and the local
+      // tracker binding already anchor the event to the configured account.
+      if (event.merchant_api_key !== undefined && event.merchant_api_key !== config.merchantApiKey()) {
+        return { kind: "rejected" as const };
+      }
+      if (documentedTimestamp(event.created_at) === null) return { kind: "rejected" as const };
+      const data = webhookPaymentDataSchema.safeParse(event.data);
+      if (!data.success) return { kind: "rejected" as const };
       // Provider-reported environment must be the configured one; anything else is not
       // evidence about this account and belongs in manual review.
-      const dataEnvironment = (event.data as Record<string, unknown> | null) &&
-        typeof event.data === "object" && !Array.isArray(event.data)
-        ? (event.data as Record<string, unknown>)["environment"]
-        : undefined;
+      const dataEnvironment = dataField(event.data, "environment");
       if (dataEnvironment !== undefined && dataEnvironment !== config.environment) {
         return { kind: "rejected" as const };
       }
-      const currency = facts.currency ?? attempt.currency;
-      if (!facts.amountMinor || currency !== "PKR" || attempt.currency !== "PKR") {
-        return { kind: "rejected" as const };
+      const attempt = await resolveAttempt(resolveTracker, data.data.tracker);
+      if (!attempt) return { kind: "rejected" as const };
+      // Financial validation against the locally resolved attempt. For the documented
+      // payment.succeeded shape, amount and currency are mandatory: a missing, invalid
+      // or contradictory amount is rejected — the local expected amount is NEVER
+      // substituted for a missing provider-reported amount. payment.failed has no
+      // documented financial fields, so none are invented or recorded.
+      let amountMinor: string | null = null;
+      if (event.type === "payment.succeeded") {
+        if (data.data.amount === undefined || data.data.currency === undefined) {
+          return { kind: "rejected" as const };
+        }
+        const parsed = minorFromAmount(data.data.amount);
+        if (parsed === null || data.data.currency !== "PKR" || attempt.currency !== "PKR") {
+          return { kind: "rejected" as const };
+        }
+        if (BigInt(parsed) !== BigInt(attempt.expectedAmountMinor)) {
+          return { kind: "rejected" as const };
+        }
+        amountMinor = parsed;
       }
-      const classified = classifyTrackerState(facts.state);
-      // The documented event type is the primary signal ("payment.succeeded" → mark the
-      // payment complete per the official webhook guide); tracker state is corroboration.
-      // Contradictory evidence (succeeded while state still TRACKER_STARTED, failed while
-      // TRACKER_ENDED) is never resolved by guessing — it goes to manual review.
-      const kind: PaymentObservation["kind"] =
-        event.type === "payment.failed"
-          ? classified === "CAPTURE_CONFIRMED" ? "REVIEW_REQUIRED" : "FAILURE_CONFIRMED"
-          : classified === "UNPARSABLE" || classified === "CAPTURE_CONFIRMED" ? "CAPTURE_CONFIRMED"
-          : "REVIEW_REQUIRED";
+      const chargedIso = documentedTimestamp(data.data.charged_at);
+      const failedIso = documentedTimestamp(data.data.failed_at);
+      if (chargedIso === null || failedIso === null) return { kind: "rejected" as const };
+      const kind = classifyWebhookObservation(event.type, data.data.state);
       const capture = kind === "CAPTURE_CONFIRMED";
-      // Event identity: documented X-SFPY event id when present, else the body digest —
-      // stable for identical at-least-once redeliveries of the same signed payload.
-      const headerEventId = input.headers["x-sfpy-event-id"];
-      const observationId = headerEventId && /^[\x21-\x7e]{1,256}$/.test(headerEventId)
-        ? headerEventId
-        : createHash("sha256").update(Buffer.from(input.body)).digest("hex");
       return {
         kind: "authenticated" as const,
         observation: observation({
           config, merchantIdentity, attempt,
-          trackerToken: facts.token,
-          observationId,
+          trackerToken: data.data.tracker,
+          observationId: webhookObservationId(event, input.headers["x-sfpy-event-id"], input.body),
           kind,
-          amountMinor: facts.amountMinor,
-          capturedMinor: capture ? facts.amountMinor : null,
+          amountMinor,
+          capturedMinor: capture ? amountMinor : null,
           refundMinor: capture ? "0" : null,
+          occurredAt: (event.type === "payment.succeeded" ? chargedIso : failedIso) ?? null,
         }),
       };
     },
@@ -252,21 +328,21 @@ export function createSafepayWebhookAdapter(
 
 // ──────────────────────── Reconciliation channel ────────────────────────
 
+// Documented Fetch Tracker response (concepts/fetch-tracker): the tracker object sits
+// DIRECTLY under `data` — token/environment/state/purchase_totals are its own fields.
 const reporterResponseSchema = z.object({
+  ok: z.literal(true).optional(),
   data: z.object({
-    tracker: z.object({
-      token: printableToken,
-      environment: z.enum(["sandbox", "production"]),
-      state: z.string().min(1).max(128),
-      purchase_totals: z.object({
-        quote_amount: z.object({
-          currency: z.string().regex(/^[A-Z]{3}$/),
-          amount: z.number(),
-        }).passthrough(),
+    token: printableToken,
+    environment: z.enum(["sandbox", "production"]),
+    state: z.string().min(1).max(128),
+    purchase_totals: z.object({
+      quote_amount: z.object({
+        currency: z.string().regex(/^[A-Z]{3}$/),
+        amount: z.number(),
       }).passthrough(),
     }).passthrough(),
   }).passthrough(),
-  status: z.object({ errors: z.array(z.unknown()) }).passthrough(),
 }).passthrough();
 
 export function createSafepayReconciliationAdapter(
@@ -291,19 +367,20 @@ export function createSafepayReconciliationAdapter(
       } catch {
         return { kind: "rejected" as const };
       }
-      if (parsed.status.errors.length > 0) return { kind: "rejected" as const };
-      const tracker = parsed.data.tracker;
+      const tracker = parsed.data;
       if (tracker.environment !== config.environment) return { kind: "rejected" as const };
       const attempt = await resolveAttempt(resolveTracker, tracker.token);
       if (!attempt) return { kind: "rejected" as const };
       const quote = tracker.purchase_totals.quote_amount;
       const amountMinor = minorFromAmount(quote.amount);
-      if (!amountMinor || quote.currency !== "PKR" || attempt.currency !== "PKR") {
+      if (amountMinor === null || quote.currency !== "PKR" || attempt.currency !== "PKR") {
         return { kind: "rejected" as const };
       }
-      const classified = classifyTrackerState(tracker.state);
-      const kind: PaymentObservation["kind"] =
-        classified === "UNPARSABLE" ? "UNCERTAIN" : classified;
+      // Provider-reported amount must equal the locally expected attempt amount.
+      if (BigInt(amountMinor) !== BigInt(attempt.expectedAmountMinor)) {
+        return { kind: "rejected" as const };
+      }
+      const kind = classifyTrackerState(tracker.state);
       const capture = kind === "CAPTURE_CONFIRMED";
       // Stable for the same tracker/state/amount: repeated identical reconciliations dedup,
       // a genuine state transition produces a new observation.
@@ -318,6 +395,9 @@ export function createSafepayReconciliationAdapter(
           amountMinor,
           capturedMinor: capture ? amountMinor : null,
           refundMinor: capture ? "0" : null,
+          // The documented response fields consumed here carry no per-action timestamp;
+          // none is ever fabricated.
+          occurredAt: null,
         }),
       };
     },

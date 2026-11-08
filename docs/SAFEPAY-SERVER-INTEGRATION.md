@@ -5,7 +5,95 @@ webhook endpoint and the manual maintenance trigger are implemented. Production 
 code-gated (lib/safepay/readiness.ts). No migration rehearsal, live provider call or
 production activation is part of this phase.
 
-## Verified provider contract (2026-11-08 update)
+## Verified provider contract (2026-11-09 correction)
+
+The following points are confirmed against the official Safepay card-payment documentation
+(site: safepay-docs.netlify.app, source: github.com/getsafepay/safepay-docs — the hosted-
+checkout generation this merchant uses) and are implemented in
+src/lib/safepay/verification.ts and src/app/api/webhooks/safepay/route.ts. The newer
+Raastwire documentation generation (safepay.mintlify.app: HMAC-SHA256 over
+"timestamp.body", five X-SFPY-* headers, aggregator envelopes) is a different product
+surface and is deliberately NOT implemented.
+
+- Post-payment redirect: the hosted checkout appends the tracker to the redirect URL
+  ("Get the `tracker` that is appended to the return URL"). Because the documented
+  example redirect_url is query-free and Safepay appends with a bare `?`, a return URL
+  that already carries `?state=` folds the tracker into the state value
+  (`?state=S?tracker=T`). The return flow therefore no longer depends on provider query
+  merging: the signed state also travels in an HttpOnly first-party cookie
+  (`khd_sfpay_return`, 15 min), and the tracker is accepted from the query param, from
+  the folded form, or from the locally stored tracker binding as a last resort.
+- Webhook authenticity (official page "Verify HMAC signatures"): `X-SFPY-SIGNATURE`,
+  HMAC-SHA512 over the raw request body bytes, hex digest, keyed by the dashboard
+  "Developers > Endpoints" shared secret. The official page shows exactly
+  `crypto.createHmac("sha512", secret).update(data).digest("hex")`. This generation
+  documents NO signed delivery-timestamp header; timestamp freshness is therefore
+  deliberately NOT enforced — the documented retry model redelivers queued events (old
+  `created_at`) and no tolerance is documented, so a freshness gate would reject
+  legitimate redeliveries. Replay resistance comes from the signature plus durable
+  event-id dedup in the inbox. The docs' rotation note (queued events stay signed with
+  the previous key) is a merchant ops consideration at activation.
+- Webhook envelope (official page "Webhook structure and types"): `{type, version,
+  token, merchant_api_key, endpoint, data, created_at, delivery_attempts,
+  next_attempt_at}` with `{seconds, nanos}` timestamps. Only `type` and `data` are
+  treated as mandatory; the other fields are validated whenever present
+  (`version` must be the documented "2.0.0" generation; a foreign `merchant_api_key` is
+  rejected; malformed timestamps reject the event). The documented event `token`
+  (evt_…) is the primary event identity used for dedup; the X-SFPY-EVENT-ID header and
+  the body hash are fallbacks.
+- Webhook event data (official page "Webhook structure and types"): `data.tracker` is a
+  tracker-token STRING with `state`, `amount` and `currency` as SIBLING fields.
+  `payment.succeeded` ("fired when a payment is captured") documents `data: {tracker,
+  intent, state: "TRACKER_ENDED", net, fee, customer_email, amount, currency: "PKR",
+  metadata, charged_at}` — amount is PKR minor units (paisa). `payment.failed` ("fired
+  when an error occurs during the payment process") documents `data: {tracker, intent,
+  state, customer_email, metadata, category, code, message, failed_at}` — NO amount or
+  currency fields; the official example state is `TRACKER_ENROLLED` (pre-authorization).
+  The undocumented tracker-OBJECT webhook shape (previously accepted) is no longer
+  parsed: that form exists only in the Fetch Tracker response.
+- Financial validation: for payment.succeeded the provider-reported amount and currency
+  are mandatory and must be a safe positive integer in PKR equal to the locally
+  expected attempt amount; missing, invalid or contradictory financial information is
+  REJECTED into the review quarantine. The locally expected amount is never substituted
+  for a missing provider-reported amount. payment.failed records no amounts (all money
+  fields null) because the documented shape carries none.
+- Tracker state vocabulary (official page "Tracker states"): TRACKER_STARTED,
+  TRACKER_AUTHORIZED, TRACKER_ENROLLED, TRACKER_ENDED ("The tracker has been paid."),
+  TRACKER_CANCELLED, TRACKER_EXPIRED, TRACKER_REFUNDED, TRACKER_PARTIAL_REFUND,
+  TRACKER_DISPUTED, TRACKER_REVERSED, TRACKER_VOIDED. TRACKER_ENDED is the ONLY
+  documented paid state and NO state is documented as payment-failure finality. The
+  docs explicitly instruct servers to accept event types and state values beyond the
+  documented list, so unknown states never reject — they classify non-final.
+- Webhook classification matrix (conservative):
+  - payment.succeeded + TRACKER_ENDED + valid matching PKR amount → CAPTURE_CONFIRMED
+    (captured amount = provider amount, occurredAt = signed charged_at).
+  - payment.succeeded + any other/missing/unknown state → REVIEW_REQUIRED (never
+    capture). This closes the previous hole where a missing state still settled.
+  - payment.failed + TRACKER_ENDED → REVIEW_REQUIRED (contradiction with capture).
+  - payment.failed + anything else (missing/TRACKER_STARTED/TRACKER_ENROLLED/unknown)
+    → UNCERTAIN (non-final). A failed webhook NEVER becomes FAILURE_CONFIRMED because
+    the documented vocabulary defines no failure-final state — see support blockers.
+    Uncertain/failure observations never release inventory or coupon reservations:
+    reservation release happens only through the existing expiry lifecycle.
+  - Any other event type (payment.refunded, authorization.*, void.*, subscription.*) →
+    quarantined with the original encrypted bytes for manual review; no automated
+    refund processing exists.
+- Status lookup (official page "Fetch Tracker"): GET /reporter/api/v1/payments/{tracker};
+  the documented response is `{ok: true, data: {token, environment, state, intent,
+  mode, entry_mode, …, purchase_totals: {quote_amount: {currency, amount}, …}}}` — the
+  tracker fields sit DIRECTLY under `data`. The previous implementation expected an
+  undocumented `data.tracker{…}` wrapper plus `status.errors` and would have rejected
+  the documented response shape; it now parses the documented shape (ok must be true
+  when present; environment/PKR/amount-vs-expected all validated; state classified with
+  the same vocabulary: TRACKER_ENDED → CAPTURE_CONFIRMED, documented in-progress states
+  (TRACKER_STARTED/AUTHORIZED/ENROLLED) → PENDING, everything else → UNCERTAIN).
+  X-SFPY-MERCHANT-SECRET is still sent; note the docs' example curl carries no auth
+  header — live confirmation of reporter authentication is an activation blocker.
+- Delivery semantics: acknowledge 2xx within the 10-second window after durable
+  storage; 4xx is terminal, 5xx/503 re-enters the provider retry queue. Inbox
+  processing runs out of band, never inside the delivery window.
+
+## Earlier verification notes (2026-11-08)
 
 The following points were confirmed against official Safepay documentation and are now
 implemented (src/lib/safepay/verification.ts, src/app/api/webhooks/safepay/route.ts):
@@ -24,8 +112,9 @@ implemented (src/lib/safepay/verification.ts, src/app/api/webhooks/safepay/route
   headers; that contract is deliberately NOT accepted here — unrecognized events or
   signature profiles are quarantined for review, never processed.
 - Webhook events: JSON envelope `type` ("payment.succeeded"/"payment.failed") plus a
-  `data` payment object; tracker facts are parsed from `data.tracker` (object or token
-  string). Any other type or shape is quarantined with the original encrypted bytes.
+  `data` payment object; tracker facts are parsed only from the documented
+  `data.tracker` token string with sibling `state`/`amount`/`currency`. Any other type
+  or shape is quarantined with the original encrypted bytes.
 - Success finality: only tracker state `TRACKER_ENDED` classifies as CAPTURE_CONFIRMED.
   `TRACKER_STARTED` is PENDING; every other state stays UNCERTAIN or REVIEW_REQUIRED.
   No failure/expiration state is guessed.
@@ -164,13 +253,22 @@ Before connecting the customer UI:
 - Authoritative token lifetime/scope, renewal and multiple-token/tracker reuse semantics.
 - Approved hosted entry mode/intent, PCI responsibility, automatic capture and capability behavior.
 - Stable creation-response merchant identity/client mapping and its relationship to account/API keys.
-- Exact webhook signed bytes/canonicalization, algorithm/encoding/header and signed fixtures; resolve the
-  hosted-payment HMAC-SHA512 versus subscription examples without borrowing a subscription algorithm.
-- Stable merchant/environment event identity, duplicate body variation, event ordering, retries and replay.
+- RESOLVED 2026-11-09 from official docs (developers/webhooks/*): webhook signed bytes are the raw
+  request body, HMAC-SHA512/hex in X-SFPY-SIGNATURE; envelope/event shapes and the tracker-state
+  vocabulary are documented and implemented. Still open: one authorized sandbox transaction with the
+  merchant's real endpoint secret to confirm live deliveries match the documented shapes byte-for-byte.
+- RESOLVED 2026-11-09: event identity (envelope `token`), redelivery/retry fields (delivery_attempts,
+  next_attempt_at) and duplicate handling are documented and idempotent in the inbox.
+- No documented tracker state establishes payment-FAILURE finality (TRACKER_CANCELLED/EXPIRED are
+  terminal-but-not-failure). Until Safepay documents one, payment.failed webhooks stay non-final
+  (UNCERTAIN/REVIEW_REQUIRED) and FAILURE_CONFIRMED is never derived from provider evidence.
+- Whether the Fetch Tracker endpoint actually requires X-SFPY-MERCHANT-SECRET: the official example
+  curl shows no auth header. Confirm live before activation; the secret stays sent meanwhile.
 - Supported status endpoint/version and fields proving capture, pending/failed finality and cumulative refunds.
 - Provider creation idempotency/concurrency/retention, error side-effect guarantees and lost-response lookup.
 - Tracker cancellation/expiration/in-flight late capture and when a replacement is provably safe.
 - Partial/full refunds, partial captures and handling an expired reservation after financial success.
+  Refund/authorization/void events are quarantined for manual review; no automated refund handling exists.
 
 ## Tests
 
@@ -179,6 +277,18 @@ response mismatches, local signed-state verification and disabled-route behavior
 Disposable SQLite integration tests exercise real durable claims/evidence/versions, successful preparation,
 authentication failure, concurrency/replay, crashed/uncertain/replacement attempts, ownership, snapshot/hold
 validation, expiry during HTTP and persistence failure. No real provider request is required or permitted.
+
+Webhook-contract tests (tests/unit/safepay-verification.test.ts, 2026-11-09) use the documented payload
+shapes only: string `data.tracker` with sibling `state`/`amount`/`currency`; documented payment.failed
+payload (TRACKER_ENROLLED, no financial fields) classifying UNCERTAIN with null amounts; missing/unknown
+states never capturing or failing; contradictory evidence routed to review; missing/contradictory amounts
+rejected instead of substituted; foreign merchant_api_key/environment rejected; tracker-object webhooks and
+non-2.0.0 generations rejected; malformed timestamps rejected and absent ones tolerated; old-but-signed
+redeliveries classified normally (no invented freshness rule); documented Fetch Tracker response shape with
+amount-vs-expected validation. Integration coverage (integration.safepay-webhook.test.ts) adds: documented
+failure observation stored → recorded with reservations HELD and a scheduled re-check; contradictory
+failure evidence → review_required with holds retained; capture evidence with a wrong amount → quarantined;
+signature tampering → quarantined; redelivery idempotency; and the settled-order happy path.
 
 The test-only server-only alias substitutes Next.js's poison marker only inside Vitest.
 The default disposable DB harness includes integration.safepay.test.ts. Generate both clients in an isolated

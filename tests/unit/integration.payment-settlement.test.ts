@@ -144,7 +144,7 @@ describe("Authenticated settlement with simulated verified observations", () => 
       const order = await state(f.orderId);
       expect(order).toMatchObject({ status: "CONFIRMED", paymentStatus: "PAID", acceptedPaymentId: f.paymentId, paymentReviewStatus: "CLEAR" });
       expect(order.payments[0]).toMatchObject({ status: "PAID", attemptState: "SETTLED", reconcileStatus: "VERIFIED",
-        capturedAmountMinor: BigInt(f.observation.amountMinor) });
+        capturedAmountMinor: BigInt(f.observation.amountMinor!) });
       expect(order.items.every(i => i.inventoryReservation?.state === "CONSUMED")).toBe(true);
       expect(await quantities(f)).toEqual([4, 4]);
       if (f.coupon) {

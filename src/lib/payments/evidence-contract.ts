@@ -11,7 +11,11 @@ export const paymentObservationSchema = z.object({
   merchantIdentity: opaque, observationId: opaque, orderId: id, paymentId: id,
   attemptNumber: z.number().int().positive().max(2_147_483_647), trackerToken: z.string().min(1).max(2048).regex(/^[\x21-\x7e]+$/),
   owner: z.object({ kind: z.literal("USER"), hash: z.string().regex(/^[a-f0-9]{64}$/), userId: id }).strict(),
-  currency: z.string().regex(/^[A-Z]{3}$/), amountMinor: minor,
+  currency: z.string().regex(/^[A-Z]{3}$/),
+  // Provider-reported quote amount. Null when the documented payload shape carries no
+  // financial fields (e.g. the documented Safepay payment.failed webhook) — the locally
+  // expected amount is never substituted for a missing provider-reported amount.
+  amountMinor: minor.nullable(),
   // These are application domain facts. Only an approved adapter may classify a provider response into them.
   kind: z.enum(["CAPTURE_CONFIRMED", "PENDING", "UNCERTAIN", "FAILURE_CONFIRMED", "REFUND_NOTICE", "REVIEW_REQUIRED"]),
   capturedMinor: minor.nullable(), refundMinor: minor.nullable(),

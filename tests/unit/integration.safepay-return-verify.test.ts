@@ -104,12 +104,15 @@ async function fixture(options: { coupon?: boolean; state?: string } = {}) {
 function reporterTransport(state: string, amountMinor: number): HttpTransport {
   return async (url) => {
     const token = decodeURIComponent(url.pathname.split("/").pop() ?? "");
+    // Documented Fetch Tracker response (concepts/fetch-tracker): tracker fields sit
+    // directly under `data` — no "tracker" wrapper, no status.errors envelope.
     return new Response(JSON.stringify({
-      data: { tracker: {
+      ok: true,
+      data: {
         token, environment: config.environment, state,
+        intent: "CYBERSOURCE", mode: "payment", entry_mode: "flex",
         purchase_totals: { quote_amount: { currency: "PKR", amount: amountMinor } },
-      } },
-      status: { errors: [], message: "success" },
+      },
     }), { status: 200 });
   };
 }
