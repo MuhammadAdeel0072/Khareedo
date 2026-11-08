@@ -1,6 +1,6 @@
 // Product catalogue service — storefront reads (FR-07..13) + admin CRUD (FR-39/40).
 import { cache } from "react";
-import { Prisma, type Promotion } from "../../generated/postgres-client";
+import { Prisma } from "../../generated/postgres-client";
 import { db } from "@/lib/db";
 import { writeAvailableStock } from "@/services/reservation-writes";
 import { type ProductSort } from "@/lib/constants";
@@ -182,78 +182,52 @@ export async function getNewArrivals(limit = 8): Promise<ProductListItem[]> {
   return rows.map(toListItem);
 }
 
-type ProductJson = Omit<ProductListItem, "createdAt"> & { createdAt: string };
-type PromotionJson = Omit<Promotion, "createdAt" | "updatedAt" | "startsAt" | "endsAt"> & {
-  createdAt: string;
-  updatedAt: string;
-  startsAt: string | null;
-  endsAt: string | null;
-};
-
-function productRows(featured: boolean, orderBy: Prisma.Sql, limit: number) {
-  return Prisma.sql`
-    SELECT p."id", p."name", p."slug", p."price", p."comparePrice", p."brand",
-      p."rating", p."reviewCount", p."status", p."isFeatured",
-      p."createdAt" AT TIME ZONE 'UTC' AS "createdAt",
-      c."name" AS "categoryName", c."slug" AS "categorySlug",
-      image."url" AS "image", COALESCE(i."quantity", 0) AS "stock"
-    FROM "Product" p
-    JOIN "Category" c ON c."id" = p."categoryId"
-    LEFT JOIN "Inventory" i ON i."productId" = p."id"
-    LEFT JOIN LATERAL (
-      SELECT "url" FROM "ProductImage" WHERE "productId" = p."id"
-      ORDER BY "sortOrder" ASC LIMIT 1
-    ) image ON TRUE
-    WHERE p."status" = 'PUBLISHED' AND p."deletedAt" IS NULL
-      AND c."isActive" = TRUE ${featured ? Prisma.sql`AND p."isFeatured" = TRUE` : Prisma.empty}
-    ORDER BY ${orderBy} LIMIT ${limit}
-  `;
-}
-
 /**
- * One read-only round trip for the homepage's two product lists and offers.
+ * One parallel read for the homepage's two product lists and offers.
  * Separate limited/sorted lists preserve their existing rules and overlap.
  * Do not persistently cache prices, availability or time-bounded promotions.
+ *
+ * Implemented with standard typed queries instead of one raw round trip: the raw
+ * version composed nested Prisma.sql fragments, which silently break under bundlers
+ * that ship more than one Prisma runtime copy in the server bundle — a fragment built
+ * by a different copy fails the client's instanceof check and is bound as a plain
+ * parameter, producing `WITH featured AS ($1)` → PostgreSQL 42601 "syntax error at
+ * or near $1". Each typed query here is indexed, bounded and uses the shared select,
+ * so the parallel reads keep the same data shape with no fragile SQL composition.
  */
 export async function getHomepageCatalog() {
   const now = new Date();
-  const [data] = await db.$queryRaw<Array<{
-    featured: ProductJson[];
-    newArrivals: ProductJson[];
-    promotions: PromotionJson[];
-  }>>`
-    WITH featured AS (${productRows(true, Prisma.sql`p."rating" DESC`, 8)}),
-      arrivals AS (${productRows(false, Prisma.sql`p."createdAt" DESC`, 4)})
-    SELECT
-      COALESCE((SELECT jsonb_agg(featured ORDER BY "rating" DESC) FROM featured), '[]'::jsonb) AS "featured",
-      COALESCE((SELECT jsonb_agg(arrivals ORDER BY "createdAt" DESC) FROM arrivals), '[]'::jsonb) AS "newArrivals",
-      COALESCE((SELECT jsonb_agg(offers ORDER BY "createdAt" DESC) FROM (
-        SELECT "id", "title", "description", "type", "value", "minOrderAmount", "isActive",
-          "startsAt" AT TIME ZONE 'UTC' AS "startsAt",
-          "endsAt" AT TIME ZONE 'UTC' AS "endsAt",
-          "createdAt" AT TIME ZONE 'UTC' AS "createdAt",
-          "updatedAt" AT TIME ZONE 'UTC' AS "updatedAt"
-        FROM "Promotion"
-        WHERE "isActive" = TRUE
-          AND ("startsAt" IS NULL OR "startsAt" <= ${now})
-          AND ("endsAt" IS NULL OR "endsAt" >= ${now})
-        ORDER BY "createdAt" DESC LIMIT ${2}
-      ) offers), '[]'::jsonb) AS "promotions"
-  `;
-
-  const products = (rows: ProductJson[]): ProductListItem[] => rows.map(row => ({
-    ...row, createdAt: new Date(row.createdAt),
-  }));
+  const [featuredRows, newArrivalRows, promotionRows] = await Promise.all([
+    db.product.findMany({
+      relationLoadStrategy: "join",
+      where: { status: "PUBLISHED", deletedAt: null, isFeatured: true, category: { isActive: true } },
+      select: listSelect,
+      orderBy: [{ rating: "desc" }],
+      take: 8,
+    }),
+    db.product.findMany({
+      relationLoadStrategy: "join",
+      where: { status: "PUBLISHED", deletedAt: null, category: { isActive: true } },
+      select: listSelect,
+      orderBy: [{ createdAt: "desc" }],
+      take: 4,
+    }),
+    db.promotion.findMany({
+      where: {
+        isActive: true,
+        AND: [
+          { OR: [{ startsAt: null }, { startsAt: { lte: now } }] },
+          { OR: [{ endsAt: null }, { endsAt: { gte: now } }] },
+        ],
+      },
+      orderBy: { createdAt: "desc" },
+      take: 2,
+    }),
+  ]);
   return {
-    featured: products(data.featured),
-    newArrivals: products(data.newArrivals),
-    promotions: data.promotions.map((row): Promotion => ({
-      ...row,
-      startsAt: row.startsAt === null ? null : new Date(row.startsAt),
-      endsAt: row.endsAt === null ? null : new Date(row.endsAt),
-      createdAt: new Date(row.createdAt),
-      updatedAt: new Date(row.updatedAt),
-    })),
+    featured: featuredRows.map(toListItem),
+    newArrivals: newArrivalRows.map(toListItem),
+    promotions: promotionRows,
   };
 }
 
