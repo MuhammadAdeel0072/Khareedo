@@ -252,3 +252,19 @@ Work Log:
 
 Stage Summary:
 - The end-to-end sandbox lifecycle Checkout → Hosted Payment → Return → Trusted Verification → Settlement → Reconciliation is now wired and integration-proven; the browser redirect is finally treated as informational only, and every money-moving transition requires authenticated Safepay evidence.
+---
+Task ID: 11 (live sandbox verification, merge to main, preview)
+Agent: Z.ai main agent
+Task: Prove the Safepay gateway end-to-end with the merchant's real SANDBOX keys, then merge to main.
+
+Work Log:
+- Merchant provided .env for local runtime (Supabase Postgres + Safepay sandbox). Stored locally only; .env is gitignored, no secret entered the repo or this log.
+- Supabase connectivity verified with sslmode=verify-full + system trust (no CA file needed; the missing prod-ca-2021.crt line was commented out in local .env only).
+- PAYMENT_PAYLOAD_KEY (webhook custody) was missing and was generated locally.
+- Live provider proof: POST /order/payments/v3/ on sandbox returned HTTP 201 with a real tracker (TRACKER_STARTED, PKR echoed exactly); reporter GET returned the same tracker non-final.
+- Live app proof (production build from the branch, real Supabase DB): session route passes the config gate (401 AUTHENTICATION_REQUIRED unauthenticated); real credentials login via NextAuth; cart add; checkout session returned HTTP 200 with reference KH2611083985351 and a genuine sandbox hosted-checkout redirectUrl carrying tracker + signed state cookie.
+- Settlement proof: reconcile sweep over the STARTED tracker left payment/order PENDING (no premature settlement); a webhook signed with the real SAFEPAY_WEBHOOK_SECRET (HMAC-SHA512 over raw body) was accepted to custody (200 stored); inbox processing settled it; final state payment PAID + order CONFIRMED/PAID; inventory 25 -> 24 consumed exactly once; identical replay returned already_settled (idempotent).
+- A malformed event (amount as string) was correctly quarantined, confirming shape validation.
+- E2E rows were removed FK-safely afterwards (order payment pointers nulled first); inventory restored to 25; the pre-existing quarantined dev payments were untouched.
+- Merged fix/safepay-verification into main by fast-forward (c6d59cd..9606b08) and pushed; production build rebuilt from main; storefront verified in a real browser (renders, zero page/console errors).
+- Honest limits: Safepay cannot deliver webhooks to localhost, so webhook delivery was simulated with a genuine signature locally; reconciliation channel covers live verification until a public URL is configured in the Safepay dashboard. Production activation remains code-gated by design.
