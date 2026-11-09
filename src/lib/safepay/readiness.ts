@@ -21,3 +21,10 @@ export const SAFEPAY_SERVER_ACTIVATION = Object.freeze({
 // Allows hosted-session creation against sandbox only. It does not activate the
 // production flow, payment verification, settlement, webhooks, or reconciliation.
 export const SAFEPAY_SANDBOX_SESSION_ENABLED = true as const;
+
+// Refund submissions are sandbox-scoped by the same code-gate pattern as verification:
+// no environment variable or admin setting can widen this scope. Production refunds
+// stay hard-disabled until the open provider questions are answered (refund endpoint
+// idempotency, per-refund identifiers, method support, failure codes, sandbox webhook
+// triggering) and the hosted profile blockers above clear.
+export const SAFEPAY_REFUNDS_SANDBOX_ONLY = true as const;

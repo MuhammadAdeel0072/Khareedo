@@ -49,6 +49,12 @@ function minorFromAmount(amount: number): string | null {
   return Number.isSafeInteger(amount) && amount > 0 && amount <= Number.MAX_SAFE_INTEGER ? String(amount) : null;
 }
 
+// Non-negative variant for fields where zero is a legitimate documented value (e.g. a
+// fully-refunded tracker reports balance 0).
+function nonNegativeFromAmount(amount: number): string | null {
+  return Number.isSafeInteger(amount) && amount >= 0 && amount <= Number.MAX_SAFE_INTEGER ? String(amount) : null;
+}
+
 // Local attempt identity bound to a tracker. The adapter is pure (no DB import);
 // the registry injects this resolver so adapter tests stay storage-free.
 export type SafepayAttemptContext = Readonly<{
@@ -84,6 +90,8 @@ function observation(input: {
   amountMinor: string;
   capturedMinor: string | null;
   refundMinor: string | null;
+  providerState: string | null;
+  occurredAt: string | null;
 }): PaymentObservation {
   return {
     provider: "SAFEPAY",
@@ -101,16 +109,24 @@ function observation(input: {
     kind: input.kind,
     capturedMinor: input.capturedMinor,
     refundMinor: input.refundMinor,
-    occurredAt: null, // No documented provider timestamp on either channel; never fabricated.
+    providerState: input.providerState,
+    occurredAt: input.occurredAt,
   };
 }
 
 // Finality is derived ONLY from documented states. Anything unlisted stays uncertain:
 // guessing a failure could release reservations; guessing success could settle nothing.
-function classifyTrackerState(state: string | undefined): PaymentObservation["kind"] | "UNPARSABLE" {
+// Documented refund/reversal states are classified as their own intermediate facts:
+// they are never capture facts and never finalize money by themselves — the refund
+// settlement path corroborates them against the local ledger.
+function classifyTrackerState(state: string | undefined):
+  PaymentObservation["kind"] | "REFUND_FULL" | "REFUND_PARTIAL" | "REVERSED" | "UNPARSABLE" {
   if (state === undefined) return "UNPARSABLE";
   if (state === "TRACKER_ENDED") return "CAPTURE_CONFIRMED";
   if (state === "TRACKER_STARTED") return "PENDING";
+  if (state === "TRACKER_REFUNDED") return "REFUND_FULL";
+  if (state === "TRACKER_PARTIAL_REFUND") return "REFUND_PARTIAL";
+  if (state === "TRACKER_REVERSED") return "REVERSED";
   return "UNCERTAIN";
 }
 
@@ -163,6 +179,35 @@ function trackerFactsFromData(data: unknown): {
   };
 }
 
+// Documented payment.refunded payload fields: refund_amount (this refund, integer minor
+// units), optional balance (remaining refundable), optional refunded_at { seconds, nanos }.
+// Absent or malformed refund amounts are REJECTED (quarantined) — an amount is never guessed.
+function refundAmountFromData(data: unknown): string | null {
+  if (data === null || typeof data !== "object" || Array.isArray(data)) return null;
+  const value = (data as Record<string, unknown>)["refund_amount"];
+  return typeof value === "number" ? minorFromAmount(value) : null;
+}
+
+function refundBalanceFromData(data: unknown): string | null | undefined {
+  if (data === null || typeof data !== "object" || Array.isArray(data)) return undefined;
+  const value = (data as Record<string, unknown>)["balance"];
+  if (value === undefined || value === null) return undefined;
+  const minor = typeof value === "number" ? nonNegativeFromAmount(value) : null;
+  return minor === null ? null : minor; // null = present but invalid
+}
+
+function refundedAtFromData(data: unknown): string | null {
+  if (data === null || typeof data !== "object" || Array.isArray(data)) return null;
+  const value = (data as Record<string, unknown>)["refunded_at"];
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const seconds = (value as Record<string, unknown>)["seconds"];
+  // Bounded epoch seconds (1970..2100). Nanos are documented but sub-second precision is
+  // not representable in the observation timestamp; the second is the asserted fact.
+  if (typeof seconds !== "number" || !Number.isSafeInteger(seconds) ||
+      seconds < 0 || seconds > 4_102_444_800) return null;
+  return new Date(seconds * 1000).toISOString();
+}
+
 export function createSafepayWebhookAdapter(
   config: SafepayConfig,
   webhookSecret: string,
@@ -197,7 +242,10 @@ export function createSafepayWebhookAdapter(
       } catch {
         return { kind: "rejected" as const };
       }
-      if (event.type !== "payment.succeeded" && event.type !== "payment.failed") {
+      const documentedEvent = event.type === "payment.succeeded" || event.type === "payment.failed" ||
+        event.type === "payment.refunded" || event.type === "void.succeeded" ||
+        event.type === "authorization.reversed";
+      if (!documentedEvent) {
         return { kind: "rejected" as const };
       }
       const facts = trackerFactsFromData(event.data);
@@ -214,26 +262,82 @@ export function createSafepayWebhookAdapter(
         return { kind: "rejected" as const };
       }
       const currency = facts.currency ?? attempt.currency;
-      if (!facts.amountMinor || currency !== "PKR" || attempt.currency !== "PKR") {
+      if (currency !== "PKR" || attempt.currency !== "PKR") {
         return { kind: "rejected" as const };
       }
       const classified = classifyTrackerState(facts.state);
-      // The documented event type is the primary signal ("payment.succeeded" → mark the
-      // payment complete per the official webhook guide); tracker state is corroboration.
-      // Contradictory evidence (succeeded while state still TRACKER_STARTED, failed while
-      // TRACKER_ENDED) is never resolved by guessing — it goes to manual review.
-      const kind: PaymentObservation["kind"] =
-        event.type === "payment.failed"
-          ? classified === "CAPTURE_CONFIRMED" ? "REVIEW_REQUIRED" : "FAILURE_CONFIRMED"
-          : classified === "UNPARSABLE" || classified === "CAPTURE_CONFIRMED" ? "CAPTURE_CONFIRMED"
-          : "REVIEW_REQUIRED";
-      const capture = kind === "CAPTURE_CONFIRMED";
       // Event identity: documented X-SFPY event id when present, else the body digest —
       // stable for identical at-least-once redeliveries of the same signed payload.
       const headerEventId = input.headers["x-sfpy-event-id"];
       const observationId = headerEventId && /^[\x21-\x7e]{1,256}$/.test(headerEventId)
         ? headerEventId
         : createHash("sha256").update(Buffer.from(input.body)).digest("hex");
+      const captureMinor = facts.amountMinor ?? null;
+
+      // Documented refund event: an authenticated statement that this tracker refunded
+      // refund_amount minor units. The amount is the settlement fact; the tracker state
+      // (when present) is corroboration. A refund event whose state contradicts a refund
+      // (capture/pending/reversed) is never resolved by guessing — it goes to review.
+      if (event.type === "payment.refunded") {
+        const refundMinor = refundAmountFromData(event.data);
+        if (!refundMinor) return { kind: "rejected" as const };
+        if (refundBalanceFromData(event.data) === null) return { kind: "rejected" as const };
+        const contradictory = classified === "CAPTURE_CONFIRMED" || classified === "PENDING" ||
+          classified === "REVERSED";
+        // Contradictory refund events stay authenticated but carry the REFUND amount into
+        // review: settlement routes them to manual handling with the asserted amount intact.
+        const kind: PaymentObservation["kind"] = contradictory ? "REVIEW_REQUIRED" : "REFUND_CONFIRMED";
+        return {
+          kind: "authenticated" as const,
+          observation: observation({
+            config, merchantIdentity, attempt,
+            trackerToken: facts.token,
+            observationId,
+            kind,
+            // amountMinor is the original quote when the event carries totals; "0" is the
+            // declared sentinel for "not asserted by this evidence" on refund events.
+            amountMinor: captureMinor ?? "0",
+            capturedMinor: null,
+            refundMinor,
+            providerState: facts.state ?? null,
+            occurredAt: refundedAtFromData(event.data),
+          }),
+        };
+      }
+
+      // Documented reversal events (authorization/void generation). Khareedo never submits
+      // reversals, so any reversal for a local tracker is a dashboard action: recorded and
+      // routed to manual review. Reversals are never conflated with post-capture refunds.
+      if (event.type === "void.succeeded" || event.type === "authorization.reversed") {
+        return {
+          kind: "authenticated" as const,
+          observation: observation({
+            config, merchantIdentity, attempt,
+            trackerToken: facts.token,
+            observationId,
+            kind: "REVERSAL_NOTICE",
+            amountMinor: captureMinor ?? "0",
+            capturedMinor: null,
+            refundMinor: null,
+            providerState: facts.state ?? null,
+            occurredAt: null,
+          }),
+        };
+      }
+
+      // The documented event type is the primary signal ("payment.succeeded" → mark the
+      // payment complete per the official webhook guide); tracker state is corroboration.
+      // Contradictory evidence (succeeded while state still TRACKER_STARTED or a
+      // refund/reversal state, failed while TRACKER_ENDED) is never resolved by guessing —
+      // it goes to manual review.
+      const kind: PaymentObservation["kind"] =
+        event.type === "payment.failed"
+          ? classified === "UNCERTAIN" || classified === "UNPARSABLE" || classified === "PENDING"
+            ? "FAILURE_CONFIRMED" : "REVIEW_REQUIRED"
+          : classified === "UNPARSABLE" || classified === "CAPTURE_CONFIRMED" ? "CAPTURE_CONFIRMED"
+          : "REVIEW_REQUIRED";
+      const capture = kind === "CAPTURE_CONFIRMED";
+      if (!captureMinor) return { kind: "rejected" as const };
       return {
         kind: "authenticated" as const,
         observation: observation({
@@ -241,9 +345,11 @@ export function createSafepayWebhookAdapter(
           trackerToken: facts.token,
           observationId,
           kind,
-          amountMinor: facts.amountMinor,
-          capturedMinor: capture ? facts.amountMinor : null,
+          amountMinor: captureMinor,
+          capturedMinor: capture ? captureMinor : null,
           refundMinor: capture ? "0" : null,
+          providerState: facts.state ?? null,
+          occurredAt: null,
         }),
       };
     },
@@ -302,8 +408,14 @@ export function createSafepayReconciliationAdapter(
         return { kind: "rejected" as const };
       }
       const classified = classifyTrackerState(tracker.state);
-      const kind: PaymentObservation["kind"] =
-        classified === "UNPARSABLE" ? "UNCERTAIN" : classified;
+      // Documented refund/reversal tracker states: recorded as authenticated observations
+      // WITHOUT any refund amount (the reporter does not document one). Settlement decides
+      // what may be finalized from these facts against the local ledger — nothing here.
+      const refundish = classified === "REFUND_FULL" || classified === "REFUND_PARTIAL" ||
+        classified === "REVERSED";
+      const kind: PaymentObservation["kind"] = refundish
+        ? classified === "REVERSED" ? "REVERSAL_NOTICE" : "REFUND_NOTICE"
+        : classified === "UNPARSABLE" ? "UNCERTAIN" : classified;
       const capture = kind === "CAPTURE_CONFIRMED";
       // Stable for the same tracker/state/amount: repeated identical reconciliations dedup,
       // a genuine state transition produces a new observation.
@@ -318,6 +430,8 @@ export function createSafepayReconciliationAdapter(
           amountMinor,
           capturedMinor: capture ? amountMinor : null,
           refundMinor: capture ? "0" : null,
+          providerState: tracker.state,
+          occurredAt: null,
         }),
       };
     },

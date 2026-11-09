@@ -16,6 +16,7 @@ import { createSafepayProvider } from "@/lib/safepay/provider";
 import { createSafepayReservationService } from "@/services/safepay-reservations.service";
 import { createPaymentWebhookService } from "@/services/payment-webhook.service";
 import { createPaymentReconciliationService } from "@/services/payment-reconciliation.service";
+import { createPaymentRefundService } from "@/services/payment-refund.service";
 import { createPaymentPayloadVault } from "@/lib/payments/payload-vault";
 import { loadPaymentPayloadVaultKeys } from "@/lib/payments/vault-env";
 
@@ -23,7 +24,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const bodySchema = z.object({
-  action: z.enum(["expire_reservations", "process_webhook_inbox", "reconcile_due_payments"]),
+  action: z.enum(["expire_reservations", "process_webhook_inbox", "reconcile_due_payments", "reconcile_refunds"]),
   limit: z.number().int().min(1).max(100).optional(),
 }).strict();
 
@@ -97,8 +98,20 @@ export async function POST(request: Request) {
       return Response.json({ ok: false, code: "SAFEPAY_CONFIGURATION_UNAVAILABLE",
         error: "Safepay server configuration is incomplete." }, { status: 503, headers: { "Cache-Control": "no-store" } });
     }
-    const due = await reconciliation.due(batch);
     const provider = createSafepayProvider(config);
+    if (action === "reconcile_refunds") {
+      // Refund sweep is strictly bounded and never auto-resubmits an uncertain submission:
+      // REQUESTED → submit once, SUBMITTING(stale) → review, PENDING → one reporter poll.
+      const refunds = createPaymentRefundService(db as never, provider, {
+        environment: config.environment, merchantAccountRef: config.merchantAccountRef,
+        pollDelayMs: 60_000, maxConfirmationAttempts: 6, submitGraceMs: 120_000,
+        reversalWindowMs: 24 * 3_600_000, cardRefundWindowMs: 90 * 24 * 3_600_000,
+      });
+      const sweep = await reconciliation.reconcileDueRefunds(refunds, provider,
+        { environment: config.environment, merchantAccountRef: config.merchantAccountRef }, batch);
+      return jsonOk({ action, batch, ...sweep });
+    }
+    const due = await reconciliation.due(batch);
     const outcomes: Array<{ paymentId: string; outcome: string; code?: string }> = [];
     for (const payment of due) {
       if (payment.provider !== "SAFEPAY" || !payment.trackerToken) continue;
