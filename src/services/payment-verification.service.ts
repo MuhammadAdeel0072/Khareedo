@@ -1,4 +1,5 @@
 import "server-only";
+import { randomUUID } from "node:crypto";
 import type { PrismaClient } from "../../generated/postgres-client";
 import type { SafepayConfig } from "@/lib/safepay/config";
 import type { SafepayProvider } from "@/lib/safepay/provider";
@@ -35,6 +36,7 @@ export type ReconciliationObserver = ReturnType<typeof createPaymentReconciliati
 const MAX_LAST_ERROR_CODE_LENGTH = 64;
 const FETCH_RETRY_BASE_MS = 60_000;
 const FETCH_RETRY_MAX_MS = 900_000;
+const FETCH_LEASE_GRACE_MS = 5_000;
 
 /** Exponential, capped retry scheduling for transport failures only. Financial state is untouched. */
 export function fetchRetryDelayMs(attempts: number): number {
@@ -54,19 +56,19 @@ export function createPaymentVerificationService(deps: {
   const now = deps.now ?? (() => new Date());
   const minIntervalMs = deps.minIntervalMs ?? 30_000;
 
-  async function recordFetchFailure(paymentId: string, code: string, attempts: number): Promise<void> {
+  async function recordFetchFailure(paymentId: string, leaseToken: string, code: string, attempts: number): Promise<void> {
     const at = now();
-    // Scheduling fields only. Deliberately no version CAS: concurrent settlement retries
-    // converge on the same retry schedule, and a bumped version only makes a concurrent
-    // settlement retry (its CAS fails → re-read), never weakens a check.
     await deps.database.payment.updateMany({
-      where: { id: paymentId, status: "PENDING", reconcileStatus: { in: ["PENDING", "UNCERTAIN"] } },
+      where: { id: paymentId, reconcileLeaseToken: leaseToken, status: "PENDING",
+        reconcileStatus: { in: ["PENDING", "UNCERTAIN"] } },
       data: {
         reconcileAttempts: { increment: 1 },
         lastErrorCode: code.slice(0, MAX_LAST_ERROR_CODE_LENGTH),
         lastErrorAt: at,
         lastReconcileAt: at,
         nextReconcileAt: new Date(at.getTime() + fetchRetryDelayMs(attempts)),
+        reconcileLeaseToken: null,
+        reconcileLeaseUntil: null,
         version: { increment: 1 },
       },
     });
@@ -98,6 +100,8 @@ export function createPaymentVerificationService(deps: {
   lastReconcileAt: true,
   nextReconcileAt: true,
   reconcileAttempts: true,
+  reconcileLeaseUntil: true,
+  version: true,
           order: {
             select: {
               id: true, paymentFlowVersion: true, paymentMethod: true, status: true,
@@ -115,29 +119,56 @@ export function createPaymentVerificationService(deps: {
           (order.paymentReviewStatus !== null && order.paymentReviewStatus !== "CLEAR")) {
         return { kind: "skipped", code: "NOT_ELIGIBLE" };
       }
-      if (
-  payment.nextReconcileAt &&
-  at.getTime() < payment.nextReconcileAt.getTime()
-) {
-  return { kind: "skipped", code: "BACKOFF" };
-}
-
-      const fetched = await deps.provider.fetchTracker({ trackerToken: payment.trackerToken });
-      if (fetched.kind !== "fetched") {
-        await recordFetchFailure(payment.id, fetched.code, payment.reconcileAttempts);
-        return { kind: "provider_fetch_failed", code: fetched.code };
+      if ((payment.nextReconcileAt && at < payment.nextReconcileAt) ||
+          (payment.lastReconcileAt && at.getTime() - payment.lastReconcileAt.getTime() < minIntervalMs) ||
+          (payment.reconcileLeaseUntil && at < payment.reconcileLeaseUntil)) {
+        return { kind: "skipped", code: "BACKOFF" };
       }
-      // The exact provider bytes enter the approved reconciliation adapter; settlement
-      // re-validates everything inside its own transaction. Nothing is parsed here.
-      const observed = await deps.reconciliation.observe({
-        provider: "SAFEPAY",
-        environment: deps.config.environment,
-        merchantAccountRef: deps.config.merchantAccountRef,
-        channel: "RECONCILIATION",
-        body: fetched.bodyBytes,
-        headers: {},
+
+      const leaseToken = randomUUID();
+      const leaseUntil = new Date(at.getTime() + Math.max(
+        minIntervalMs,
+        (deps.config.timeoutMs ?? 10_000) + FETCH_LEASE_GRACE_MS,
+      ));
+      const claim = await deps.database.payment.updateMany({
+        where: {
+          id: payment.id,
+          version: payment.version,
+          status: "PENDING",
+          reconcileStatus: { in: ["PENDING", "UNCERTAIN"] },
+          OR: [{ reconcileLeaseUntil: null }, { reconcileLeaseUntil: { lte: at } }],
+        },
+        data: {
+          reconcileLeaseToken: leaseToken,
+          reconcileLeaseUntil: leaseUntil,
+          lastReconcileAt: at,
+          version: { increment: 1 },
+        },
       });
-      return observed;
+      if (claim.count !== 1) return { kind: "skipped", code: "BACKOFF" };
+
+      try {
+        const fetched = await deps.provider.fetchTracker({ trackerToken: payment.trackerToken });
+        if (fetched.kind !== "fetched") {
+          await recordFetchFailure(payment.id, leaseToken, fetched.code, payment.reconcileAttempts);
+          return { kind: "provider_fetch_failed", code: fetched.code };
+        }
+        // The exact provider bytes enter the approved reconciliation adapter; settlement
+        // re-validates everything inside its own transaction. Nothing is parsed here.
+        return await deps.reconciliation.observe({
+          provider: "SAFEPAY",
+          environment: deps.config.environment,
+          merchantAccountRef: deps.config.merchantAccountRef,
+          channel: "RECONCILIATION",
+          body: fetched.bodyBytes,
+          headers: {},
+        });
+      } finally {
+        await deps.database.payment.updateMany({
+          where: { id: payment.id, reconcileLeaseToken: leaseToken },
+          data: { reconcileLeaseToken: null, reconcileLeaseUntil: null, version: { increment: 1 } },
+        });
+      }
     },
   };
 }

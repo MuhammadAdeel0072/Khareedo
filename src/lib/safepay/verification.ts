@@ -230,12 +230,10 @@ function dataField(data: unknown, key: string): unknown {
     : undefined;
 }
 
-// Documented event identity order: envelope event token, then a printable
-// X-SFPY-EVENT-ID header, then the body digest. All three are stable across identical
-// at-least-once redeliveries of the same signed payload.
-function webhookObservationId(event: z.infer<typeof webhookEventSchema>, headerEventId: string | undefined, body: Uint8Array): string {
+// The envelope token is authenticated by the body signature. The delivery header is
+// not, so when the token is absent use the signed body digest for replay identity.
+function webhookObservationId(event: z.infer<typeof webhookEventSchema>, body: Uint8Array): string {
   if (event.token) return event.token;
-  if (headerEventId && /^[\x21-\x7e]{1,256}$/.test(headerEventId)) return headerEventId;
   return createHash("sha256").update(Buffer.from(body)).digest("hex");
 }
 
@@ -404,7 +402,7 @@ export function createSafepayWebhookAdapter(
         observation: observation({
           config, merchantIdentity, attempt,
           trackerToken: data.data.tracker,
-          observationId: webhookObservationId(event, input.headers["x-sfpy-event-id"], input.body),
+          observationId: webhookObservationId(event, input.body),
           kind,
           amountMinor,
           capturedMinor: capture ? amountMinor : null,

@@ -303,6 +303,66 @@ describe("Signed webhook to settled order", () => {
     expect(order.acceptedPaymentId).toBe(f.paymentId);
   });
 
+  it("uses the signed body, not an unsigned event header, for fallback replay identity", async () => {
+    const f = await fixture();
+    const delivery = signedDelivery(f.token);
+    const payload = JSON.parse(new TextDecoder().decode(delivery.body));
+    delete payload.token;
+    const body = Buffer.from(JSON.stringify(payload));
+    const signature = createHmac("sha512", process.env.SAFEPAY_WEBHOOK_SECRET!)
+      .update(body).digest("hex");
+    const first = await inbox.receive({
+      ...delivery,
+      body,
+      headers: { "x-sfpy-signature": signature, "x-sfpy-event-id": "unsigned-id-one" },
+    });
+    if (first.kind !== "stored") throw new Error("Expected first delivery to be stored");
+    events.push(first.eventId);
+
+    const replay = await inbox.receive({
+      ...delivery,
+      body,
+      headers: { "x-sfpy-signature": signature, "x-sfpy-event-id": "unsigned-id-two" },
+    });
+    expect(replay).toEqual({ kind: "duplicate", eventId: first.eventId });
+  });
+
+  it("preserves a late-capture warning after a later uncertain observation", async () => {
+    const f = await fixture();
+    const closed = await adminUpdateOrderStatus(f.order.id, "CANCELLED");
+    expect(closed).toMatchObject({ ok: true });
+
+    const withEventToken = (delivery: VerificationInput, token: string): VerificationInput => {
+      const payload = JSON.parse(new TextDecoder().decode(delivery.body));
+      payload.token = token;
+      const body = Buffer.from(JSON.stringify(payload));
+      return {
+        ...delivery,
+        body,
+        headers: {
+          "x-sfpy-signature": createHmac("sha512", process.env.SAFEPAY_WEBHOOK_SECRET!)
+            .update(body).digest("hex"),
+        },
+      };
+    };
+
+    const capture = await inbox.receive(withEventToken(signedDelivery(f.token), "late-capture-event"));
+    if (capture.kind !== "stored") throw new Error("Expected late capture to be stored");
+    events.push(capture.eventId);
+    expect(await inbox.process(capture.eventId)).toEqual({ kind: "review_required" });
+    expect(await db.order.findUniqueOrThrow({ where: { id: f.order.id } }))
+      .toMatchObject({ paymentReviewStatus: "REQUIRED", paymentReviewReason: "LATE_CAPTURE" });
+
+    const uncertain = await inbox.receive(
+      withEventToken(signedDelivery(f.token, "payment.failed"), "later-uncertain-event")
+    );
+    if (uncertain.kind !== "stored") throw new Error("Expected uncertain event to be stored");
+    events.push(uncertain.eventId);
+    expect(await inbox.process(uncertain.eventId)).toEqual({ kind: "review_required" });
+    expect(await db.order.findUniqueOrThrow({ where: { id: f.order.id } }))
+      .toMatchObject({ paymentReviewStatus: "REQUIRED", paymentReviewReason: "LATE_CAPTURE" });
+  });
+
   it("quarantines conflicting signed events with the same event ID", async () => {
     const f = await fixture();
 

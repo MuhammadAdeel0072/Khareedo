@@ -34,14 +34,15 @@ describe("Safepay provider outage recovery", () => {
           },
         })),
         updateMany: vi.fn(async ({ data }: {
-          data: {
-            lastReconcileAt: Date;
-            nextReconcileAt: Date;
-          };
+          data: Record<string, unknown>;
         }) => {
-          lastReconcileAt = data.lastReconcileAt;
-          nextReconcileAt = data.nextReconcileAt;
-          attempts++;
+          if (typeof data.reconcileLeaseToken === "string") {
+            lastReconcileAt = data.lastReconcileAt as Date;
+          } else if (data.lastErrorCode) {
+            lastReconcileAt = data.lastReconcileAt as Date;
+            nextReconcileAt = data.nextReconcileAt as Date;
+            attempts++;
+          }
           return { count: 1 };
         }),
       },

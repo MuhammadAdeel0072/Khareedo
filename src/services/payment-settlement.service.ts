@@ -117,8 +117,9 @@ export function createPaymentSettlementService(database: PaymentPersistence, opt
             const review = async (reason: string, reconcileStatus = "REVIEW_REQUIRED") => {
               await changePayment({ reconcileStatus, lastReconcileAt: now, nextReconcileAt: null,
                 reconcileLeaseToken: null, reconcileLeaseUntil: null, reconcileAttempts: { increment: 1 } });
-              await tx.order.update({ where: { id: order.id }, data: { paymentReviewStatus: "REQUIRED", paymentReviewReason: reason } });
-              return finish("REVIEW_REQUIRED", { kind: "review_required" }, reason);
+              const reviewReason = order.paymentReviewReason === "LATE_CAPTURE" ? "LATE_CAPTURE" : reason;
+              await tx.order.update({ where: { id: order.id }, data: { paymentReviewStatus: "REQUIRED", paymentReviewReason: reviewReason } });
+              return finish("REVIEW_REQUIRED", { kind: "review_required" }, reviewReason);
             };
             if (!validMoney(order, payment, o)) return review("AMOUNT_MISMATCH");
             if (!validSnapshot(order)) return review("ORDER_SNAPSHOT_MISMATCH");
