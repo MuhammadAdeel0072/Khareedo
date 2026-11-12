@@ -1,4 +1,4 @@
-// Admin payments maintenance — secure MANUAL trigger only, plus the shared runner used
+﻿// Admin payments maintenance â€” secure MANUAL trigger only, plus the shared runner used
 // by the in-process background worker (instrumentation.ts). An administrator session is
 // mandatory for the HTTP path, and an optional shared token (SAFEPAY_MAINTENANCE_TOKEN)
 // can additionally be required for server-to-server runners such as Vercel Cron.
@@ -22,11 +22,11 @@ const bodySchema = z.object({
   action: z.enum(MAINTENANCE_ACTIONS),
   limit: z.number().int().min(1).max(100).optional(),
   // verify_order_payment only: re-check ONE order's payment with Safepay. Never a
-  // manual status override — the outcome is whatever authenticated provider evidence
+  // manual status override â€” the outcome is whatever authenticated provider evidence
   // (or its absence) supports.
   orderId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/).optional(),
 }).strict().refine(
-  data => data.action !== "verify_order_payment" || typeof data.orderId === "string",
+  data => !["verify_order_payment", "investigate_closed_order_payment"].includes(data.action) || typeof data.orderId === "string",
   { message: "orderId is required for verify_order_payment." },
 );
 
@@ -64,7 +64,9 @@ export async function POST(request: Request) {
 
     const runner = createPaymentMaintenanceRunner();
     const result = await runner.run(action, batch, orderId ? { orderId } : undefined);
-    return jsonOk(result);
+    const response = jsonOk(result);
+    response.headers.set("Cache-Control", "no-store");
+    return response;
   } catch (error) {
     if (error instanceof AuthError) {
       return Response.json({ ok: false, code: error.status === 403 ? "FORBIDDEN" : "UNAUTHENTICATED",
@@ -73,3 +75,5 @@ export async function POST(request: Request) {
     throw error;
   }
 }
+
+

@@ -51,7 +51,12 @@ export function createPaymentMaintenanceWorker(runner: {
       for (const step of SWEEP_PLAN) {
         if (suspended) break;
         const result = await runner.run(step.action, step.batch);
-        if ("blocked" in result) continue; // Custody/config unavailable — retried next sweep.
+        if ("blocked" in result) {
+  log(
+    `[payments-worker] action=${step.action} blocked=${result.code}; retrying next sweep`
+  );
+  continue;
+}// Custody/config unavailable — retried next sweep.
         if (result.action === "expire_reservations" && "released" in result &&
             (result.released > 0 || result.reviewRequired > 0)) {
           log(`[payments-worker] expired reservations released=${result.released} review=${result.reviewRequired}`);
@@ -65,12 +70,12 @@ export function createPaymentMaintenanceWorker(runner: {
           if (settled > 0) log(`[payments-worker] reconciliation considered=${result.considered} settled=${settled}`);
         }
       }
-    } catch {
-      // A failed sweep is retried on the next tick; no partial state can exist because
-      // every action is transactional/idempotent.
-    } finally {
-      running = false;
-    }
+   } catch {
+  // Never log secrets, provider payloads or customer information.
+  log("[payments-worker] sweep failed; retrying next sweep");
+} finally {
+  running = false;
+}
   }
 
   return {

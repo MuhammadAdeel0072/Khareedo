@@ -93,7 +93,11 @@ export function createPaymentVerificationService(deps: {
           reconcileStatus: { in: ["PENDING", "UNCERTAIN"] },
         },
         select: {
-          id: true, trackerToken: true, lastReconcileAt: true, reconcileAttempts: true,
+  id: true,
+  trackerToken: true,
+  lastReconcileAt: true,
+  nextReconcileAt: true,
+  reconcileAttempts: true,
           order: {
             select: {
               id: true, paymentFlowVersion: true, paymentMethod: true, status: true,
@@ -111,10 +115,12 @@ export function createPaymentVerificationService(deps: {
           (order.paymentReviewStatus !== null && order.paymentReviewStatus !== "CLEAR")) {
         return { kind: "skipped", code: "NOT_ELIGIBLE" };
       }
-      if (Number.isFinite(minIntervalMs) && payment.lastReconcileAt &&
-          at.getTime() - payment.lastReconcileAt.getTime() < minIntervalMs) {
-        return { kind: "skipped", code: "BACKOFF" };
-      }
+      if (
+  payment.nextReconcileAt &&
+  at.getTime() < payment.nextReconcileAt.getTime()
+) {
+  return { kind: "skipped", code: "BACKOFF" };
+}
 
       const fetched = await deps.provider.fetchTracker({ trackerToken: payment.trackerToken });
       if (fetched.kind !== "fetched") {

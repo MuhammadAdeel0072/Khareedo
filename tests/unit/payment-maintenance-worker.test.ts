@@ -105,4 +105,72 @@ describe("Payment maintenance worker", () => {
       process.env.PAYMENT_MAINTENANCE_WORKER = previous;
     }
   });
+
+
+it("recovers from a failed sweep and blocked webhook action", async () => {
+  const logs: string[] = [];
+  const actualRunner = runnerWithLog().runner;
+
+  let failOnce = true;
+  let blockWebhookOnce = true;
+
+  const run = vi.fn(
+    async (
+      action: MaintenanceAction,
+      batch: number
+    ): Promise<MaintenanceRunResult> => {
+      if (failOnce) {
+        failOnce = false;
+        throw new Error("Simulated temporary outage");
+      }
+
+      if (
+        action === "process_webhook_inbox" &&
+        blockWebhookOnce
+      ) {
+        blockWebhookOnce = false;
+
+        return {
+          action,
+          blocked: true,
+          code: "PAYMENT_PAYLOAD_CUSTODY_UNAVAILABLE",
+        };
+      }
+
+      return actualRunner.run(action, batch);
+    }
+  );
+
+  const worker = createPaymentMaintenanceWorker(
+    { run },
+    { log: message => logs.push(message) }
+  );
+
+  // First sweep fails.
+  await expect(worker.sweepOnce()).resolves.toBeUndefined();
+
+  expect(logs.some(message =>
+    message.includes("sweep failed")
+  )).toBe(true);
+
+  // Second sweep resumes, but webhook processing is blocked.
+  await worker.sweepOnce();
+
+  expect(logs.some(message =>
+    message.includes("blocked=PAYMENT_PAYLOAD_CUSTODY_UNAVAILABLE")
+  )).toBe(true);
+
+  // Third sweep succeeds, including webhook processing.
+  await worker.sweepOnce();
+
+  expect(run).toHaveBeenCalledTimes(7);
+
+  expect(
+    actualRunner.run.mock.calls.some(
+      ([action]) => action === "process_webhook_inbox"
+    )
+  ).toBe(true);
+});
+
+
 });
