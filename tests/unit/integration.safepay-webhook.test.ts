@@ -121,6 +121,7 @@ function signedDelivery(token: string, type = "payment.succeeded", failedState =
 afterAll(async () => {
   const orderIds = [...orders];
   await db.paymentEvidence.deleteMany({ where: { payment: { orderId: { in: orderIds } } } });
+  await db.paymentRefund.deleteMany({ where: { payment: { orderId: { in: orderIds } } } });
   await db.paymentWebhookEvent.deleteMany({ where: { OR: [{ id: { in: events } }, { payment: { orderId: { in: orderIds } } }] } });
   await db.inventoryReservation.deleteMany({ where: { orderItem: { orderId: { in: orderIds } } } });
   await db.order.updateMany({ where: { id: { in: orderIds } }, data: { activePaymentId: null, acceptedPaymentId: null, paymentOwnerOrderId: null } });
@@ -758,7 +759,7 @@ describe("Signed webhook to settled order", () => {
     };
   }
 
-  it("preserves captured payment after authenticated refund redelivery", async () => {
+  it("settles an authenticated partial refund once and preserves the captured order", async () => {
     const f = await fixture();
 
     // Establish a verified paid payment first.
@@ -782,9 +783,7 @@ describe("Signed webhook to settled order", () => {
 
     events.push(first.eventId);
 
-    expect(await inbox.process(first.eventId)).toEqual({
-      kind: "review_required",
-    });
+    expect(await inbox.process(first.eventId)).toEqual({ kind: "settled" });
 
     // Identical provider redelivery must not duplicate effects.
     const duplicate = await inbox.receive(notice);
@@ -813,27 +812,29 @@ describe("Signed webhook to settled order", () => {
     // Original capture and order history remain intact.
     expect(order.status).toBe("CONFIRMED");
     expect(order.paymentStatus).toBe("PAID");
-    expect(order.paymentReviewStatus).toBe("REQUIRED");
+    expect(order.paymentReviewStatus).toBe("CLEAR");
 
     expect(payment.status).toBe("PAID");
     expect(payment.capturedAmountMinor).toBe(BigInt(100000));
-    expect(payment.refundedAmountMinor).toBeNull();
-    expect(payment.reconcileStatus).toBe("REVIEW_REQUIRED");
+    expect(payment.refundedAmountMinor).toBe(BigInt(1000));
+    expect(payment.reconcileStatus).toBe("VERIFIED");
 
     expect(order.items[0].inventoryReservation?.state)
       .toBe("CONSUMED");
 
-    // Exactly one financial audit record for this refund event.
+    // Exactly one authenticated financial audit record for this refund event.
     const evidence = await db.paymentEvidence.findMany({
       where: { sourceWebhookEventId: first.eventId },
     });
 
     expect(evidence).toHaveLength(1);
     expect(evidence[0]).toMatchObject({
-      decision: "REVIEW_REQUIRED",
-      reasonCode: "REFUND_REQUIRES_REVIEW",
+      decision: "REFUND_SETTLED",
       observedRefundedMinor: BigInt(1000),
     });
+    expect(await db.paymentRefund.count({ where: {
+      paymentId: f.paymentId, status: "SUCCEEDED", initiatedBy: "PROVIDER",
+    } })).toBe(1);
 
     const inboxEvent = await db.paymentWebhookEvent.findUniqueOrThrow({
       where: { id: first.eventId },
@@ -907,12 +908,11 @@ describe("Signed webhook to settled order", () => {
       expect(evidence).toHaveLength(1);
       expect(evidence[0]).toMatchObject({
         decision: "REVIEW_REQUIRED",
-        reasonCode: "VERIFIER_REQUIRES_REVIEW",
+        reasonCode: "REVERSAL_REQUIRES_REVIEW",
       });
     }
   );
   it.each([
-    "payment.refunded",
     "authorization.reversed",
     "void.succeeded",
   ] as const)(

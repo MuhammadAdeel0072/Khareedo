@@ -2,8 +2,8 @@ import "server-only";
 import { createPaymentMaintenanceRunner, type MaintenanceAction, type MaintenanceRunResult } from "./payment-maintenance.service";
 
 // In-process background worker that executes the SAME bounded maintenance actions as
-// the admin maintenance endpoint — reservation expiry, webhook-inbox processing and
-// provider reconciliation — on a fixed interval. It exists because a reconciliation
+// the admin maintenance endpoint — reservation expiry, webhook-inbox processing,
+// payment reconciliation, and refund reconciliation — on a fixed interval. It exists because a reconciliation
 // service that is never scheduled is an incomplete implementation: without a worker
 // (or an external cron), a successfully paid sandbox checkout whose webhook cannot be
 // delivered would remain PENDING forever.
@@ -25,6 +25,7 @@ const SWEEP_PLAN: Array<{ action: MaintenanceAction; batch: number }> = [
   { action: "expire_reservations", batch: 10 },
   { action: "process_webhook_inbox", batch: 10 },
   { action: "reconcile_due_payments", batch: 5 },
+  { action: "reconcile_refunds", batch: 5 },
 ];
 
 export function createPaymentMaintenanceWorker(runner: {

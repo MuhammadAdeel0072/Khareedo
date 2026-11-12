@@ -369,6 +369,7 @@ model Payment {
   acceptedForOrder Order? @relation("OrderAcceptedPayment")
   webhookEvents PaymentWebhookEvent[]
   evidence PaymentEvidence[]
+  refunds PaymentRefund[]
   @@unique([orderId, id])
   @@unique([orderId, attemptNumber])
   @@index([provider, reconcileStatus, nextReconcileAt])
@@ -483,6 +484,7 @@ model PaymentEvidence {
   actorUserIdSnapshot String?
   detailsJson String?
   processedWebhookEventId String? @unique
+  refundId String?
   providerOccurredAt DateTime?
   observedQuoteMinor BigInt?
   observedCapturedMinor BigInt?
@@ -493,8 +495,64 @@ model PaymentEvidence {
   payment Payment @relation(fields: [paymentId], references: [id], onDelete: Restrict, onUpdate: NoAction)
   sourceWebhook PaymentWebhookEvent? @relation("WebhookEvidenceSource", fields: [sourceWebhookEventId], references: [id], onDelete: Restrict, onUpdate: NoAction)
   processedWebhook PaymentWebhookEvent? @relation("WebhookEvidenceFinal", fields: [processedWebhookEventId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  refund PaymentRefund? @relation(fields: [refundId], references: [id], onDelete: Restrict, onUpdate: NoAction)
   @@index([paymentId, recordedAt, id])
   @@index([sourceWebhookEventId])
+  @@index([refundId])
+}
+
+// Refund ledger: one row per refund operation against a managed payment attempt.
+// Money is integer minor units (BigInt); never floating point. operationKey is a
+// LOCAL dedup/operation identity only — no provider idempotency behavior is assumed
+// (undocumented for the classic refund endpoint). Provider-confirmed facts (state,
+// reference, refunded-at) are written exclusively from authenticated evidence.
+// The order relationship is payment.orderId; no denormalized order column exists.
+model PaymentRefund {
+  id                  String   @id @default(cuid())
+  paymentId           String
+  payment             Payment  @relation(fields: [paymentId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  trackerToken        String
+  providerEnvironment String
+  merchantAccountRef  String
+
+  amountMinor BigInt
+  currency    String
+  type        String // FULL | PARTIAL
+  status      String @default("REQUESTED") // REQUESTED | SUBMITTING | PENDING | SUCCEEDED | FAILED | REVIEW_REQUIRED
+  initiatedBy String @default("ADMIN") // ADMIN | PROVIDER (dashboard/external refund recorded from evidence)
+
+  // Local operation identity, e.g. "ADMIN:<idempotencyKey>", "AUTO:<uuid>", "PROVIDER:<digest>".
+  operationKey String @unique
+
+  // Provider observations. Advisory until confirmed by authenticated evidence.
+  providerState      String?
+  providerReference  String? // reserved: no per-refund provider identifier is documented
+  providerRefundedAt DateTime?
+
+  failureCode        String?
+  failureMessage     String?
+  lastSubmissionCode String? // transport/HTTP code of an uncertain submission outcome
+  reviewReason       String?
+
+  requestedByUserId String? // null for provider-initiated (dashboard) refunds
+
+  requestedAt DateTime  @default(now())
+  submittedAt DateTime?
+  confirmedAt DateTime? // provider confirmation timestamp from verified evidence
+  settledAt   DateTime? // local accounting finalization timestamp
+
+  reconcileStatus   String?
+  nextReconcileAt   DateTime?
+  lastReconcileAt   DateTime?
+  reconcileAttempts Int @default(0)
+
+  version Int @default(0)
+
+  evidence PaymentEvidence[]
+
+  @@index([paymentId, status])
+  @@index([status, nextReconcileAt])
+  @@index([trackerToken])
 }
 
 

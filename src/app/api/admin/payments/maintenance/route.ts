@@ -27,7 +27,7 @@ const bodySchema = z.object({
   orderId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/).optional(),
 }).strict().refine(
   data => !["verify_order_payment", "investigate_closed_order_payment"].includes(data.action) || typeof data.orderId === "string",
-  { message: "orderId is required for verify_order_payment." },
+  { message: "orderId is required for targeted payment verification and investigation." },
 );
 
 const MAINTENANCE_TOKEN_HEADER = "x-khd-maintenance-token";

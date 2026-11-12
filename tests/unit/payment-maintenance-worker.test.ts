@@ -23,6 +23,8 @@ function runnerWithLog() {
             return { action, batch, considered: 1, outcomes: [{ eventId: "e", result: "settled" }] };
           case "reconcile_due_payments":
             return { action, batch, considered: 2, outcomes: [{ paymentId: "p", outcome: "settled" }] };
+          case "reconcile_refunds":
+            return { action, batch, considered: 1, outcomes: [{ refundId: "r", disposition: "submitted", outcome: "submitted" }] };
           default:
             return { action, blocked: true, code: "SAFEPAY_CONFIGURATION_UNAVAILABLE" };
         }
@@ -36,8 +38,10 @@ describe("Payment maintenance worker", () => {
     const { runner, calls, logs } = runnerWithLog();
     const worker = createPaymentMaintenanceWorker(runner, { log: m => logs.push(m) });
     await worker.sweepOnce();
-    expect(calls.map(c => c.action)).toEqual(["expire_reservations", "process_webhook_inbox", "reconcile_due_payments"]);
-    expect(calls.map(c => c.batch)).toEqual([10, 10, 5]);
+    expect(calls.map(c => c.action)).toEqual([
+      "expire_reservations", "process_webhook_inbox", "reconcile_due_payments", "reconcile_refunds",
+    ]);
+    expect(calls.map(c => c.batch)).toEqual([10, 10, 5, 5]);
     expect(logs.some(l => l.includes("settled=1"))).toBe(true);
   });
 
@@ -52,8 +56,8 @@ describe("Payment maintenance worker", () => {
     await worker.sweepOnce(); // must return immediately, without starting a second sweep
     gate.resolve();
     await first;
-    // Exactly one full sweep (3 bounded actions) ran; the concurrent call never queued work.
-    expect(run).toHaveBeenCalledTimes(3);
+    // Exactly one full sweep (4 bounded actions) ran; the concurrent call never queued work.
+    expect(run).toHaveBeenCalledTimes(4);
   });
 
   it("continues past blocked actions and never throws", async () => {
@@ -67,11 +71,14 @@ describe("Payment maintenance worker", () => {
       if (action === "reconcile_due_payments") {
         return { action, batch, considered: 0, outcomes: [] };
       }
+      if (action === "reconcile_refunds") {
+        return { action, batch, considered: 0, outcomes: [] };
+      }
       return { action, orderId: "o", outcome: "skipped", code: "NOT_ELIGIBLE" };
     });
     const worker = createPaymentMaintenanceWorker({ run }, { log: () => {} });
     await expect(worker.sweepOnce()).resolves.toBeUndefined();
-    expect(run).toHaveBeenCalledTimes(3);
+    expect(run).toHaveBeenCalledTimes(4);
   });
 
   it("rejects intervals below the 15 second floor", () => {
@@ -160,10 +167,10 @@ it("recovers from a failed sweep and blocked webhook action", async () => {
     message.includes("blocked=PAYMENT_PAYLOAD_CUSTODY_UNAVAILABLE")
   )).toBe(true);
 
-  // Third sweep succeeds, including webhook processing.
+  // Third sweep succeeds, including webhook and refund reconciliation.
   await worker.sweepOnce();
 
-  expect(run).toHaveBeenCalledTimes(7);
+  expect(run).toHaveBeenCalledTimes(9);
 
   expect(
     actualRunner.run.mock.calls.some(

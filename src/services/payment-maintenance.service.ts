@@ -6,9 +6,11 @@ import { createSafepayReservationService } from "@/services/safepay-reservations
 import { createPaymentWebhookService, type PaymentWebhookService } from "@/services/payment-webhook.service";
 import { createPaymentReconciliationService } from "@/services/payment-reconciliation.service";
 import { createPaymentVerificationService, type PaymentVerificationService, type PaymentDatabase } from "@/services/payment-verification.service";
+import { createPaymentRefundService } from "@/services/payment-refund.service";
 import { createPaymentPayloadVault, type PaymentPayloadVault } from "@/lib/payments/payload-vault";
 import { loadPaymentPayloadVaultKeys } from "@/lib/payments/vault-env";
 import { localId } from "@/lib/safepay/contracts";
+import { SAFEPAY_REFUNDS_SANDBOX_ONLY } from "@/lib/safepay/readiness";
 
 // Shared maintenance runner for Khareedo's managed Safepay payments. Both callers
 // execute the exact same bounded, idempotent actions:
@@ -24,18 +26,22 @@ export const MAINTENANCE_ACTIONS = [
   "reconcile_due_payments",
   "verify_order_payment",
   "investigate_closed_order_payment",
+  "reconcile_refunds",
 ] as const;
 export type MaintenanceAction = (typeof MAINTENANCE_ACTIONS)[number];
 
-export type MaintenanceActionUnavailable = "PAYMENT_PAYLOAD_CUSTODY_UNAVAILABLE" | "SAFEPAY_CONFIGURATION_UNAVAILABLE";
+export type MaintenanceActionUnavailable = "PAYMENT_PAYLOAD_CUSTODY_UNAVAILABLE" |
+  "SAFEPAY_CONFIGURATION_UNAVAILABLE" | "REFUNDS_SANDBOX_ONLY";
 
-export type MaintenanceRunResult =
+export type PaymentMaintenanceRunResult =
   | { action: "expire_reservations"; batch: number; released: number; reviewRequired: number; failed: number }
   | { action: "process_webhook_inbox"; batch: number; considered: number; outcomes: Array<{ eventId: string; result: string }> }
   | { action: "reconcile_due_payments"; batch: number; considered: number; outcomes: Array<{ paymentId: string; outcome: string; code?: string }> }
   | { action: "verify_order_payment"; orderId: string; outcome: string; code?: string }
   | { action: "investigate_closed_order_payment"; orderId: string; outcome: string; code?: string; attempts?: Array<{ attemptNumber: number | null; outcome: string; code?: string }> }
+  | { action: "reconcile_refunds"; batch: number; considered: number; outcomes: Array<{ refundId: string; disposition: string; outcome?: string; code?: string }> }
   | { action: MaintenanceAction; blocked: true; code: MaintenanceActionUnavailable };
+export type MaintenanceRunResult = PaymentMaintenanceRunResult;
 
 type PaymentStack = {
   inbox: PaymentWebhookService;
@@ -65,7 +71,7 @@ export function createPaymentMaintenanceRunner(injectedDatabase?: PaymentDatabas
   const database = injectedDatabase ?? (db as unknown as PaymentDatabase);
 
   return {
-    async run(action: MaintenanceAction, batch: number, target?: { orderId?: string }): Promise<MaintenanceRunResult> {
+    async run(action: MaintenanceAction, batch: number, target?: { orderId?: string }): Promise<PaymentMaintenanceRunResult> {
       if (action === "expire_reservations") {
         const reservations = createSafepayReservationService(database as never);
         const results = await reservations.expireBatch(batch);
@@ -97,8 +103,29 @@ export function createPaymentMaintenanceRunner(injectedDatabase?: PaymentDatabas
         if (!(error instanceof SafepayConfigurationError)) throw error;
         return { action, blocked: true, code: "SAFEPAY_CONFIGURATION_UNAVAILABLE" };
       }
+      if (action === "reconcile_refunds" && SAFEPAY_REFUNDS_SANDBOX_ONLY && config.environment !== "sandbox") {
+        return { action, blocked: true, code: "REFUNDS_SANDBOX_ONLY" };
+      }
       const stack = createPaymentStack(database);
       if (!stack) return { action, blocked: true, code: "PAYMENT_PAYLOAD_CUSTODY_UNAVAILABLE" };
+
+      if (action === "reconcile_refunds") {
+        const provider = createSafepayProvider(config);
+        const refunds = createPaymentRefundService(database as never, provider, {
+          environment: config.environment,
+          merchantAccountRef: config.merchantAccountRef,
+          pollDelayMs: 60_000,
+          maxConfirmationAttempts: 6,
+          submitGraceMs: 120_000,
+          reversalWindowMs: 24 * 3_600_000,
+          cardRefundWindowMs: 90 * 24 * 3_600_000,
+        });
+        const result = await stack.reconciliation.reconcileDueRefunds(refunds, provider, {
+          environment: config.environment,
+          merchantAccountRef: config.merchantAccountRef,
+        }, batch);
+        return { action, batch, ...result };
+      }
 
       // Admin-only investigation of a financially uncertain CLOSED order.
       // Never reopens the order, directly settles funds, or releases holds.

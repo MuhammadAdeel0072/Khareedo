@@ -89,7 +89,7 @@ function refundData(overrides: Record<string, unknown> = {}) {
 }
 
 describe("Safepay refund, reversal and void security", () => {
-  it("authenticates a partial refund without settling or calculating a cumulative refund", async () => {
+  it("authenticates a partial refund amount for settlement to validate against the ledger", async () => {
     const result = await adapter.verify(
       signed(payload("payment.refunded", refundData()))
     );
@@ -98,8 +98,8 @@ describe("Safepay refund, reversal and void security", () => {
       kind: "authenticated",
       observation: {
         paymentId: "payment-1",
-        kind: "REFUND_NOTICE",
-        amountMinor: null,
+        kind: "REFUND_CONFIRMED",
+        amountMinor: "0",
         capturedMinor: null,
         refundMinor: "1000",
         currency: "PKR",
@@ -107,7 +107,7 @@ describe("Safepay refund, reversal and void security", () => {
     });
   });
 
-  it("classifies a full refund as a reviewable notice", async () => {
+  it("classifies a full refund as authenticated refund evidence", async () => {
     const result = await adapter.verify(
       signed(payload("payment.refunded", refundData({
         state: "TRACKER_REFUNDED",
@@ -119,7 +119,7 @@ describe("Safepay refund, reversal and void security", () => {
     expect(result).toMatchObject({
       kind: "authenticated",
       observation: {
-        kind: "REFUND_NOTICE",
+        kind: "REFUND_CONFIRMED",
         refundMinor: "100000",
         capturedMinor: null,
       },
@@ -139,7 +139,7 @@ describe("Safepay refund, reversal and void security", () => {
     expect(result).toMatchObject({
       kind: "authenticated",
       observation: {
-        kind: "REVIEW_REQUIRED",
+        kind: "REVERSAL_NOTICE",
         amountMinor: null,
         capturedMinor: null,
         refundMinor: null,
@@ -161,7 +161,7 @@ describe("Safepay refund, reversal and void security", () => {
     expect(result).toMatchObject({
       kind: "authenticated",
       observation: {
-        kind: "REVIEW_REQUIRED",
+        kind: "REVERSAL_NOTICE",
         amountMinor: null,
         capturedMinor: null,
         refundMinor: null,

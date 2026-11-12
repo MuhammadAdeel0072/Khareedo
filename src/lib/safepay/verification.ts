@@ -107,6 +107,7 @@ function observation(input: {
   amountMinor: string | null;
   capturedMinor: string | null;
   refundMinor: string | null;
+  providerState?: string | null;
   occurredAt: string | null;
 }): PaymentObservation {
   return {
@@ -125,6 +126,7 @@ function observation(input: {
     kind: input.kind,
     capturedMinor: input.capturedMinor,
     refundMinor: input.refundMinor,
+    providerState: input.providerState,
     occurredAt: input.occurredAt,
   };
 }
@@ -159,6 +161,8 @@ function classifyWebhookObservation(
 function classifyTrackerState(state: string): PaymentObservation["kind"] {
   if (state === "TRACKER_ENDED") return "CAPTURE_CONFIRMED";
   if (NON_FINAL_TRACKER_STATES.has(state)) return "PENDING";
+  if (state === "TRACKER_REFUNDED" || state === "TRACKER_PARTIAL_REFUND") return "REFUND_NOTICE";
+  if (state === "TRACKER_REVERSED" || state === "TRACKER_VOIDED") return "REVERSAL_NOTICE";
   return "UNCERTAIN";
 }
 
@@ -195,17 +199,28 @@ const webhookEventSchema = z.object({
   next_attempt_at: protobufTimestampSchema.optional(),
 }).passthrough();
 
-// Documented payment-event data: data.tracker is a tracker-token STRING and
-// state/amount/currency are sibling fields. amount/currency only exist on the
-// documented payment.succeeded shape and are enforced per event type. The tracker
-// OBJECT form belongs to the Fetch Tracker response, not to webhook payloads, and is
-// deliberately not accepted here.
+// Capture/failure events require the documented tracker-token string. The bounded
+// tracker-object form is accepted only for refund/reversal evidence and its facts are
+// independently validated before they can reach settlement.
+const trackerEvidenceSchema = z.object({
+  token: printableToken,
+  state: z.string().min(1).max(128).optional(),
+  environment: z.enum(["sandbox", "production"]).optional(),
+  purchase_totals: z.object({
+    quote_amount: z.object({
+      currency: z.string().regex(/^[A-Z]{3}$/),
+      amount: z.number(),
+    }).passthrough(),
+  }).passthrough().optional(),
+}).passthrough();
+
 const webhookPaymentDataSchema = z.object({
-  tracker: printableToken,
+  tracker: z.union([printableToken, trackerEvidenceSchema]),
   state: z.string().min(1).max(128).optional(),
   intent: z.string().min(1).max(64).optional(),
   amount: z.number().optional(),
   currency: z.string().optional(),
+  environment: z.enum(["sandbox", "production"]).optional(),
   charged_at: protobufTimestampSchema.optional(),
   failed_at: protobufTimestampSchema.optional(),
   refund_amount: z.number().optional(),
@@ -217,6 +232,26 @@ const webhookPaymentDataSchema = z.object({
   voided_charge_id: printableToken.optional(),
   voided_at: protobufTimestampSchema.optional(),
 }).passthrough();
+
+function trackerFactsFromWebhook(data: z.infer<typeof webhookPaymentDataSchema>) {
+  if (typeof data.tracker === "string") {
+    return {
+      token: data.tracker,
+      state: data.state,
+      environment: data.environment,
+      amount: data.amount,
+      currency: data.currency,
+    };
+  }
+  const quote = data.tracker.purchase_totals?.quote_amount;
+  return {
+    token: data.tracker.token,
+    state: data.tracker.state ?? data.state,
+    environment: data.tracker.environment ?? data.environment,
+    amount: quote?.amount ?? data.amount,
+    currency: quote?.currency ?? data.currency,
+  };
+}
 
 function signatureHeader(value: string | undefined): string | null {
   if (!value || value.length < 32 || value.length > 256) return null;
@@ -285,11 +320,13 @@ export function createSafepayWebhookAdapter(
       if (!data.success) return { kind: "rejected" as const };
       // Provider-reported environment must be the configured one; anything else is not
       // evidence about this account and belongs in manual review.
+      const facts = trackerFactsFromWebhook(data.data);
       const dataEnvironment = dataField(event.data, "environment");
-      if (dataEnvironment !== undefined && dataEnvironment !== config.environment) {
+      if ((facts.environment ?? dataEnvironment) !== undefined &&
+          (facts.environment ?? dataEnvironment) !== config.environment) {
         return { kind: "rejected" as const };
       }
-      const attempt = await resolveAttempt(resolveTracker, data.data.tracker);
+      const attempt = await resolveAttempt(resolveTracker, facts.token);
       if (!attempt) return { kind: "rejected" as const };
       // Financial validation against the locally resolved attempt. For the documented
       // payment.succeeded shape, amount and currency are mandatory: a missing, invalid
@@ -300,8 +337,10 @@ export function createSafepayWebhookAdapter(
       let refundMinor: string | null = null;
       let kind: PaymentObservation["kind"];
       let occurredAt: string | null = null;
+      const providerState = facts.state ?? null;
 
       if (event.type === "payment.succeeded") {
+        if (typeof data.data.tracker !== "string") return { kind: "rejected" as const };
         const parsed = minorFromAmount(data.data.amount ?? Number.NaN);
 
         if (
@@ -324,6 +363,7 @@ export function createSafepayWebhookAdapter(
         occurredAt = timestamp ?? null;
 
       } else if (event.type === "payment.failed") {
+        if (typeof data.data.tracker !== "string") return { kind: "rejected" as const };
         kind = classifyWebhookObservation(
           "payment.failed",
           data.data.state
@@ -334,61 +374,50 @@ export function createSafepayWebhookAdapter(
         occurredAt = timestamp ?? null;
 
       } else if (event.type === "payment.refunded") {
-        const refund = minorFromAmount(
-          data.data.refund_amount ?? Number.NaN
-        );
-
-        if (
-          refund === null ||
-          data.data.currency !== "PKR" ||
-          attempt.currency !== "PKR" ||
-          BigInt(refund) > BigInt(attempt.expectedAmountMinor) ||
-          data.data.balance === undefined ||
-          !Number.isSafeInteger(data.data.balance) ||
-          data.data.balance < 0
-        ) {
+        const refund = minorFromAmount(data.data.refund_amount ?? Number.NaN);
+        const balance = data.data.balance;
+        const quoteAmount = facts.amount === undefined ? null : minorFromAmount(facts.amount);
+        const currency = facts.currency;
+        const timestamp = documentedTimestamp(data.data.refunded_at);
+        if (refund === null || currency !== "PKR" || attempt.currency !== "PKR" ||
+            BigInt(refund) > BigInt(attempt.expectedAmountMinor) ||
+            balance === undefined || !Number.isSafeInteger(balance) || balance < 0 ||
+            BigInt(balance) > BigInt(attempt.expectedAmountMinor) ||
+            (facts.amount !== undefined && (quoteAmount === null ||
+              BigInt(quoteAmount) !== BigInt(attempt.expectedAmountMinor))) ||
+            timestamp === null || timestamp === undefined) {
           return { kind: "rejected" as const };
         }
 
-        const timestamp = documentedTimestamp(data.data.refunded_at);
-        if (!timestamp) return { kind: "rejected" as const };
-
         refundMinor = refund;
+        amountMinor = quoteAmount ?? "0";
         occurredAt = timestamp;
-
-        kind = [
-          "TRACKER_REFUNDED",
-          "TRACKER_PARTIAL_REFUND",
-        ].includes(data.data.state ?? "")
-          ? "REFUND_NOTICE"
-          : "REVIEW_REQUIRED";
+        const state = providerState;
+        kind = state === undefined || state === null ||
+          state === "TRACKER_REFUNDED" || state === "TRACKER_PARTIAL_REFUND"
+          ? "REFUND_CONFIRMED" : "REVIEW_REQUIRED";
 
       } else if (event.type === "authorization.reversed") {
-        if (
-          data.data.state !== "TRACKER_REVERSED" ||
-          !data.data.reversed_authorization_id
-        ) {
+        if (providerState !== "TRACKER_REVERSED" || !data.data.reversed_authorization_id) {
           return { kind: "rejected" as const };
         }
 
         const timestamp = documentedTimestamp(data.data.reversed_at);
         if (!timestamp) return { kind: "rejected" as const };
 
-        kind = "REVIEW_REQUIRED";
+        kind = "REVERSAL_NOTICE";
         occurredAt = timestamp;
 
       } else if (event.type === "void.succeeded") {
-        if (
-          data.data.state !== "TRACKER_VOIDED" ||
-          !data.data.void_type
-        ) {
+        if (providerState !== "TRACKER_VOIDED" ||
+            !data.data.void_type || !data.data.voided_charge_id) {
           return { kind: "rejected" as const };
         }
 
         const timestamp = documentedTimestamp(data.data.voided_at);
         if (!timestamp) return { kind: "rejected" as const };
 
-        kind = "REVIEW_REQUIRED";
+        kind = "REVERSAL_NOTICE";
         occurredAt = timestamp;
 
       } else {
@@ -401,12 +430,13 @@ export function createSafepayWebhookAdapter(
         kind: "authenticated" as const,
         observation: observation({
           config, merchantIdentity, attempt,
-          trackerToken: data.data.tracker,
+          trackerToken: facts.token,
           observationId: webhookObservationId(event, input.body),
           kind,
           amountMinor,
           capturedMinor: capture ? amountMinor : null,
           refundMinor: capture ? "0" : refundMinor,
+          providerState,
           occurredAt,
         }),
       };
@@ -483,6 +513,7 @@ export function createSafepayReconciliationAdapter(
           amountMinor,
           capturedMinor: capture ? amountMinor : null,
           refundMinor: capture ? "0" : null,
+          providerState: tracker.state,
           // The documented response fields consumed here carry no per-action timestamp;
           // none is ever fabricated.
           occurredAt: null,
