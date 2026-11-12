@@ -3,8 +3,13 @@ import { isValidElement, type ReactElement, type ReactNode } from "react";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ProductListItem } from "@/services/products.service";
 
-const query = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/db", () => ({ db: { $queryRaw: query } }));
+const dbMock = vi.hoisted(() => ({ productFindMany: vi.fn(), promotionFindMany: vi.fn() }));
+vi.mock("@/lib/db", () => ({
+  db: {
+    product: { findMany: dbMock.productFindMany },
+    promotion: { findMany: dbMock.promotionFindMany },
+  },
+}));
 
 const service = vi.hoisted(() => ({
   banners: vi.fn(), categories: vi.fn(), catalog: vi.fn(),
@@ -140,13 +145,15 @@ describe("homepage request dependencies and personalization", () => {
 const catalogProduct = {
   id: "fixture", name: "Fixture", slug: "fixture", price: 1234, comparePrice: null,
   brand: null, rating: 4.2, reviewCount: 3, status: "PUBLISHED", isFeatured: true,
-  createdAt: "2026-11-04T12:00:00+00:00", image: null, stock: 0,
-  categoryName: "Fixture", categorySlug: "fixture",
+  createdAt: new Date("2026-11-04T12:00:00+00:00"),
+  category: { name: "Fixture", slug: "fixture" },
+  images: [{ url: "/fixture.png" }],
+  inventory: { quantity: 0 },
 };
 const promotion = {
   id: "offer", title: "Offer", description: null, type: "FIXED", value: 10,
-  minOrderAmount: null, isActive: true, startsAt: null, endsAt: "2026-12-01T00:00:00+00:00",
-  createdAt: "2026-11-04T00:00:00+00:00", updatedAt: "2026-11-04T00:00:00+00:00",
+  minOrderAmount: null, isActive: true, startsAt: null, endsAt: new Date("2026-12-01T00:00:00+00:00"),
+  createdAt: new Date("2026-11-04T00:00:00+00:00"), updatedAt: new Date("2026-11-04T00:00:00+00:00"),
 };
 
 describe("live homepage catalogue batch", () => {
@@ -154,35 +161,62 @@ describe("live homepage catalogue batch", () => {
   beforeAll(async () => {
     ({ getHomepageCatalog } = await vi.importActual<typeof import("@/services/products.service")>("@/services/products.service"));
   });
-  beforeEach(() => { query.mockReset(); });
+  beforeEach(() => {
+    dbMock.productFindMany.mockReset();
+    dbMock.promotionFindMany.mockReset();
+  });
 
-  it("uses one read and retains overlapping products, current stock/prices and UTC Date values", async () => {
-    query.mockResolvedValue([{ featured: [catalogProduct], newArrivals: [catalogProduct], promotions: [promotion] }]);
+  it("reads both product lists and active offers as one parallel batch, retaining overlap and identity", async () => {
+    dbMock.productFindMany
+      .mockResolvedValueOnce([catalogProduct])
+      .mockResolvedValueOnce([catalogProduct]);
+    dbMock.promotionFindMany.mockResolvedValueOnce([promotion]);
     const result = await getHomepageCatalog();
-    expect(query).toHaveBeenCalledTimes(1);
-    const [template, ...parameters] = query.mock.calls[0];
-    expect(Array.isArray(template)).toBe(true);
-    expect(template.join("")).toContain("WITH featured AS");
-    expect(parameters).toHaveLength(template.length - 1);
-    expect(result.featured[0]).toEqual({ ...catalogProduct, createdAt: new Date(catalogProduct.createdAt) });
-    expect(result.newArrivals).toEqual(result.featured);
-    expect(result.promotions[0]).toEqual({ ...promotion,
-      createdAt: new Date(promotion.createdAt), updatedAt: new Date(promotion.updatedAt),
-      endsAt: new Date(promotion.endsAt),
+    expect(dbMock.productFindMany).toHaveBeenCalledTimes(2);
+    expect(dbMock.promotionFindMany).toHaveBeenCalledTimes(1);
+    // Featured list: bounded, rating-ordered, featured-only, active categories.
+    expect(dbMock.productFindMany.mock.calls[0][0]).toMatchObject({
+      where: { status: "PUBLISHED", deletedAt: null, isFeatured: true }, take: 8,
     });
+    // New arrivals: bounded, newest-first, not restricted to featured.
+    expect(dbMock.productFindMany.mock.calls[1][0]).toMatchObject({
+      where: { status: "PUBLISHED", deletedAt: null }, take: 4,
+    });
+    // Offers: active and inside their current window at call time.
+    const promotionArgs = dbMock.promotionFindMany.mock.calls[0][0];
+    expect(promotionArgs.where).toMatchObject({ isActive: true });
+    expect(promotionArgs.where.AND).toHaveLength(2);
+    expect(promotionArgs.take).toBe(2);
+    // The same product may appear in both lists, mapped through the shared view model.
+    expect(result.featured[0]).toEqual({
+      id: "fixture", name: "Fixture", slug: "fixture", price: 1234, comparePrice: null,
+      brand: null, rating: 4.2, reviewCount: 3, isFeatured: true, status: "PUBLISHED",
+      image: "/fixture.png", stock: 0, categoryName: "Fixture", categorySlug: "fixture",
+      createdAt: catalogProduct.createdAt,
+    });
+    expect(result.newArrivals).toEqual(result.featured);
+    expect(result.promotions).toEqual([promotion]);
   });
 
   it("keeps empty sections empty", async () => {
-    query.mockResolvedValue([{ featured: [], newArrivals: [], promotions: [] }]);
+    dbMock.productFindMany.mockResolvedValue([]);
+    dbMock.productFindMany.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+    dbMock.promotionFindMany.mockResolvedValueOnce([]);
     expect(await getHomepageCatalog()).toEqual({ featured: [], newArrivals: [], promotions: [] });
   });
 
   it("reads again on every call so changed prices, stock and expired offers are visible", async () => {
-    query.mockResolvedValueOnce([{ featured: [catalogProduct], newArrivals: [], promotions: [promotion] }])
-      .mockResolvedValueOnce([{ featured: [{ ...catalogProduct, price: 2345, stock: 7 }], newArrivals: [], promotions: [] }]);
+    dbMock.productFindMany
+      .mockResolvedValueOnce([catalogProduct])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ ...catalogProduct, price: 2345, inventory: { quantity: 7 } }])
+      .mockResolvedValueOnce([]);
+    dbMock.promotionFindMany
+      .mockResolvedValueOnce([promotion])
+      .mockResolvedValueOnce([]);
     const first = await getHomepageCatalog();
     const second = await getHomepageCatalog();
-    expect(query).toHaveBeenCalledTimes(2);
+    expect(dbMock.productFindMany).toHaveBeenCalledTimes(4);
     expect(first.featured[0].price).toBe(1234);
     expect(second.featured[0]).toMatchObject({ price: 2345, stock: 7 });
     expect(second.promotions).toEqual([]);
@@ -190,7 +224,7 @@ describe("live homepage catalogue batch", () => {
 
   it("propagates database failures without serving a stale fallback", async () => {
     const error = new Error("Database unavailable");
-    query.mockRejectedValue(error);
+    dbMock.productFindMany.mockRejectedValue(error);
     await expect(getHomepageCatalog()).rejects.toBe(error);
   });
 });

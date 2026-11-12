@@ -10,10 +10,12 @@ export const dynamic = "force-dynamic";
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
   const session = await getRequestSession();
   if (!session?.user?.id) redirect("/admin/login");
-  const user = await getSessionUser();
+  // Role re-check and the public pending-orders badge are independent reads.
+  const [user, pendingOrders] = await Promise.all([
+    getSessionUser(),
+    getPendingOrdersCount(),
+  ]);
   if (!user || user.role !== "ADMIN") redirect("/admin/login?error=Forbidden");
-
-  const pendingOrders = await getPendingOrdersCount();
 
   return (
     <div className="flex min-h-screen flex-col lg:flex-row">

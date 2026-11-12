@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from "node:crypto";
+﻿import { createHmac, randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import { assertDisposableTestDatabase } from "../helpers/disposable-sqlite.mjs";
 import { bindCheckoutOwner } from "@/services/safepay-attempt.store";
@@ -6,9 +6,11 @@ import { trackerIdentity, type VerificationInput } from "@/lib/payments/evidence
 import { createPaymentWebhookService } from "@/services/payment-webhook.service";
 import { createPaymentPayloadVault } from "@/lib/payments/payload-vault";
 import type { PaymentPersistence } from "@/services/payment-settlement.service";
+import { createPaymentReconciliationService } from "@/services/payment-reconciliation.service";
+import { adminUpdateOrderStatus } from "@/services/orders.service";
 
-// End-to-end sandbox verification path: documented signed webhook → HMAC-SHA512
-// authentication (real registry, no mock) → tracker resolution → durable inbox →
+// End-to-end sandbox verification path: documented signed webhook â†’ HMAC-SHA512
+// authentication (real registry, no mock) â†’ tracker resolution â†’ durable inbox â†’
 // settlement. No real provider call is required or permitted.
 assertDisposableTestDatabase();
 
@@ -80,11 +82,34 @@ async function fixture() {
   return { order, paymentId: payment.id, token, product, userId: user.id };
 }
 
-function signedDelivery(token: string, type = "payment.succeeded"): VerificationInput {
-  const body = JSON.stringify({ type, data: {
-    tracker: { token, state: type === "payment.succeeded" ? "TRACKER_ENDED" : "TRACKER_STARTED",
-      purchase_totals: { quote_amount: { currency: "PKR", amount: 100000 } } },
-  } });
+function signedDelivery(token: string, type = "payment.succeeded", failedState = "TRACKER_ENROLLED"): VerificationInput {
+  // Documented hosted-checkout webhook shapes (getsafepay/safepay-docs):
+  // data.tracker is a STRING with state/amount/currency as siblings; payment.succeeded
+  // carries the financial fields, payment.failed does not.
+  const body = JSON.stringify({
+    token: "evt_" + token.slice(-12),
+    version: "2.0.0",
+    merchant_api_key: "synthetic-public",
+    type,
+    endpoint: "https://shop.example.invalid/api/webhooks/safepay",
+    data: type === "payment.succeeded" ? {
+      tracker: token,
+      intent: "CYBERSOURCE",
+      state: "TRACKER_ENDED",
+      amount: 100000,
+      currency: "PKR",
+      charged_at: { seconds: 1698754230, nanos: 752997627 },
+    } : {
+      tracker: token,
+      intent: "CYBERSOURCE",
+      state: failedState,
+      category: "PAYMENT_METHOD_ERROR",
+      code: 403,
+      message: "The card you have used has been flagged as either stolen or lost.",
+      failed_at: { seconds: 1698754648, nanos: 494424793 },
+    },
+    created_at: { seconds: 1698754230, nanos: 912705711 },
+  });
   return {
     provider: "SAFEPAY", environment: "sandbox", merchantAccountRef: "synthetic-account",
     channel: "WEBHOOK", body: Buffer.from(body),
@@ -96,6 +121,7 @@ function signedDelivery(token: string, type = "payment.succeeded"): Verification
 afterAll(async () => {
   const orderIds = [...orders];
   await db.paymentEvidence.deleteMany({ where: { payment: { orderId: { in: orderIds } } } });
+  await db.paymentRefund.deleteMany({ where: { payment: { orderId: { in: orderIds } } } });
   await db.paymentWebhookEvent.deleteMany({ where: { OR: [{ id: { in: events } }, { payment: { orderId: { in: orderIds } } }] } });
   await db.inventoryReservation.deleteMany({ where: { orderItem: { orderId: { in: orderIds } } } });
   await db.order.updateMany({ where: { id: { in: orderIds } }, data: { activePaymentId: null, acceptedPaymentId: null, paymentOwnerOrderId: null } });
@@ -171,4 +197,833 @@ describe("Signed webhook to settled order", () => {
     const payment = await db.payment.findUniqueOrThrow({ where: { id: f.paymentId } });
     expect(payment.status).toBe("PENDING");
   });
+
+  it("records a documented payment.failed observation without releasing reservations", async () => {
+    const f = await fixture();
+    const received = await inbox.receive(signedDelivery(f.token, "payment.failed"));
+    if (received.kind !== "stored") throw new Error("Expected durable storage: " + JSON.stringify(received));
+    events.push(received.eventId);
+    const processed = await inbox.process(received.eventId);
+    expect(processed).toEqual({ kind: "recorded" });
+    const order = await db.order.findUniqueOrThrow({ where: { id: f.order.id }, include: {
+      items: { include: { inventoryReservation: true } } } });
+    expect(order.status).toBe("PENDING");
+    expect(order.paymentStatus).toBe("PENDING");
+    expect(order.items[0].inventoryReservation!.state).toBe("HELD");
+    const payment = await db.payment.findUniqueOrThrow({ where: { id: f.paymentId } });
+    expect(payment.status).toBe("PENDING");
+    expect(payment.reconcileStatus).toBe("UNCERTAIN");
+    expect(payment.nextReconcileAt).not.toBeNull();
+    const evidence = await db.paymentEvidence.findMany({ where: { paymentId: f.paymentId } });
+    expect(evidence.some(row => row.source === "WEBHOOK" && row.decision === "OBSERVATION_RECORDED")).toBe(true);
+  });
+
+  it("routes contradictory failure evidence (failed while TRACKER_ENDED) to review and retains holds", async () => {
+    const f = await fixture();
+    const received = await inbox.receive(signedDelivery(f.token, "payment.failed", "TRACKER_ENDED"));
+    if (received.kind !== "stored") throw new Error("Expected durable storage: " + JSON.stringify(received));
+    events.push(received.eventId);
+    const processed = await inbox.process(received.eventId);
+    expect(processed).toEqual({ kind: "review_required" });
+    const order = await db.order.findUniqueOrThrow({ where: { id: f.order.id }, include: {
+      items: { include: { inventoryReservation: true } } } });
+    expect(order.status).toBe("PENDING");
+    expect(order.paymentReviewStatus).toBe("REQUIRED");
+    expect(order.items[0].inventoryReservation!.state).toBe("HELD");
+  });
+
+  it("quarantines capture evidence whose amount contradicts the expected attempt amount", async () => {
+    const f = await fixture();
+    const delivery = signedDelivery(f.token);
+    const wrongAmount = JSON.parse(new TextDecoder().decode(delivery.body));
+    wrongAmount.data.amount = 1;
+    const body = Buffer.from(JSON.stringify(wrongAmount));
+    const tamperedAmount: VerificationInput = { ...delivery, body,
+      headers: { "x-sfpy-signature": createHmac("sha512", process.env.SAFEPAY_WEBHOOK_SECRET!)
+        .update(body).digest("hex") } };
+    const received = await inbox.receive(tamperedAmount);
+    if (received.kind === "blocked") throw new Error("Unexpected blocked delivery");
+    expect(received.kind).toBe("quarantined");
+    events.push(received.eventId);
+    expect(await inbox.process(received.eventId)).toEqual({ kind: "review_required" });
+    const order = await db.order.findUniqueOrThrow({ where: { id: f.order.id } });
+    expect(order.paymentStatus).toBe("PENDING");
+    expect(order.status).toBe("PENDING");
+  });
+  it("replays the same signed webhook three times without duplicate settlement", async () => {
+    const f = await fixture();
+    const delivery = signedDelivery(f.token);
+
+    const first = await inbox.receive(delivery);
+    if (first.kind !== "stored") {
+      throw new Error("Expected first delivery to be stored");
+    }
+    events.push(first.eventId);
+
+    expect(await inbox.process(first.eventId))
+      .toEqual({ kind: "settled" });
+
+    const second = await inbox.receive(delivery);
+    const third = await inbox.receive(delivery);
+
+    expect(second.kind).toBe("duplicate");
+    expect(third.kind).toBe("duplicate");
+
+    if (second.kind === "blocked" || third.kind === "blocked") {
+      throw new Error("Unexpected blocked duplicate");
+    }
+
+    expect(second.eventId).toBe(first.eventId);
+    expect(third.eventId).toBe(first.eventId);
+
+    const stored = await db.paymentWebhookEvent.findUniqueOrThrow({
+      where: { id: first.eventId },
+    });
+
+    expect(stored.deliveryCount).toBe(3);
+
+    expect(await inbox.process(first.eventId))
+      .toEqual({ kind: "duplicate" });
+
+    const evidence = await db.paymentEvidence.findMany({
+      where: {
+        paymentId: f.paymentId,
+        source: "WEBHOOK",
+        decision: "SETTLED",
+      },
+    });
+
+    expect(evidence).toHaveLength(1);
+
+    const order = await db.order.findUniqueOrThrow({
+      where: { id: f.order.id },
+    });
+
+    expect(order.status).toBe("CONFIRMED");
+    expect(order.paymentStatus).toBe("PAID");
+    expect(order.acceptedPaymentId).toBe(f.paymentId);
+  });
+
+  it("uses the signed body, not an unsigned event header, for fallback replay identity", async () => {
+    const f = await fixture();
+    const delivery = signedDelivery(f.token);
+    const payload = JSON.parse(new TextDecoder().decode(delivery.body));
+    delete payload.token;
+    const body = Buffer.from(JSON.stringify(payload));
+    const signature = createHmac("sha512", process.env.SAFEPAY_WEBHOOK_SECRET!)
+      .update(body).digest("hex");
+    const first = await inbox.receive({
+      ...delivery,
+      body,
+      headers: { "x-sfpy-signature": signature, "x-sfpy-event-id": "unsigned-id-one" },
+    });
+    if (first.kind !== "stored") throw new Error("Expected first delivery to be stored");
+    events.push(first.eventId);
+
+    const replay = await inbox.receive({
+      ...delivery,
+      body,
+      headers: { "x-sfpy-signature": signature, "x-sfpy-event-id": "unsigned-id-two" },
+    });
+    expect(replay).toEqual({ kind: "duplicate", eventId: first.eventId });
+  });
+
+  it("preserves a late-capture warning after a later uncertain observation", async () => {
+    const f = await fixture();
+    const closed = await adminUpdateOrderStatus(f.order.id, "CANCELLED");
+    expect(closed).toMatchObject({ ok: true });
+
+    const withEventToken = (delivery: VerificationInput, token: string): VerificationInput => {
+      const payload = JSON.parse(new TextDecoder().decode(delivery.body));
+      payload.token = token;
+      const body = Buffer.from(JSON.stringify(payload));
+      return {
+        ...delivery,
+        body,
+        headers: {
+          "x-sfpy-signature": createHmac("sha512", process.env.SAFEPAY_WEBHOOK_SECRET!)
+            .update(body).digest("hex"),
+        },
+      };
+    };
+
+    const capture = await inbox.receive(withEventToken(signedDelivery(f.token), "late-capture-event"));
+    if (capture.kind !== "stored") throw new Error("Expected late capture to be stored");
+    events.push(capture.eventId);
+    expect(await inbox.process(capture.eventId)).toEqual({ kind: "review_required" });
+    expect(await db.order.findUniqueOrThrow({ where: { id: f.order.id } }))
+      .toMatchObject({ paymentReviewStatus: "REQUIRED", paymentReviewReason: "LATE_CAPTURE" });
+
+    const uncertain = await inbox.receive(
+      withEventToken(signedDelivery(f.token, "payment.failed"), "later-uncertain-event")
+    );
+    if (uncertain.kind !== "stored") throw new Error("Expected uncertain event to be stored");
+    events.push(uncertain.eventId);
+    expect(await inbox.process(uncertain.eventId)).toEqual({ kind: "review_required" });
+    expect(await db.order.findUniqueOrThrow({ where: { id: f.order.id } }))
+      .toMatchObject({ paymentReviewStatus: "REQUIRED", paymentReviewReason: "LATE_CAPTURE" });
+  });
+
+  it("quarantines conflicting signed events with the same event ID", async () => {
+    const f = await fixture();
+
+    const success = signedDelivery(f.token);
+    const first = await inbox.receive(success);
+
+    if (first.kind !== "stored") {
+      throw new Error("Expected first delivery to be stored");
+    }
+
+    events.push(first.eventId);
+
+    // Same event token but different signed business facts.
+    const failure = signedDelivery(f.token, "payment.failed");
+    const conflict = await inbox.receive(failure);
+
+    expect(conflict.kind).toBe("conflict");
+
+    if (conflict.kind === "blocked") {
+      throw new Error("Unexpected blocked event");
+    }
+
+    expect(conflict.eventId).toBe(first.eventId);
+
+    const stored = await db.paymentWebhookEvent.findUniqueOrThrow({
+      where: { id: first.eventId },
+    });
+
+    expect(stored.reviewRequired).toBe(true);
+    expect(stored.reviewReason).toBe("EVENT_ID_CONFLICT");
+    expect(stored.deliveryCount).toBe(2);
+
+    expect(await inbox.process(first.eventId))
+      .toEqual({ kind: "review_required" });
+
+    const order = await db.order.findUniqueOrThrow({
+      where: { id: f.order.id },
+    });
+
+    const payment = await db.payment.findUniqueOrThrow({
+      where: { id: f.paymentId },
+    });
+
+    expect(order.paymentStatus).toBe("PENDING");
+    expect(payment.status).toBe("PENDING");
+  });
+  it("handles concurrent duplicate webhook deliveries", async () => {
+    const f = await fixture();
+    const delivery = signedDelivery(f.token);
+
+    const initial = await Promise.all(
+      Array.from({ length: 4 }, () => inbox.receive(delivery))
+    );
+
+    const accepted: Array<{ kind: "stored" | "duplicate" | "quarantined" | "conflict"; eventId: string }> = [];
+
+    for (let result of initial) {
+      for (
+        let retry = 0;
+        result.kind === "blocked" && result.code === "BUSY" && retry < 5;
+        retry++
+      ) {
+        await new Promise(resolve => setTimeout(resolve, 50 * (retry + 1)));
+        result = await inbox.receive(delivery);
+      }
+
+      if (result.kind === "blocked") {
+        throw new Error("Delivery remained blocked: " + result.code);
+      }
+
+      accepted.push(result);
+    }
+
+    expect(accepted.filter(r => r.kind === "stored")).toHaveLength(1);
+    expect(accepted.filter(r => r.kind === "duplicate")).toHaveLength(3);
+
+    const eventId = accepted[0].eventId;
+    events.push(eventId);
+
+    expect(accepted.every(r => r.eventId === eventId)).toBe(true);
+
+    const event = await db.paymentWebhookEvent.findUniqueOrThrow({
+      where: { id: eventId },
+    });
+
+    expect(event.deliveryCount).toBe(4);
+
+    expect(await inbox.process(eventId)).toEqual({ kind: "settled" });
+
+    const evidence = await db.paymentEvidence.findMany({
+      where: {
+        paymentId: f.paymentId,
+        source: "WEBHOOK",
+        decision: "SETTLED",
+      },
+    });
+
+    expect(evidence).toHaveLength(1);
+  });
+
+  it("preserves replay protection across database reconnection", async () => {
+    const f = await fixture();
+    const delivery = signedDelivery(f.token);
+
+    const first = await inbox.receive(delivery);
+
+    if (first.kind !== "stored") {
+      throw new Error("Expected stored webhook");
+    }
+
+    events.push(first.eventId);
+
+    const { PrismaClient } = await import("../../generated/sqlite-client");
+
+    const reopenedDb = new PrismaClient({
+      datasources: {
+        db: { url: process.env.DATABASE_URL },
+      },
+    });
+
+    const reopenedVault = createPaymentPayloadVault(
+      "integration",
+      new Map([
+        ["integration", new Uint8Array(vaultKey)],
+      ])
+    );
+
+    try {
+      const restartedInbox = createPaymentWebhookService(
+        reopenedDb as unknown as PaymentPersistence,
+        reopenedVault,
+        { reconcileDelayMs: 60_000 }
+      );
+
+      expect(await restartedInbox.process(first.eventId))
+        .toEqual({ kind: "settled" });
+
+      const replay = await restartedInbox.receive(delivery);
+
+      expect(replay.kind).toBe("duplicate");
+
+      if (replay.kind === "blocked") {
+        throw new Error("Unexpected blocked replay");
+      }
+
+      expect(replay.eventId).toBe(first.eventId);
+
+      expect(await restartedInbox.process(first.eventId))
+        .toEqual({ kind: "duplicate" });
+
+      const evidence = await reopenedDb.paymentEvidence.findMany({
+        where: {
+          paymentId: f.paymentId,
+          source: "WEBHOOK",
+          decision: "SETTLED",
+        },
+      });
+
+      expect(evidence).toHaveLength(1);
+    } finally {
+      await reopenedDb.$disconnect();
+    }
+  });
+  it.each([
+    "merchant",
+    "tracker",
+    "amount",
+    "currency",
+  ] as const)(
+    "rejects correctly signed webhook with invalid %s",
+    async (field) => {
+      const f = await fixture();
+      const original = signedDelivery(f.token);
+
+      const payload = JSON.parse(
+        Buffer.from(original.body).toString("utf8")
+      ) as {
+        merchant_api_key: string;
+        data: {
+          tracker: string;
+          state: string;
+          amount: number;
+          currency: string;
+        };
+      };
+
+      switch (field) {
+        case "merchant":
+          payload.merchant_api_key = "different-merchant";
+          break;
+
+        case "tracker":
+          payload.data.tracker = "UNKNOWN_TRACKER_NOT_IN_DATABASE";
+          break;
+
+        case "amount":
+          payload.data.amount = 100001;
+          break;
+
+        case "currency":
+          payload.data.currency = "USD";
+          break;
+      }
+
+      const modifiedBody = Buffer.from(JSON.stringify(payload));
+
+      // Correctly sign the modified payload with the
+      // synthetic sandbox test secret.
+      // This isolates identity/financial validation
+      // from ordinary signature verification.
+      const validSignature = createHmac(
+        "sha512",
+        process.env.SAFEPAY_WEBHOOK_SECRET!
+      )
+        .update(modifiedBody)
+        .digest("hex");
+
+      const invalidDelivery: VerificationInput = {
+        ...original,
+        body: modifiedBody,
+        headers: {
+          "x-sfpy-signature": validSignature,
+        },
+      };
+
+      const received = await inbox.receive(invalidDelivery);
+
+      expect(received.kind).toBe("quarantined");
+
+      if (received.kind === "blocked") {
+        throw new Error("Unexpected blocked request");
+      }
+
+      events.push(received.eventId);
+
+      const stored = await db.paymentWebhookEvent.findUniqueOrThrow({
+        where: { id: received.eventId },
+      });
+
+      expect(stored.processingStatus).toBe("QUARANTINED");
+      expect(stored.reviewRequired).toBe(true);
+      expect(stored.paymentId).toBeNull();
+
+      const processed = await inbox.process(received.eventId);
+
+      expect(processed).toEqual({
+        kind: "review_required",
+      });
+
+      const order = await db.order.findUniqueOrThrow({
+        where: { id: f.order.id },
+      });
+
+      const payment = await db.payment.findUniqueOrThrow({
+        where: { id: f.paymentId },
+      });
+
+      expect(order.status).toBe("PENDING");
+      expect(order.paymentStatus).toBe("PENDING");
+      expect(order.acceptedPaymentId).toBeNull();
+
+      expect(payment.status).toBe("PENDING");
+
+      const settledEvidenceCount = await db.paymentEvidence.count({
+        where: {
+          paymentId: f.paymentId,
+          decision: "SETTLED",
+        },
+      });
+
+      expect(settledEvidenceCount).toBe(0);
+    }
+  );
+  it("rediscovers a pending reconciliation after reconnecting", async () => {
+    const f = await fixture();
+
+    const now = new Date();
+    const retryAt = new Date(now.getTime() + 60_000);
+
+    // Model a previously failed provider lookup whose
+    // retry schedule has been durably persisted.
+    await db.payment.update({
+      where: { id: f.paymentId },
+      data: {
+        status: "PENDING",
+        reconcileStatus: "UNCERTAIN",
+        reconcileAttempts: 1,
+        lastReconcileAt: now,
+        nextReconcileAt: retryAt,
+      },
+    });
+
+    // Create a completely new Prisma client to simulate
+    // recovery using a new application database connection.
+    const { PrismaClient } = await import("../../generated/sqlite-client");
+
+    const reopenedDb = new PrismaClient({
+      datasources: {
+        db: { url: process.env.DATABASE_URL },
+      },
+    });
+
+    let currentTime = new Date(retryAt.getTime() - 1);
+
+    try {
+      const restartedReconciliation =
+        createPaymentReconciliationService(
+          reopenedDb as unknown as PaymentPersistence,
+          inbox,
+          () => currentTime
+        );
+
+      // Pending payment must NOT be selected before its deadline.
+      const early = await restartedReconciliation.due(100);
+
+      expect(
+        early.some(payment => payment.id === f.paymentId)
+      ).toBe(false);
+
+      // Advance past the persisted retry deadline.
+      currentTime = new Date(retryAt.getTime() + 1000);
+
+      const recovered = await restartedReconciliation.due(100);
+
+      expect(
+        recovered.some(payment => payment.id === f.paymentId)
+      ).toBe(true);
+
+      // Confirm that the retry information survived reconnecting.
+      const payment = await reopenedDb.payment.findUniqueOrThrow({
+        where: { id: f.paymentId },
+      });
+
+      expect(payment.status).toBe("PENDING");
+      expect(payment.reconcileStatus).toBe("UNCERTAIN");
+      expect(payment.reconcileAttempts).toBe(1);
+      expect(payment.nextReconcileAt).toEqual(retryAt);
+    } finally {
+      await reopenedDb.$disconnect();
+    }
+  });
+  function signedFinancialNotice(
+    tracker: string,
+    type: "payment.refunded" | "authorization.reversed" | "void.succeeded",
+  ): VerificationInput {
+    const stamp = { seconds: 1698758038, nanos: 682810001 };
+
+    const data = type === "payment.refunded"
+      ? {
+          tracker,
+          state: "TRACKER_PARTIAL_REFUND",
+          refund_amount: 1000,
+          balance: 99000,
+          currency: "PKR",
+          refunded_at: stamp,
+        }
+      : type === "authorization.reversed"
+      ? {
+          tracker,
+          state: "TRACKER_REVERSED",
+          reversed_authorization_id: "synthetic_auth",
+          reversed_at: stamp,
+        }
+      : {
+          tracker,
+          state: "TRACKER_VOIDED",
+          void_type: "CAPTURE",
+          voided_charge_id: "synthetic_charge",
+          voided_at: stamp,
+        };
+
+    const body = Buffer.from(JSON.stringify({
+      token: "evt_" + randomUUID(),
+      version: "2.0.0",
+      merchant_api_key: "synthetic-public",
+      type,
+      data,
+      created_at: stamp,
+    }));
+
+    return {
+      provider: "SAFEPAY",
+      environment: "sandbox",
+      merchantAccountRef: "synthetic-account",
+      channel: "WEBHOOK",
+      body,
+      headers: {
+        "x-sfpy-signature": createHmac(
+          "sha512",
+          "synthetic-webhook-secret-0123456789abcdef"
+        ).update(body).digest("hex"),
+      },
+    };
+  }
+
+  it("settles an authenticated partial refund once and preserves the captured order", async () => {
+    const f = await fixture();
+
+    // Establish a verified paid payment first.
+    const capture = await inbox.receive(signedDelivery(f.token));
+
+    expect(capture.kind).toBe("stored");
+    if (!("eventId" in capture)) throw new Error("Missing capture event");
+
+    events.push(capture.eventId);
+    expect(await inbox.process(capture.eventId)).toEqual({
+      kind: "settled",
+    });
+
+    // Receive an authentic refund notification.
+    const notice = signedFinancialNotice(f.token, "payment.refunded");
+
+    const first = await inbox.receive(notice);
+
+    expect(first.kind).toBe("stored");
+    if (!("eventId" in first)) throw new Error("Missing refund event");
+
+    events.push(first.eventId);
+
+    expect(await inbox.process(first.eventId)).toEqual({ kind: "settled" });
+
+    // Identical provider redelivery must not duplicate effects.
+    const duplicate = await inbox.receive(notice);
+
+    expect(duplicate).toMatchObject({
+      kind: "duplicate",
+      eventId: first.eventId,
+    });
+
+    expect(await inbox.process(first.eventId)).toEqual({
+      kind: "duplicate",
+    });
+
+    const order = await db.order.findUniqueOrThrow({
+      where: { id: f.order.id },
+      include: {
+        payments: true,
+        items: {
+          include: { inventoryReservation: true },
+        },
+      },
+    });
+
+    const payment = order.payments[0];
+
+    // Original capture and order history remain intact.
+    expect(order.status).toBe("CONFIRMED");
+    expect(order.paymentStatus).toBe("PAID");
+    expect(order.paymentReviewStatus).toBe("CLEAR");
+
+    expect(payment.status).toBe("PAID");
+    expect(payment.capturedAmountMinor).toBe(BigInt(100000));
+    expect(payment.refundedAmountMinor).toBe(BigInt(1000));
+    expect(payment.reconcileStatus).toBe("VERIFIED");
+
+    expect(order.items[0].inventoryReservation?.state)
+      .toBe("CONSUMED");
+
+    // Exactly one authenticated financial audit record for this refund event.
+    const evidence = await db.paymentEvidence.findMany({
+      where: { sourceWebhookEventId: first.eventId },
+    });
+
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0]).toMatchObject({
+      decision: "REFUND_SETTLED",
+      observedRefundedMinor: BigInt(1000),
+    });
+    expect(await db.paymentRefund.count({ where: {
+      paymentId: f.paymentId, status: "SUCCEEDED", initiatedBy: "PROVIDER",
+    } })).toBe(1);
+
+    const inboxEvent = await db.paymentWebhookEvent.findUniqueOrThrow({
+      where: { id: first.eventId },
+    });
+
+    expect(inboxEvent.deliveryCount).toBe(2);
+  });
+
+  it.each([
+    "authorization.reversed",
+    "void.succeeded",
+  ] as const)(
+    "preserves captured funds after authenticated %s notification",
+    async type => {
+      const f = await fixture();
+
+      const capture = await inbox.receive(signedDelivery(f.token));
+
+      expect(capture.kind).toBe("stored");
+      if (!("eventId" in capture)) throw new Error("Missing capture event");
+
+      events.push(capture.eventId);
+
+      expect(await inbox.process(capture.eventId)).toEqual({
+        kind: "settled",
+      });
+
+      const notice = await inbox.receive(
+        signedFinancialNotice(f.token, type)
+      );
+
+      expect(notice.kind).toBe("stored");
+      if (!("eventId" in notice)) throw new Error("Missing notice event");
+
+      events.push(notice.eventId);
+
+      expect(await inbox.process(notice.eventId)).toEqual({
+        kind: "review_required",
+      });
+
+      const order = await db.order.findUniqueOrThrow({
+        where: { id: f.order.id },
+        include: {
+          payments: true,
+          items: {
+            include: { inventoryReservation: true },
+          },
+        },
+      });
+
+      expect(order.status).toBe("CONFIRMED");
+      expect(order.paymentStatus).toBe("PAID");
+      expect(order.paymentReviewStatus).toBe("REQUIRED");
+
+      expect(order.payments[0].capturedAmountMinor)
+        .toBe(BigInt(100000));
+
+      expect(order.payments[0].refundedAmountMinor)
+        .toBeNull();
+
+      expect(order.payments[0].reconcileStatus)
+        .toBe("REVIEW_REQUIRED");
+
+      expect(order.items[0].inventoryReservation?.state)
+        .toBe("CONSUMED");
+
+      const evidence = await db.paymentEvidence.findMany({
+        where: { sourceWebhookEventId: notice.eventId },
+      });
+
+      expect(evidence).toHaveLength(1);
+      expect(evidence[0]).toMatchObject({
+        decision: "REVIEW_REQUIRED",
+        reasonCode: "REVERSAL_REQUIRES_REVIEW",
+      });
+    }
+  );
+  it.each([
+    "authorization.reversed",
+    "void.succeeded",
+  ] as const)(
+    "blocks fulfillment after authenticated financial notices: %s",
+    async type => {
+      // Control: a normal verified, paid order can advance.
+      const normal = await fixture();
+
+      const normalCapture = await inbox.receive(
+        signedDelivery(normal.token)
+      );
+
+      if (!("eventId" in normalCapture)) {
+        throw new Error("Missing normal capture event");
+      }
+
+      events.push(normalCapture.eventId);
+
+      expect(await inbox.process(normalCapture.eventId)).toEqual({
+        kind: "settled",
+      });
+
+      const allowed = await adminUpdateOrderStatus(
+        normal.order.id,
+        "PROCESSING"
+      );
+
+      expect(allowed).toEqual({ ok: true });
+
+      // Subject: another verified paid order receives a
+      // signed refund, reversal, or void notification.
+      const f = await fixture();
+
+      const capture = await inbox.receive(
+        signedDelivery(f.token)
+      );
+
+      if (!("eventId" in capture)) {
+        throw new Error("Missing capture event");
+      }
+
+      events.push(capture.eventId);
+
+      expect(await inbox.process(capture.eventId)).toEqual({
+        kind: "settled",
+      });
+
+      const notice = await inbox.receive(
+        signedFinancialNotice(f.token, type)
+      );
+
+      if (!("eventId" in notice)) {
+        throw new Error("Missing financial notice");
+      }
+
+      events.push(notice.eventId);
+
+      expect(await inbox.process(notice.eventId)).toEqual({
+        kind: "review_required",
+      });
+
+      const before = await db.order.findUniqueOrThrow({
+        where: { id: f.order.id },
+      });
+
+      expect(before).toMatchObject({
+        status: "CONFIRMED",
+        paymentStatus: "PAID",
+        paymentReviewStatus: "REQUIRED",
+      });
+
+      // The very same transition must now be refused.
+      const blocked = await adminUpdateOrderStatus(
+        f.order.id,
+        "PROCESSING"
+      );
+
+      expect(blocked.ok).toBe(false);
+
+      const after = await db.order.findUniqueOrThrow({
+        where: { id: f.order.id },
+        include: {
+          payments: true,
+          items: {
+            include: { inventoryReservation: true },
+          },
+        },
+      });
+
+      // The rejected operation must not modify the order.
+      expect(after.status).toBe("CONFIRMED");
+      expect(after.version).toBe(before.version);
+      expect(after.paymentReviewStatus).toBe("REQUIRED");
+
+      // Financial history and inventory remain intact.
+      expect(after.payments[0].status).toBe("PAID");
+      expect(after.payments[0].capturedAmountMinor)
+        .toBe(BigInt(100000));
+
+      expect(after.payments[0].refundedAmountMinor)
+        .toBeNull();
+
+      expect(after.items[0].inventoryReservation?.state)
+        .toBe("CONSUMED");
+    }
+  );
 });
+
+
+
+
+
+
+

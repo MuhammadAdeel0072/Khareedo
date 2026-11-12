@@ -66,7 +66,7 @@ describe("Safepay browser return status", () => {
 
   it("keeps an unsettled payment pending", async () => {
     await expect(readReturn({ state, tracker: "synthetic-tracker", owner, now }))
-      .resolves.toEqual({ kind: "pending", reference: "KH-TEST" });
+      .resolves.toEqual({ kind: "pending", reference: "KH-TEST", paymentId: "payment-1" });
   });
 
   it("shows failure only for a server-recorded failed payment", async () => {
@@ -83,7 +83,7 @@ describe("Safepay browser return status", () => {
 
   it("falls back to the tracker echo when the state is rejected, and rejects without any tracker", async () => {
     await expect(readReturn({ state: "tampered", tracker: "synthetic-tracker", owner, now: now + 10 }))
-      .resolves.toEqual({ kind: "pending", reference: "KH-TEST" });
+      .resolves.toEqual({ kind: "pending", reference: "KH-TEST", paymentId: "payment-1" });
     expect(lookup).toHaveBeenCalledTimes(1);
     expect(lookup).toHaveBeenCalledWith({
       mode: "tracker", trackerToken: "synthetic-tracker", owner: bindCheckoutOwner(owner),
@@ -102,7 +102,7 @@ describe("Safepay browser return status", () => {
 
   it("accepts a tracker-only return through the session-derived owner binding", async () => {
     await expect(readReturn({ tracker: "synthetic-tracker", owner, now }))
-      .resolves.toEqual({ kind: "pending", reference: "KH-TEST" });
+      .resolves.toEqual({ kind: "pending", reference: "KH-TEST", paymentId: "payment-1" });
     expect(lookup).toHaveBeenCalledWith({
       mode: "tracker", trackerToken: "synthetic-tracker", owner: bindCheckoutOwner(owner),
     });
@@ -110,7 +110,7 @@ describe("Safepay browser return status", () => {
 
   it("accepts a state-only return and lets the DB record supply the tracker", async () => {
     await expect(readReturn({ state, owner, now }))
-      .resolves.toEqual({ kind: "pending", reference: "KH-TEST" });
+      .resolves.toEqual({ kind: "pending", reference: "KH-TEST", paymentId: "payment-1" });
     expect(lookup).toHaveBeenCalledWith(expect.objectContaining({
       mode: "claimed", orderId: "order-1", paymentId: "payment-1", trackerToken: null,
     }));
@@ -120,13 +120,13 @@ describe("Safepay browser return status", () => {
     lookup.mockResolvedValue(snapshot({ reconcileStatus: "UNCERTAIN" }));
 
     await expect(readReturn({ state, tracker: "synthetic-tracker", owner, now }))
-      .resolves.toEqual({ kind: "pending", reference: "KH-TEST" });
+      .resolves.toEqual({ kind: "pending", reference: "KH-TEST", paymentId: "payment-1" });
   });
 
   it("rejects malformed tracker input and missing input entirely", async () => {
     // A malformed tracker with a valid state still takes the verified state path.
     await expect(readReturn({ state, tracker: "bad\ntracker", owner, now }))
-      .resolves.toEqual({ kind: "pending", reference: "KH-TEST" });
+      .resolves.toEqual({ kind: "pending", reference: "KH-TEST", paymentId: "payment-1" });
     await expect(readReturn({ owner, now }))
       .resolves.toEqual({ kind: "invalid" });
     expect(lookup).toHaveBeenCalledTimes(1);

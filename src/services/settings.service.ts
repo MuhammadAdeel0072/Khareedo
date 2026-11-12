@@ -1,7 +1,7 @@
-// Typed store settings service — DB-driven configuration (FR-44, FR-51, FR-32).
+﻿// Typed store settings service â€” DB-driven configuration (FR-44, FR-51, FR-32).
 import { cache } from "react";
+import { revalidateTag, unstable_cache } from "next/cache";
 import { db } from "@/lib/db";
-import { Prisma } from "../../generated/postgres-client";
 
 export interface StoreSettings {
   store_name: string;
@@ -77,7 +77,8 @@ function parse(raw: Record<string, string>): StoreSettings {
   };
 }
 
-/** Read all settings. */
+/** Read all settings. Always-fresh variant â€” REQUIRED for checkout, pricing
+ *  and payment paths where a stale fee/flag must never be used (BR-06, BR-10). */
 export const getSettings = cache(async (): Promise<StoreSettings> => {
   const rows = await db.storeSetting.findMany();
   const raw: Record<string, string> = {};
@@ -85,20 +86,52 @@ export const getSettings = cache(async (): Promise<StoreSettings> => {
   return parse(raw);
 });
 
-/** Upsert a batch of settings (admin only — guarded at route level, BR-14). */
+const SETTINGS_CACHE_TAG = "store-settings";
+
+// Display-only settings (layout header/footer, contact, PDP WhatsApp link,
+// order confirmation). Public, admin-authored content â€” same trust level as
+// banners. Invalidated synchronously by saveSettings; checkout/pricing paths
+// intentionally keep the always-fresh getSettings() above.
+const readSettingsCached = unstable_cache(
+  async (): Promise<StoreSettings> => {
+    const rows = await db.storeSetting.findMany();
+    const raw: Record<string, string> = {};
+    for (const r of rows) raw[r.key] = r.value;
+    return parse(raw);
+  },
+  ["store-settings"],
+  { revalidate: 300, tags: [SETTINGS_CACHE_TAG] }
+);
+
+/** Cached settings read for display-only storefront paths. */
+export async function getCachedSettings(): Promise<StoreSettings> {
+  return readSettingsCached();
+}
+
+/** Upsert a batch of settings (admin only â€” guarded at route level, BR-14). */
 export async function saveSettings(
   values: Partial<Record<keyof StoreSettings, string | boolean | number>>
 ) {
   const entries = Object.entries(values);
   if (entries.length === 0) return;
 
-  const rows = entries.map(([key, value]) =>
-    Prisma.sql`(${key}, ${String(value)}, CURRENT_TIMESTAMP)`
+  // Save all settings atomically using Prisma's supported API.
+  await db.$transaction(
+    entries.map(([key, value]) =>
+      db.storeSetting.upsert({
+        where: { key },
+        create: {
+          key,
+          value: String(value),
+        },
+        update: {
+          value: String(value),
+        },
+      })
+    )
   );
-  await db.$executeRaw(Prisma.sql`
-    INSERT INTO "StoreSetting" ("key", "value", "updatedAt")
-    VALUES ${Prisma.join(rows)}
-    ON CONFLICT ("key") DO UPDATE
-    SET "value" = EXCLUDED."value", "updatedAt" = CURRENT_TIMESTAMP
-  `);
+
+  // Refresh storefront settings only after a successful commit.
+  revalidateTag(SETTINGS_CACHE_TAG, { expire: 0 });
 }
+

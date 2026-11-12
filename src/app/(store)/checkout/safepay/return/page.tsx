@@ -5,6 +5,7 @@ import {
   loadSafepayConfig,
   SafepayConfigurationError,
 } from "@/lib/safepay/config";
+import { createSafepayProvider } from "@/lib/safepay/provider";
 import { parseSafepayReturnContext, SAFEPAY_RETURN_STATE_COOKIE } from "@/lib/safepay/return-input";
 import { requestOrigin } from "@/lib/request-origin";
 import { db } from "@/lib/db";
@@ -12,6 +13,11 @@ import {
   createSafepayReturnService,
   type SafepayReturnResult,
 } from "@/services/safepay-return.service";
+import { createPaymentWebhookService } from "@/services/payment-webhook.service";
+import { createPaymentReconciliationService } from "@/services/payment-reconciliation.service";
+import { createPaymentVerificationService } from "@/services/payment-verification.service";
+import { createPaymentPayloadVault } from "@/lib/payments/payload-vault";
+import { loadPaymentPayloadVaultKeys } from "@/lib/payments/vault-env";
 
 export const dynamic = "force-dynamic";
 
@@ -117,6 +123,50 @@ export default async function SafepayReturnPage({
         ...(context.kind === "tracker-only" || context.kind === "full" ? { tracker: context.trackerToken } : {}),
         owner: { kind: "USER", userId: user.id },
       });
+
+      // The return page is read-only evidence about a PENDING payment — by design it
+      // never trusts the browser redirect. But a pending result used to dead-end here:
+      // nothing ever initiated server-side verification, so a customer who paid
+      // successfully at the hosted checkout stayed "pending" forever unless a webhook
+      // arrived (impossible on origins Safepay cannot reach) or an administrator ran a
+      // reconciliation sweep manually. While the customer is on this page we have the
+      // strongest available signal that the hosted checkout just finished, so trigger
+      // ONE targeted server-initiated verification for THIS owner's payment. The lookup
+      // above already proved the payment belongs to the signed-in customer's own
+      // managed order; the tracker token still comes exclusively from the database,
+      // and settlement re-validates identity, amounts and state inside its own
+      // transaction. A provider transport failure only schedules a retry — it can
+      // never turn a pending payment into success or failure by itself.
+      if (result.kind === "pending") {
+        try {
+          const vaultKeys = loadPaymentPayloadVaultKeys();
+          if (vaultKeys) {
+            const vault = createPaymentPayloadVault(vaultKeys.activeKeyId, vaultKeys.keyRing);
+            const inbox = createPaymentWebhookService(db as never, vault, { reconcileDelayMs: 60_000 });
+            const verification = createPaymentVerificationService({
+              database: db as never,
+              config,
+              provider: createSafepayProvider(config),
+              reconciliation: createPaymentReconciliationService(db as never, inbox),
+            });
+            const outcome = await verification.verifyPaymentNow(result.paymentId);
+            console.info("[Safepay return] RETURN_VERIFY", { outcome: outcome.kind });
+            if (outcome.kind !== "skipped" && outcome.kind !== "provider_fetch_failed") {
+              // Re-read the snapshot: settlement (or a recorded observation) may have
+              // changed the displayed state.
+              result = await readReturn({
+                ...(context.kind === "state-only" || context.kind === "full" ? { state: context.state } : {}),
+                ...(context.kind === "tracker-only" || context.kind === "full" ? { tracker: context.trackerToken } : {}),
+                owner: { kind: "USER", userId: user.id },
+              });
+            }
+          }
+        } catch {
+          // Verification is best-effort on this page; the scheduled worker and the
+          // admin re-check action retry safely. Never surface transport details.
+          console.warn("[Safepay return] RETURN_VERIFY_UNAVAILABLE");
+        }
+      }
     }
   }
 
@@ -128,7 +178,7 @@ export default async function SafepayReturnPage({
     },
     pending: {
       title: "Payment verification pending",
-      message: `Order ${result.kind === "pending" ? result.reference : ""} is awaiting secure server-side payment verification. This return page is not proof of payment. Please do not start another payment attempt.`,
+      message: `Order ${result.kind === "pending" ? result.reference : ""} is awaiting secure server-side payment verification. This page is not proof of payment. Verification with Safepay runs automatically (or retry this page in a minute) — please do not start another payment attempt.`,
       tone: "border-amber-200 bg-amber-50 text-amber-950",
     },
     failure: {

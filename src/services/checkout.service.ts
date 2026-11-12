@@ -7,7 +7,8 @@
 import { db } from "@/lib/db";
 import { computeOrderPricing, computeDiscount, computeGiftWrapCharge, type DiscountRule } from "@/lib/pricing";
 import { getSettings } from "@/services/settings.service";
-import { reserveCoupon, validateCoupon } from "@/services/promotions.service";
+import { reserveCoupon, findCouponByCode } from "@/services/promotions.service";
+import { validateCouponRecord } from "@/lib/coupon-validation";
 import { generateOrderReference } from "@/lib/utils";
 import type { PlaceOrderInput } from "@/lib/validation";
 import { withPerformanceTiming } from "@/lib/performance-timing";
@@ -42,7 +43,17 @@ export async function quoteOrder(input: QuoteInput): Promise<QuoteResult> {
 
 async function quoteOrderImpl(input: QuoteInput): Promise<QuoteResult> {
   const { getCartDetails } = await import("@/services/cart.service");
-  const [settings, cart] = await Promise.all([getSettings(), getCartDetails()]);
+  // The coupon row is independent of settings/cart — fetch it in the same
+  // batch and validate synchronously against the computed subtotal (one
+  // fewer sequential round trip on the quote path).
+  const couponPromise = input.couponCode
+    ? findCouponByCode(input.couponCode)
+    : Promise.resolve(null);
+  const [settings, cart, couponRecord] = await Promise.all([
+    getSettings(),
+    getCartDetails(),
+    couponPromise,
+  ]);
   const items = (cart?.items ?? []).filter((i) => !i.outOfStock);
 
   const lines = items.map((i) => ({ productId: i.productId, unitPrice: i.price, quantity: i.quantity }));
@@ -53,8 +64,8 @@ async function quoteOrderImpl(input: QuoteInput): Promise<QuoteResult> {
   let couponApplied: string | undefined;
   let discountRule: DiscountRule | null = null;
 
-  if (input.couponCode && subtotal > 0) {
-    const result = await validateCoupon(input.couponCode, subtotal);
+  if (couponRecord && subtotal > 0) {
+    const result = validateCouponRecord(couponRecord, subtotal);
     if ("error" in result) {
       couponError = result.error;
     } else {
@@ -138,7 +149,15 @@ async function placeOrderImpl(
     return { ok: false, error: "Please sign in to place an order.", code: "AUTHENTICATION_REQUIRED" };
   }
 
-  const settings = await getSettings();
+  // Settings (payment-method guards) and the idempotency probe are independent
+  // reads — one batch instead of two sequential round trips (FR-27, BR-10).
+  const [settings, existing] = await Promise.all([
+    getSettings(),
+    db.order.findUnique({
+      where: { idempotencyKey: input.idempotencyKey },
+      select: { reference: true, id: true, userId: true, isGuest: true },
+    }),
+  ]);
 
   // Payment method guards (BR-10, D-02): no fake online confirmations
   if (input.paymentMethod === "COD" && !settings.cod_enabled)
@@ -152,11 +171,6 @@ async function placeOrderImpl(
   if (input.paymentMethod === "BANK_TRANSFER" && !settings.bank_transfer_enabled)
     return { ok: false, error: "Bank transfer is currently unavailable.", code: "PAYMENT_DISABLED" };
 
-  // Idempotency fast-path (FR-27): same key → return original order
-  const existing = await db.order.findUnique({
-    where: { idempotencyKey: input.idempotencyKey },
-    select: { reference: true, id: true, userId: true, isGuest: true },
-  });
   if (existing) {
     if (existing.userId !== userId || existing.isGuest) {
       return { ok: false, error: "This checkout request cannot be reused.", code: "DUPLICATE" };

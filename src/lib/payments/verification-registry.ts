@@ -32,6 +32,9 @@ async function resolveSafepayTracker(trackerToken: string) {
     },
     select: {
       id: true, orderId: true, attemptNumber: true, currency: true,
+      // Locally expected amount: adapters validate provider-reported amounts against it
+      // and never substitute it for a missing provider-reported amount.
+      expectedAmountMinor: true,
       order: {
         select: {
           paymentFlowVersion: true, checkoutOwnerKind: true,
@@ -42,12 +45,14 @@ async function resolveSafepayTracker(trackerToken: string) {
   });
   const order = payment?.order;
   if (!payment || !order || order.paymentFlowVersion !== 1 || !payment.attemptNumber ||
-      payment.attemptNumber < 1 || payment.currency !== "PKR" || order.isGuest ||
+      payment.attemptNumber < 1 || payment.currency !== "PKR" || !payment.expectedAmountMinor ||
+      order.isGuest ||
       order.checkoutOwnerKind !== "USER" || !order.userId || !order.checkoutOwnerHash ||
       !/^[a-f0-9]{64}$/.test(order.checkoutOwnerHash)) return null;
   return {
     orderId: payment.orderId, paymentId: payment.id, attemptNumber: payment.attemptNumber,
     currency: payment.currency,
+    expectedAmountMinor: payment.expectedAmountMinor.toString(),
     owner: { kind: "USER" as const, hash: order.checkoutOwnerHash, userId: order.userId },
   };
 }

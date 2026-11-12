@@ -1,6 +1,6 @@
 import "server-only";
 import type { Payment, Prisma, PrismaClient } from "../../generated/postgres-client";
-import { trackerIdentity, type PaymentObservation } from "@/lib/payments/evidence-contract";
+import { sha256, trackerIdentity, type PaymentObservation } from "@/lib/payments/evidence-contract";
 import { readTrustedPaymentEvidence, type VerifiedEvidenceData } from "@/lib/payments/verified-evidence";
 
 export type PaymentPersistence = Pick<PrismaClient, "$transaction">;
@@ -26,8 +26,12 @@ function identityMatches(order: ManagedOrder | null, payment: Payment | null, o:
 function validMoney(order: ManagedOrder, payment: Payment, o: PaymentObservation) {
   return Number.isSafeInteger(order.total) && order.total > 0 && payment.amount === order.total &&
     payment.expectedAmountMinor === BigInt(order.total) * BigInt(100) &&
-    payment.expectedAmountMinor === BigInt(o.amountMinor) &&
-    (o.kind !== "CAPTURE_CONFIRMED" || (o.capturedMinor === o.amountMinor && (o.refundMinor === null || o.refundMinor === "0")));
+    // The provider-reported amount, when the documented payload carried one, must equal
+    // the attempt's expected amount. A null amount (documented shapes without financial
+    // fields) has nothing to compare and is never treated as a match or a mismatch.
+    (o.amountMinor === null || payment.expectedAmountMinor === BigInt(o.amountMinor)) &&
+    (o.kind !== "CAPTURE_CONFIRMED" || (o.amountMinor !== null && o.capturedMinor === o.amountMinor &&
+      (o.refundMinor === null || o.refundMinor === "0")));
 }
 function validSnapshot(order: ManagedOrder) {
   return order.items.length > 0 && order.items.every(item => Number.isSafeInteger(item.quantity) && item.quantity > 0 &&
@@ -85,7 +89,8 @@ export function createPaymentSettlementService(database: PaymentPersistence, opt
             payment = await tx.payment.findUniqueOrThrow({ where: { id: payment.id } });
             if (!identityMatches(order, payment, o)) throw new SettlementConflict();
             let paymentVersion = payment.version;
-            const finish = async (decision: string, result: SettlementResult, reason?: string) => {
+            const finish = async (decision: string, result: SettlementResult, reason?: string,
+              extras?: { refundId?: string; details?: Record<string, unknown> }) => {
               if ((await tx.paymentWebhookEvent.updateMany({ where: { id: event.id, processedAt: null,
                 processingStatus: "RECEIVED", reviewRequired: false, businessPayloadSha256: verified.businessSha256 },
               data: { paymentId: payment!.id, processingStatus: "PROCESSED", processedAt: now,
@@ -95,10 +100,14 @@ export function createPaymentSettlementService(database: PaymentPersistence, opt
                 operation: "PAYMENT_OBSERVATION", validationStatus: "AUTHENTICATED", decision, reasonCode: reason,
                 sourceWebhookEventId: event.id, processedWebhookEventId: event.id,
                 providerContractVersion: verified.contractVersion, rawPayloadSha256: verified.rawSha256,
-                observedCurrency: o.currency, observedQuoteMinor: BigInt(o.amountMinor),
+                observedCurrency: o.currency,
+                observedQuoteMinor: o.amountMinor === null ? null : BigInt(o.amountMinor),
+                observedProviderState: o.providerState,
                 observedCapturedMinor: o.capturedMinor === null ? null : BigInt(o.capturedMinor),
                 observedRefundedMinor: o.refundMinor === null ? null : BigInt(o.refundMinor),
                 providerOccurredAt: o.occurredAt === null ? null : new Date(o.occurredAt),
+                refundId: extras?.refundId ?? null,
+                ...(extras?.details ? { detailsJson: JSON.stringify(extras.details) } : {}),
                 paymentVersion, orderVersion: order.version + 1,
               } });
               return result;
@@ -112,12 +121,175 @@ export function createPaymentSettlementService(database: PaymentPersistence, opt
             const review = async (reason: string, reconcileStatus = "REVIEW_REQUIRED") => {
               await changePayment({ reconcileStatus, lastReconcileAt: now, nextReconcileAt: null,
                 reconcileLeaseToken: null, reconcileLeaseUntil: null, reconcileAttempts: { increment: 1 } });
-              await tx.order.update({ where: { id: order.id }, data: { paymentReviewStatus: "REQUIRED", paymentReviewReason: reason } });
-              return finish("REVIEW_REQUIRED", { kind: "review_required" }, reason);
+              const reviewReason = order.paymentReviewReason === "LATE_CAPTURE" ? "LATE_CAPTURE" : reason;
+              await tx.order.update({ where: { id: order.id }, data: { paymentReviewStatus: "REQUIRED", paymentReviewReason: reviewReason } });
+              return finish("REVIEW_REQUIRED", { kind: "review_required" }, reviewReason);
             };
+
+            // ─── Refund, reversal and refund-contradiction observations ───
+            // Authenticated refund evidence is settled here against the refund ledger.
+            // Capture invariants (validMoney/validSnapshot) do not apply: refund events
+            // legitimately omit the original quote. Identity was already proven above and
+            // the order row is already locked. Only verified evidence advances money.
+            if (o.kind === "REFUND_CONFIRMED" || o.kind === "REFUND_NOTICE" ||
+                o.kind === "REVERSAL_NOTICE" || (o.kind === "REVIEW_REQUIRED" && o.refundMinor !== null)) {
+              const captured = payment.capturedAmountMinor;
+              const refunded = payment.refundedAmountMinor ?? BigInt(0);
+              const refundablePayment = payment.status === "PAID" && order.paymentStatus === "PAID" &&
+                order.acceptedPaymentId === payment.id && !!payment.paidVerifiedAt &&
+                captured !== null && captured === payment.expectedAmountMinor;
+
+              // Dashboard/authorization reversals of a local tracker. Khareedo never submits
+              // reversals, so this is an external action: never money, always manual review.
+              if (o.kind === "REVERSAL_NOTICE") {
+                if (payment.status === "PENDING") return review("REVERSAL_HOLDS_RETAINED", "FAILED");
+                return review("REVERSAL_REQUIRES_REVIEW");
+              }
+              // Authenticated refund event whose tracker state contradicts a refund.
+              if (o.kind === "REVIEW_REQUIRED") return review("REFUND_EVIDENCE_CONTRADICTION");
+              // Refund-shaped notice carrying an amount without an attributable operation.
+              if (o.kind === "REFUND_NOTICE" && o.refundMinor !== null) return review("REFUND_REQUIRES_REVIEW");
+
+              if (o.kind === "REFUND_CONFIRMED" && o.refundMinor !== null && o.occurredAt !== null &&
+                  (o.providerState === null || o.providerState === undefined ||
+                    o.providerState === "TRACKER_REFUNDED" || o.providerState === "TRACKER_PARTIAL_REFUND")) {
+                const previouslySettled = await tx.paymentRefund.findFirst({
+                  where: { paymentId: payment.id, status: "SUCCEEDED", amountMinor: BigInt(o.refundMinor),
+                    providerRefundedAt: new Date(o.occurredAt) },
+                  select: { id: true },
+                });
+                if (previouslySettled) return finish("ALREADY_SETTLED", { kind: "recorded" });
+              }
+
+              if (!refundablePayment) return review("REFUND_FOR_UNSETTLED_PAYMENT");
+
+              const open = await tx.paymentRefund.findMany({
+                where: { paymentId: payment.id, status: { in: ["REQUESTED", "SUBMITTING", "PENDING"] } },
+                orderBy: [{ requestedAt: "asc" }, { id: "asc" }],
+              });
+              const openSum = open.reduce((sum, row) => sum + row.amountMinor, BigInt(0));
+              const remaining = captured - refunded; // locally refundable balance
+              const advance = async (newRefunded: bigint) => {
+                await changePayment({
+                  refundedAmountMinor: newRefunded,
+                  status: newRefunded === captured ? "REFUNDED" : "PAID",
+                  ...(o.providerState ? { providerState: o.providerState } : {}),
+                });
+                if (newRefunded === captured) {
+                  await tx.order.update({ where: { id: order.id }, data: { paymentStatus: "REFUNDED" } });
+                }
+              };
+              const externalRefundKey = () => "PROVIDER:" + sha256(JSON.stringify(
+                [payment.id, o.occurredAt ?? o.observationId, o.refundMinor]));
+              const createExternalRefund = async (amountMinor: bigint, type: "FULL" | "PARTIAL") => {
+                await tx.paymentRefund.create({ data: {
+                  paymentId: payment.id, trackerToken: payment.trackerToken!,
+                  providerEnvironment: payment.providerEnvironment!, merchantAccountRef: payment.merchantAccountRef!,
+                  amountMinor, currency: "PKR", type, status: "SUCCEEDED", initiatedBy: "PROVIDER",
+                  operationKey: externalRefundKey(), providerState: o.providerState,
+                  providerRefundedAt: o.occurredAt ? new Date(o.occurredAt) : null,
+                  // The provider executed this refund itself: the confirmed timestamp doubles
+                  // as the submission record for the ledger lifecycle constraints.
+                  submittedAt: o.occurredAt ? new Date(o.occurredAt) : now,
+                  confirmedAt: o.occurredAt ? new Date(o.occurredAt) : now, settledAt: now,
+                  reconcileStatus: "VERIFIED",
+                } });
+              };
+              const finalizeRow = async (row: { id: string; version: number }, confirmedAt: Date) => {
+                if ((await tx.paymentRefund.updateMany({ where: { id: row.id, version: row.version,
+                  status: { in: ["REQUESTED", "SUBMITTING", "PENDING"] } },
+                data: { status: "SUCCEEDED", reconcileStatus: "VERIFIED", confirmedAt, settledAt: now,
+                  providerState: o.providerState, lastReconcileAt: now, nextReconcileAt: null,
+                  providerRefundedAt: o.occurredAt ? new Date(o.occurredAt) : null,
+                  version: { increment: 1 } },
+                })).count !== 1) throw new SettlementConflict();
+              };
+
+              // Reconciliation channel: documented tracker state without an amount.
+              if (o.kind === "REFUND_NOTICE") {
+                if (o.providerState === "TRACKER_REFUNDED") {
+                  // Provider says fully refunded. Finalization requires the open ledger rows
+                  // to exactly account for the remaining refundable balance.
+                  if (open.length > 0 && openSum === remaining) {
+                    for (const row of open) await finalizeRow(row, now);
+                    await advance(captured);
+                    return finish("REFUND_SETTLED", { kind: "settled" }, undefined,
+                      { details: { refundIds: open.map(row => row.id) } });
+                  }
+                  if (open.length === 0 && remaining > BigInt(0)) {
+                    // External dashboard full refund: the ledger row is created from verified
+                    // evidence for exactly the remaining refundable balance.
+                    await createExternalRefund(remaining, "FULL");
+                    await advance(captured);
+                    return finish("REFUND_SETTLED", { kind: "settled" });
+                  }
+                  if (open.length === 0 && remaining === BigInt(0)) return finish("ALREADY_SETTLED", { kind: "recorded" });
+                  return review("REFUND_ROWS_UNRECONCILABLE");
+                }
+                if (o.providerState === "TRACKER_PARTIAL_REFUND") {
+                  if (open.length > 0) {
+                    // A partial refund exists at the provider but the reporter documents no
+                    // amount: attribution is impossible from this evidence. Rows stay open
+                    // for a refund webhook or bounded polling; no money moves.
+                    return finish("REFUND_PARTIAL_UNATTRIBUTED", { kind: "recorded" });
+                  }
+                  return review("EXTERNAL_PARTIAL_REFUND_UNATTRIBUTED");
+                }
+                return review("REFUND_REQUIRES_REVIEW");
+              }
+
+              // Webhook channel: authenticated refund amount.
+              const refundMinor = BigInt(o.refundMinor!);
+              if (refundMinor <= BigInt(0)) return review("INVALID_REFUND_AMOUNT");
+              // Corroborate the documented tracker state when the event carried one.
+              // TRACKER_REFUNDED asserts the full remaining balance was refunded with this
+              // event. A TRACKER_PARTIAL_REFUND state may lag the cumulative completion, so
+              // only the cumulative cap below bounds it — the amount itself is the fact.
+              if (o.providerState !== null && o.providerState !== undefined && o.providerState !== "TRACKER_REFUNDED" &&
+                  o.providerState !== "TRACKER_PARTIAL_REFUND") {
+                return review("REFUND_STATE_CONTRADICTION");
+              }
+              const confirmedAt = o.occurredAt ? new Date(o.occurredAt) : now;
+              if (o.occurredAt) {
+                const previouslySettled = await tx.paymentRefund.findFirst({
+                  where: { paymentId: payment.id, status: "SUCCEEDED", amountMinor: refundMinor,
+                    providerRefundedAt: confirmedAt },
+                  select: { id: true },
+                });
+                if (previouslySettled) return finish("ALREADY_SETTLED", { kind: "recorded" });
+              }
+              if (o.providerState === "TRACKER_REFUNDED" && refundMinor !== remaining) {
+                return review("REFUND_STATE_AMOUNT_MISMATCH");
+              }
+              // Cumulative refunds can never exceed the captured amount.
+              if (refunded + refundMinor > captured) return review("REFUND_EXCEEDS_CAPTURED");
+
+              // FIFO among the open rows with the exact asserted amount. Each distinct
+              // authenticated refund event finalizes exactly one row; redeliveries dedupe at
+              // the inbox (same payload digest/event id), so a row is never counted twice.
+              const match = open.find(row => row.amountMinor === refundMinor);
+              if (match) {
+                await finalizeRow(match, confirmedAt);
+                await advance(refunded + refundMinor);
+                return finish("REFUND_SETTLED", { kind: "settled" }, undefined, { refundId: match.id });
+              }
+              if (open.length === 0) {
+                // External (dashboard) refund: recorded from verified evidence with a stable
+                // operation key (payment + provider refund timestamp + amount) so redelivered
+                // events with different event ids still cannot create duplicate rows.
+                const existing = await tx.paymentRefund.findUnique({ where: { operationKey: externalRefundKey() } });
+                if (existing) return finish("ALREADY_SETTLED", { kind: "recorded" });
+                await createExternalRefund(refundMinor, refundMinor === remaining ? "FULL" : "PARTIAL");
+                await advance(refunded + refundMinor);
+                return finish("REFUND_SETTLED", { kind: "settled" });
+              }
+              // Open rows exist but none matches the asserted amount: never guess an
+              // attribution; keep the ledger untouched for manual reconciliation.
+              return review("REFUND_AMOUNT_UNMATCHED");
+            }
+
             if (!validMoney(order, payment, o)) return review("AMOUNT_MISMATCH");
             if (!validSnapshot(order)) return review("ORDER_SNAPSHOT_MISMATCH");
-            if (o.kind === "REFUND_NOTICE") return review("REFUND_REQUIRES_REVIEW");
             if (o.kind === "REVIEW_REQUIRED") return review("VERIFIER_REQUIRES_REVIEW");
             if (o.kind !== "CAPTURE_CONFIRMED" &&
                 ((o.capturedMinor !== null && o.capturedMinor !== "0") || (o.refundMinor !== null && o.refundMinor !== "0")))

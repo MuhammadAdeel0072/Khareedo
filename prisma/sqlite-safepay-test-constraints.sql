@@ -439,4 +439,99 @@ BEGIN
   SELECT RAISE(ABORT, 'PaymentEvidence_final_event_check');
 END;
 
+-- Refund ledger domain checks (mirror the PostgreSQL migration CHECK predicates).
+CREATE TRIGGER "PaymentRefund_money_check_insert"
+BEFORE INSERT ON "PaymentRefund"
+FOR EACH ROW
+WHEN (NEW."amountMinor" > 0 AND length(NEW."currency") = 3 AND NEW."version" >= 0) IS NOT TRUE
+BEGIN
+  SELECT RAISE(ABORT, 'PaymentRefund_money_check');
+END;
+
+CREATE TRIGGER "PaymentRefund_money_check_update"
+BEFORE UPDATE ON "PaymentRefund"
+FOR EACH ROW
+WHEN (NEW."amountMinor" > 0 AND length(NEW."currency") = 3 AND NEW."version" >= 0) IS NOT TRUE
+BEGIN
+  SELECT RAISE(ABORT, 'PaymentRefund_money_check');
+END;
+
+CREATE TRIGGER "PaymentRefund_type_check_insert"
+BEFORE INSERT ON "PaymentRefund"
+FOR EACH ROW
+WHEN (NEW."type" IN ('FULL', 'PARTIAL')) IS NOT TRUE
+BEGIN
+  SELECT RAISE(ABORT, 'PaymentRefund_type_check');
+END;
+
+CREATE TRIGGER "PaymentRefund_type_check_update"
+BEFORE UPDATE ON "PaymentRefund"
+FOR EACH ROW
+WHEN (NEW."type" IN ('FULL', 'PARTIAL')) IS NOT TRUE
+BEGIN
+  SELECT RAISE(ABORT, 'PaymentRefund_type_check');
+END;
+
+CREATE TRIGGER "PaymentRefund_initiatedBy_check_insert"
+BEFORE INSERT ON "PaymentRefund"
+FOR EACH ROW
+WHEN (NEW."initiatedBy" IN ('ADMIN', 'PROVIDER')) IS NOT TRUE
+BEGIN
+  SELECT RAISE(ABORT, 'PaymentRefund_initiatedBy_check');
+END;
+
+CREATE TRIGGER "PaymentRefund_initiatedBy_check_update"
+BEFORE UPDATE ON "PaymentRefund"
+FOR EACH ROW
+WHEN (NEW."initiatedBy" IN ('ADMIN', 'PROVIDER')) IS NOT TRUE
+BEGIN
+  SELECT RAISE(ABORT, 'PaymentRefund_initiatedBy_check');
+END;
+
+CREATE TRIGGER "PaymentRefund_status_check_insert"
+BEFORE INSERT ON "PaymentRefund"
+FOR EACH ROW
+WHEN ((
+    NEW."status" IN ('REQUESTED', 'SUBMITTING', 'PENDING', 'SUCCEEDED', 'FAILED', 'REVIEW_REQUIRED')
+    AND (NEW."submittedAt" IS NOT NULL OR NEW."status" IN ('REQUESTED', 'REVIEW_REQUIRED'))
+    AND (NEW."confirmedAt" IS NULL OR NEW."status" = 'SUCCEEDED')
+    AND (NEW."settledAt" IS NULL OR NEW."status" = 'SUCCEEDED')
+    AND (NEW."failureCode" IS NULL OR NEW."status" IN ('FAILED', 'PENDING', 'REVIEW_REQUIRED'))
+    AND (NEW."reviewReason" IS NULL OR NEW."status" = 'REVIEW_REQUIRED')
+  )) IS NOT TRUE
+BEGIN
+  SELECT RAISE(ABORT, 'PaymentRefund_status_check');
+END;
+
+CREATE TRIGGER "PaymentRefund_status_check_update"
+BEFORE UPDATE ON "PaymentRefund"
+FOR EACH ROW
+WHEN ((
+    NEW."status" IN ('REQUESTED', 'SUBMITTING', 'PENDING', 'SUCCEEDED', 'FAILED', 'REVIEW_REQUIRED')
+    AND (NEW."submittedAt" IS NOT NULL OR NEW."status" IN ('REQUESTED', 'REVIEW_REQUIRED'))
+    AND (NEW."confirmedAt" IS NULL OR NEW."status" = 'SUCCEEDED')
+    AND (NEW."settledAt" IS NULL OR NEW."status" = 'SUCCEEDED')
+    AND (NEW."failureCode" IS NULL OR NEW."status" IN ('FAILED', 'PENDING', 'REVIEW_REQUIRED'))
+    AND (NEW."reviewReason" IS NULL OR NEW."status" = 'REVIEW_REQUIRED')
+  )) IS NOT TRUE
+BEGIN
+  SELECT RAISE(ABORT, 'PaymentRefund_status_check');
+END;
+
+CREATE TRIGGER "PaymentRefund_reconciliation_check_insert"
+BEFORE INSERT ON "PaymentRefund"
+FOR EACH ROW
+WHEN (NEW."reconcileAttempts" >= 0) IS NOT TRUE
+BEGIN
+  SELECT RAISE(ABORT, 'PaymentRefund_reconciliation_check');
+END;
+
+CREATE TRIGGER "PaymentRefund_reconciliation_check_update"
+BEFORE UPDATE ON "PaymentRefund"
+FOR EACH ROW
+WHEN (NEW."reconcileAttempts" >= 0) IS NOT TRUE
+BEGIN
+  SELECT RAISE(ABORT, 'PaymentRefund_reconciliation_check');
+END;
+
 COMMIT;

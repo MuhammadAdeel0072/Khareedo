@@ -9,7 +9,7 @@ import { getSessionUser } from "@/lib/auth-guard";
 import { formatPKR, formatDateTime } from "@/lib/utils";
 import { STATUS_BADGE_CLASSES } from "@/lib/constants";
 import { WhatsAppIcon } from "@/components/layout/whatsapp-icon";
-import { getSettings } from "@/services/settings.service";
+import { getCachedSettings } from "@/services/settings.service";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
@@ -26,9 +26,12 @@ export default async function OrderPage({
   return withPerformanceTiming("page.order-confirmation", async () => {
   const { reference } = await params;
   const user = await getSessionUser();
-  const order = await getOrderByReference(reference, user?.id);
+  // Order fetch and display settings are independent reads — one batch.
+  const [order, settings] = await Promise.all([
+    getOrderByReference(reference, user?.id),
+    getCachedSettings(),
+  ]);
   if (!order) notFound();
-  const settings = await getSettings();
 
   const isCancelled = order.status === "CANCELLED";
   const isOnlinePayment = order.paymentMethod === "ONLINE";

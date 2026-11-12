@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+﻿import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => {
   class TestSafepayConfigurationError extends Error {}
@@ -102,4 +102,56 @@ describe("Safepay webhook delivery route", () => {
     const input = mocks.receive.mock.calls[0][0];
     expect(Object.keys(input.headers).sort()).toEqual(["content-type", "x-sfpy-event-id", "x-sfpy-signature"]);
   });
+  it("recovers when webhook is redelivered after temporary database failure", async () => {
+    // Simulate temporary database failure.
+    mocks.receive.mockRejectedValueOnce(
+      new Error("Simulated database outage")
+    );
+
+    const first = await POST(request());
+
+    expect(first.status).toBe(503);
+
+    expect(await first.json()).toMatchObject({
+      ok: false,
+      code: "PERSISTENCE_UNAVAILABLE",
+    });
+
+    // Database has recovered.
+    // Safepay redelivers the identical request.
+    const recovered = await POST(request());
+
+    expect(recovered.status).toBe(200);
+
+    expect(await recovered.json()).toMatchObject({
+      ok: true,
+      code: "stored",
+    });
+
+    // A further redelivery is recognized as a duplicate.
+    mocks.receive.mockResolvedValueOnce({
+      kind: "duplicate",
+      eventId: "event-1",
+    });
+
+    const duplicate = await POST(request());
+
+    expect(duplicate.status).toBe(200);
+
+    expect(await duplicate.json()).toMatchObject({
+      ok: true,
+      code: "duplicate",
+    });
+
+    expect(mocks.receive).toHaveBeenCalledTimes(3);
+
+    // Verify all three attempts contained identical raw bytes.
+    const bodies = mocks.receive.mock.calls.map(
+      ([input]) => Buffer.from(input.body).toString("utf8")
+    );
+
+    expect(bodies[0]).toBe(bodies[1]);
+    expect(bodies[1]).toBe(bodies[2]);
+  });
 });
+

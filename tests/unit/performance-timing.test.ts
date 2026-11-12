@@ -23,6 +23,9 @@ describe("opt-in production performance diagnostics", () => {
     vi.stubEnv("LOG_LEVEL", "error");
     vi.stubEnv("SUPABASE_POSTGRES_URL", "postgresql://diagnostic:unused@localhost:5432/unused");
     vi.stubEnv("SUPABASE_DB_CA_CERT", "");
+    // db.ts caches its client on globalThis in every environment (connection-storm
+    // protection); tests need a fresh client per import to observe constructor behavior.
+    delete (globalThis as { prisma?: unknown }).prisma;
     client.options = undefined;
     client.extension = undefined;
     client.queryListener = undefined;

@@ -1,7 +1,9 @@
 // Admin order detail page (FR-41).
 import { notFound } from "next/navigation";
 import { adminGetOrderById } from "@/services/orders.service";
+import { adminGetPaymentDiagnostics } from "@/services/admin-payment-diagnostics.service";
 import { AdminOrderView, type AdminOrderDetail } from "@/components/admin/admin-order-view";
+import { AdminPaymentDiagnosticsPanel } from "@/components/admin/admin-payment-diagnostics";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Order Details · Admin" };
@@ -14,6 +16,8 @@ export default async function AdminOrderPage({
   const { id } = await params;
   const order = await adminGetOrderById(id);
   if (!order) notFound();
+  // Read-only Safepay diagnostics; null for legacy/COD orders (no managed payment flow).
+  const diagnostics = await adminGetPaymentDiagnostics(id);
 
   const detail: AdminOrderDetail = {
     id: order.id,
@@ -59,6 +63,11 @@ export default async function AdminOrderPage({
   return (
     <div className="p-4 sm:p-6">
       <AdminOrderView order={detail} />
+      {diagnostics && (
+        <div className="mx-auto max-w-4xl">
+          <AdminPaymentDiagnosticsPanel data={diagnostics} />
+        </div>
+      )}
     </div>
   );
 }

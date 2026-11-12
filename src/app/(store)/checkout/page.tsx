@@ -19,12 +19,18 @@ export default async function CheckoutPage() {
   if (!user) redirect("/login?callbackUrl=%2Fcheckout&reason=checkout");
 
   await mergeGuestCart(user.id);
-  const [cart, settings] = await Promise.all([getCartDetails(), getSettings()]);
+  // Cart details depend on the merge above; settings and addresses do not —
+  // fetch all three in one batch instead of two sequential stages.
+  const [cart, settings, savedAddressRows] = await Promise.all([
+    getCartDetails(),
+    getSettings(),
+    listAddresses(user.id),
+  ]);
   if (!cart || cart.items.length === 0) {
     redirect("/cart");
   }
 
-  const savedAddresses: CheckoutAddress[] = (await listAddresses(user.id)).map((a) => ({
+  const savedAddresses: CheckoutAddress[] = savedAddressRows.map((a) => ({
         id: a.id,
         label: a.label,
         fullName: a.fullName,

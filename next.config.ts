@@ -23,7 +23,7 @@ const nextConfig: NextConfig = {
       "./generated/sqlite-client/**",
       "./scripts/**",
       "./tests/**",
-      "./tool-results/**",
+     "./tool-results/**/*",
     ],
   },
   reactStrictMode: false,

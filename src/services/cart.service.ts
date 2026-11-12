@@ -366,15 +366,43 @@ export async function removeCartItem(itemId: string) {
 
 /** Toggle gift wrapping on ONE cart line — the wrap flag lives on the item, not the order. */
 export async function setCartItemGiftWrap(itemId: string, wrap: boolean) {
+  return applyCartItemUpdate(itemId, { giftWrap: wrap });
+}
+
+/** Apply quantity and/or gift-wrap to ONE line with a single details re-fetch
+ *  (the PATCH route previously ran two full cart-detail queries when both
+ *  fields were sent together). Quantity semantics match updateCartItem:
+ *  <= 0 deletes the line; above stock throws. */
+export async function applyCartItemUpdate(
+  itemId: string,
+  patch: { quantity?: number; giftWrap?: boolean }
+) {
   const cart = await resolveCart(false);
   if (!cart) throw new Error("Cart not found");
   const item = await db.cartItem.findFirst({
     where: { id: itemId, cartId: cart.id },
-    select: { id: true },
+    include: { product: { include: { inventory: true } } },
   });
   if (!item) throw new Error("Cart item not found");
-  await db.cartItem.update({ where: { id: item.id }, data: { giftWrap: wrap } });
- return getCartDetailsForCart(cart.id);
+
+  if (patch.quantity !== undefined && patch.quantity <= 0) {
+    await db.cartItem.delete({ where: { id: item.id } });
+    return getCartDetailsForCart(cart.id);
+  }
+  if (patch.quantity !== undefined) {
+    const stock = item.product.inventory?.quantity ?? 0;
+    if (patch.quantity > stock) throw new Error(`Only ${stock} unit(s) available in stock`);
+  }
+  if (patch.giftWrap !== undefined || patch.quantity !== undefined) {
+    await db.cartItem.update({
+      where: { id: item.id },
+      data: {
+        ...(patch.giftWrap !== undefined ? { giftWrap: patch.giftWrap } : {}),
+        ...(patch.quantity !== undefined ? { quantity: patch.quantity } : {}),
+      },
+    });
+  }
+  return getCartDetailsForCart(cart.id);
 }
 
 /** Empty the cart (after successful order placement). */
@@ -382,26 +410,69 @@ export async function clearCart(cartId: string) {
   await db.cartItem.deleteMany({ where: { cartId } });
 }
 
-/** Merge a guest cart into the user cart after sign-in (FR-17 continuity). */
+/** Merge a guest cart into the user cart after sign-in (FR-17 continuity).
+ *
+ *  Performance notes: the guest-cart read happens OUTSIDE the transaction so
+ *  the common repeat case (cookie left over after an earlier merge — nothing
+ *  to merge) returns without opening a transaction at all. When there IS
+ *  something to merge, existing user-cart lines are prefetched once and merge
+ *  decisions run in memory instead of one findUnique per guest line.
+ */
 export async function mergeGuestCart(userId: string) {
   const store = await cookies();
   const key = store.get(GUEST_CART_COOKIE)?.value;
   if (!key) return;
+
+  const guestCart = await db.cart.findUnique({
+    where: { sessionKey: key },
+    include: { items: true },
+  });
+  if (!guestCart || guestCart.items.length === 0) return;
+
+  // Collapse duplicate guest lines for the same product in memory so the
+  // unique(cartId, productId) constraint can never be violated by createMany.
+  const guestLines = new Map<
+    string,
+    { productId: string; quantity: number; giftWrap: boolean }
+  >();
+  for (const item of guestCart.items) {
+    const prev = guestLines.get(item.productId);
+    guestLines.set(
+      item.productId,
+      prev
+        ? {
+            productId: item.productId,
+            quantity: Math.min(prev.quantity + item.quantity, 99),
+            giftWrap: prev.giftWrap || item.giftWrap,
+          }
+        : {
+            productId: item.productId,
+            quantity: item.quantity,
+            giftWrap: item.giftWrap,
+          }
+    );
+  }
+
   await db.$transaction(async tx => {
-    const guestCart = await tx.cart.findUnique({
-      where: { sessionKey: key },
-      include: { items: true },
-    });
-    if (!guestCart) return;
     const userCart = await tx.cart.upsert({
       where: { userId },
       update: {},
       create: { userId },
     });
-    for (const item of guestCart.items) {
-      const existing = await tx.cartItem.findUnique({
-        where: { cartId_productId: { cartId: userCart.id, productId: item.productId } },
-      });
+    const existingItems = await tx.cartItem.findMany({
+      where: { cartId: userCart.id },
+      select: { id: true, productId: true, quantity: true, giftWrap: true },
+    });
+    const byProductId = new Map(existingItems.map((i) => [i.productId, i]));
+
+    const toCreate: {
+      cartId: string;
+      productId: string;
+      quantity: number;
+      giftWrap: boolean;
+    }[] = [];
+    for (const item of guestLines.values()) {
+      const existing = byProductId.get(item.productId);
       if (existing) {
         await tx.cartItem.update({
           where: { id: existing.id },
@@ -411,15 +482,16 @@ export async function mergeGuestCart(userId: string) {
           },
         });
       } else {
-        await tx.cartItem.create({
-          data: {
-            cartId: userCart.id,
-            productId: item.productId,
-            quantity: item.quantity,
-            giftWrap: item.giftWrap,
-          },
+        toCreate.push({
+          cartId: userCart.id,
+          productId: item.productId,
+          quantity: item.quantity,
+          giftWrap: item.giftWrap,
         });
       }
+    }
+    if (toCreate.length > 0) {
+      await tx.cartItem.createMany({ data: toCreate });
     }
     await tx.cart.delete({ where: { id: guestCart.id } });
   });

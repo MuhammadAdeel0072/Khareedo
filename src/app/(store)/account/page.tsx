@@ -4,7 +4,7 @@ import { redirect } from "next/navigation";
 import { ArrowRight, Heart, MapPin, Package } from "lucide-react";
 import { getUserProfile, listAddresses } from "@/services/users.service";
 import { getUserOrders } from "@/services/orders.service";
-import { getWishlist } from "@/services/wishlist.service";
+import { getWishlistCount } from "@/services/wishlist.service";
 import { getSessionUser } from "@/lib/auth-guard";
 import { formatPKR, formatDate } from "@/lib/utils";
 import { STATUS_BADGE_CLASSES } from "@/lib/constants";
@@ -18,10 +18,10 @@ export default async function AccountPage() {
   const user = await getSessionUser();
   if (!user) redirect("/login?callbackUrl=/account");
 
-  const [profile, orders, wishlist, addresses] = await Promise.all([
+  const [profile, orders, wishlistCount, addresses] = await Promise.all([
     getUserProfile(user.id),
     getUserOrders(user.id, 1, 4),
-    getWishlist(user.id),
+    getWishlistCount(user.id),
     listAddresses(user.id),
   ]);
 
@@ -45,7 +45,7 @@ export default async function AccountPage() {
         <SummaryCard
           icon={<Heart className="h-5 w-5" />}
           label="Wishlist Items"
-          value={String(wishlist.length)}
+          value={String(wishlistCount)}
           href="/account/wishlist"
         />
         <SummaryCard

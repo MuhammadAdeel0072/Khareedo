@@ -15,7 +15,7 @@ import {
   getProductMetadataBySlug,
   getRelatedProducts,
 } from "@/services/products.service";
-import { getSettings } from "@/services/settings.service";
+import { getCachedSettings } from "@/services/settings.service";
 import { getRequestSession, getSessionUser } from "@/lib/auth-guard";
 import { getWishlistProductIds } from "@/services/wishlist.service";
 import { discountPercent, formatPKR } from "@/lib/utils";
@@ -56,13 +56,15 @@ export default async function ProductPage({ params }: PageProps) {
   const product = await getProductBySlug(slug);
   if (!product) notFound();
 
-  const [settings, related, session, user] = await Promise.all([
-    getSettings(),
+  const userPromise = getSessionUser();
+  const [settings, related, session, user, wishlistIds] = await Promise.all([
+    getCachedSettings(),
     getRelatedProducts(product.category.id, product.id, 4),
     getRequestSession(),
-    getSessionUser(),
+    userPromise,
+    // Wishlist ids ride the same batch instead of a follow-up round trip.
+    userPromise.then((u) => (u ? getWishlistProductIds(u.id) : [])),
   ]);
-  const wishlistIds = user ? await getWishlistProductIds(user.id) : [];
 
   const off = discountPercent(product.price, product.comparePrice);
   const lowStock = product.stock > 0 && product.stock <= product.lowStockThreshold;

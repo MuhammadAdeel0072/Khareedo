@@ -3,7 +3,7 @@ import { StoreHeader } from "@/components/layout/store-header";
 import { StoreFooter } from "@/components/layout/store-footer";
 import { WhatsAppFloat } from "@/components/layout/whatsapp-float";
 import { MobileNav } from "@/components/layout/mobile-nav";
-import { getSettings } from "@/services/settings.service";
+import { getCachedSettings } from "@/services/settings.service";
 import {
   getPerformanceRequestId,
   withPerformanceMeasurement,
@@ -17,7 +17,7 @@ export default async function StoreLayout({ children }: { children: React.ReactN
   return withPerformanceTiming("page.store-layout", async () => {
     const settings = await withPerformanceMeasurement(
       "homepage.layout.settings",
-      getSettings,
+      getCachedSettings,
       requestId
     );
 

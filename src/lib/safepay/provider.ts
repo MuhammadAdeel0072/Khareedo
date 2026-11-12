@@ -1,6 +1,7 @@
 import "server-only";
 import type { SafepayConfig } from "./config";
-import { authResponseSchema, localId, trackerResponseSchema, type ProviderFailure, type Tracker } from "./contracts";
+import { authResponseSchema, localId, refundResponseSchema, trackerResponseSchema,
+  type ProviderFailure, type Tracker } from "./contracts";
 
 export type HttpTransport = (url: URL, init: RequestInit) => Promise<Response>;
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -241,6 +242,46 @@ export function createSafepayProvider(config: SafepayConfig, transport: HttpTran
         return { kind: "updated" };
       } catch (error) {
         return { kind: "failed", code: error instanceof TransportFailure ? error.code : "INVALID_RESPONSE" };
+      }
+    },
+    // Documented classic refund endpoint: POST /order/payments/v3/{tracker}/refund with
+    // X-SFPY-MERCHANT-SECRET and an integer minor-unit body { currency, amount }.
+    // Same no-retry semantics as tracker creation: a transport failure or 5xx does NOT prove
+    // the refund was not processed, so those outcomes are "uncertain" and the caller must
+    // resolve them through reconciliation, never through an automatic resubmission.
+    // A 4xx refusal (except 408) proves the provider rejected the request before processing
+    // it, so no refund can exist: that is a definitive "failed" outcome.
+    // A 2xx response is an accepted submission — it is NEVER accounting evidence on its own;
+    // final refund accounting requires authenticated webhook/reconciliation evidence.
+    async submitRefund(input: { trackerToken: string; amountMinor: bigint }): Promise<
+      { kind: "submitted"; providerState?: string } | ProviderFailure
+    > {
+      if (!input.trackerToken || input.trackerToken.length > 2048 ||
+          /[\u0000-\u0020\u007f]/.test(input.trackerToken) ||
+          typeof input.amountMinor !== "bigint" || input.amountMinor <= BigInt(0) ||
+          input.amountMinor > BigInt(Number.MAX_SAFE_INTEGER)) {
+        return { kind: "failed", code: "INVALID_REQUEST" };
+      }
+      try {
+        const response = await post(
+          `/order/payments/v3/${encodeURIComponent(input.trackerToken)}/refund`,
+          { currency: "PKR", amount: Number(input.amountMinor) },
+        );
+        if (!response.ok) {
+          const definitive = response.status >= 400 && response.status < 500 && response.status !== 408;
+          return {
+            kind: definitive ? "failed" : "uncertain", code: "HTTP_ERROR", httpStatus: response.status,
+            ...(response.providerErrorCode ? { providerErrorCode: response.providerErrorCode } : {}),
+            ...(response.providerMessage ? { providerMessage: response.providerMessage } : {}),
+          };
+        }
+        // Advisory state extraction only. An unparsable 2xx body still means the request
+        // was accepted; the parsed state is never used to finalize accounting.
+        const parsed = refundResponseSchema.safeParse(response.json);
+        const state = parsed.success ? parsed.data.data.tracker.state : undefined;
+        return state ? { kind: "submitted", providerState: state } : { kind: "submitted" };
+      } catch (error) {
+        return { kind: "uncertain", code: error instanceof TransportFailure ? error.code : "INVALID_RESPONSE" };
       }
     },
     // Documented status lookup: GET /reporter/api/v1/payments/{tracker} (Express Checkout guide,

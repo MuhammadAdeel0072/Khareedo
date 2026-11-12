@@ -21,6 +21,14 @@ export async function validateCoupon(
   return validateCouponRecord(coupon, subtotal);
 }
 
+/** Coupon lookup only — lets checkout quote fetch the coupon in parallel with
+ *  settings/cart, then validate synchronously via validateCouponRecord. */
+export async function findCouponByCode(code: string) {
+  const normalized = code.trim().toUpperCase();
+  if (!normalized) return null;
+  return db.coupon.findUnique({ where: { code: normalized } });
+}
+
 /**
  * Reserve one coupon use in the checkout transaction. The usage-count
  * comparison is a compare-and-set, so concurrent checkouts cannot both claim
