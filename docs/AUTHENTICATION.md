@@ -26,9 +26,18 @@ variables:
 - `NEXTAUTH_URL` (public site origin used to create verification links)
 
 The application stores only a SHA-256 hash of each random, 32-byte verification
-token. Links expire after 24 hours, are single-use, and can be resent from
-`/verify-email/pending`. Resend responses do not disclose whether an account
-exists. Configure SMTP before enabling email/password registrations.
+token. Links expire after 24 hours and are single-use. Opening a valid link
+redeems it through NextAuth's email-verification credentials provider, which
+marks the eligible customer verified in the same transaction that consumes the
+token. NextAuth then issues its normal JWT session; verification does not create
+a custom authentication cookie or store a plaintext password. Expired, replayed,
+or ineligible tokens cannot establish a session.
+
+The pending page displays the submitted address and can resend without asking
+for it again. A directly opened pending page still offers an email field.
+Resend responses do not disclose whether an account exists. Callback destinations
+are restricted to local paths, with `/account` as the fallback. Configure SMTP
+before enabling email/password registrations.
 
 ## Database update
 

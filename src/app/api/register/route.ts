@@ -3,6 +3,7 @@ import { registerUser } from "@/services/users.service";
 import { rateLimit, clientIp } from "@/lib/rate-limit";
 import { jsonError, jsonOk } from "@/lib/api";
 import { EmailDeliveryNotConfiguredError } from "@/services/email.service";
+import { safeCallbackUrl } from "@/lib/auth-client";
 
 export async function POST(request: Request) {
   try {
@@ -19,7 +20,14 @@ export async function POST(request: Request) {
       return jsonError("Invalid request body", 400);
     }
 
-    const result = await registerUser(body);
+    const callbackUrl =
+      typeof body === "object" &&
+      body !== null &&
+      "callbackUrl" in body &&
+      typeof body.callbackUrl === "string"
+        ? safeCallbackUrl(body.callbackUrl)
+        : "/account";
+    const result = await registerUser(body, callbackUrl);
     if (!result.ok) return jsonError("Please correct the highlighted fields.", 422, { errors: result.errors });
 
     return jsonOk({ verificationPending: true });

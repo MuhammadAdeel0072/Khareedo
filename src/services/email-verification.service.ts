@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { db } from "@/lib/db";
+import { safeCallbackUrl } from "@/lib/auth-client";
 import { sendVerificationEmail } from "@/services/email.service";
 import { findUserByEmail } from "@/services/auth-users.service";
 
@@ -16,11 +17,10 @@ export function isVerificationTokenUsable(
   return token.consumedAt === null && token.expiresAt.getTime() > now.getTime();
 }
 
-async function issueVerificationEmail(user: {
-  id: string;
-  email: string;
-  name: string | null;
-}) {
+async function issueVerificationEmail(
+  user: { id: string; email: string; name: string | null },
+  callbackUrl = "/account"
+) {
   const token = randomBytes(32).toString("base64url");
   const tokenHash = hashVerificationToken(token);
   const expiresAt = new Date(Date.now() + VERIFICATION_TOKEN_TTL_MS);
@@ -32,27 +32,31 @@ async function issueVerificationEmail(user: {
     });
   });
 
-  await sendVerificationEmail({ email: user.email, name: user.name, token });
+  await sendVerificationEmail({
+    email: user.email,
+    name: user.name,
+    token,
+    callbackUrl: safeCallbackUrl(callbackUrl),
+  });
 }
 
-export async function sendRegistrationVerification(user: {
-  id: string;
-  email: string;
-  name: string | null;
-}) {
-  await issueVerificationEmail(user);
+export async function sendRegistrationVerification(
+  user: { id: string; email: string; name: string | null },
+  callbackUrl?: string
+) {
+  await issueVerificationEmail(user, callbackUrl);
 }
 
-export async function resendVerificationEmail(email: string) {
+export async function resendVerificationEmail(email: string, callbackUrl?: string) {
   const user = await findUserByEmail(email);
   if (!user || !user.passwordHash || user.emailVerified) return;
-  await issueVerificationEmail(user);
+  await issueVerificationEmail(user, callbackUrl);
 }
 
 class InvalidVerificationStateError extends Error {}
 
-export async function verifyEmailToken(token: string) {
-  if (!token || token.length > 256) return false;
+async function redeemVerificationToken(token: string) {
+  if (!token || token.length > 256) return null;
   const tokenHash = hashVerificationToken(token);
   const now = new Date();
 
@@ -60,27 +64,81 @@ export async function verifyEmailToken(token: string) {
     return await db.$transaction(async (transaction) => {
       const record = await transaction.verificationToken.findUnique({
         where: { tokenHash },
-        include: { user: { select: { emailVerified: true } } },
+        include: {
+          user: {
+            select: {
+              id: true,
+              email: true,
+              emailVerified: true,
+              passwordHash: true,
+              name: true,
+              image: true,
+              role: true,
+            },
+          },
+        },
       });
-      if (!record || record.user.emailVerified || !isVerificationTokenUsable(record, now)) {
-        return false;
+      if (
+        !record ||
+        record.user.role !== "CUSTOMER" ||
+        !record.user.passwordHash ||
+        record.user.emailVerified ||
+        !isVerificationTokenUsable(record, now)
+      ) {
+        return null;
       }
 
       const consumed = await transaction.verificationToken.updateMany({
         where: { id: record.id, consumedAt: null, expiresAt: { gt: now } },
         data: { consumedAt: now },
       });
-      if (consumed.count !== 1) return false;
+      if (consumed.count !== 1) return null;
 
       const verified = await transaction.user.updateMany({
-        where: { id: record.userId, email: record.email, emailVerified: null },
+        where: {
+          id: record.userId,
+          email: record.email,
+          emailVerified: null,
+          role: "CUSTOMER",
+        },
         data: { emailVerified: now },
       });
       if (verified.count !== 1) throw new InvalidVerificationStateError();
-      return true;
+
+      return transaction.user.findUnique({
+        where: { id: record.userId },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          image: true,
+          role: true,
+          emailVerified: true,
+          passwordHash: true,
+        },
+      });
     });
   } catch (error) {
-    if (error instanceof InvalidVerificationStateError) return false;
+    if (error instanceof InvalidVerificationStateError) return null;
     throw error;
   }
+}
+
+export async function verifyEmailTokenForLogin(token: string) {
+  const user = await redeemVerificationToken(token);
+  if (!user || user.role !== "CUSTOMER" || !user.passwordHash || !user.emailVerified) {
+    return null;
+  }
+
+  return {
+    id: user.id,
+    email: user.email,
+    name: user.name,
+    image: user.image,
+    role: "CUSTOMER",
+  };
+}
+
+export async function verifyEmailToken(token: string) {
+  return Boolean(await verifyEmailTokenForLogin(token));
 }

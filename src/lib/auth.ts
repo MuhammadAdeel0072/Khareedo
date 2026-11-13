@@ -10,6 +10,7 @@ import { Prisma } from "../../generated/postgres-client";
 import bcrypt from "bcryptjs";
 import { db } from "@/lib/db";
 import { findUserByEmail } from "@/services/auth-users.service";
+import { verifyEmailTokenForLogin } from "@/services/email-verification.service";
 
 const googleId = process.env.GOOGLE_CLIENT_ID;
 const googleSecret = process.env.GOOGLE_CLIENT_SECRET;
@@ -70,6 +71,17 @@ const providers: NonNullable<NextAuthOptions["providers"]> = [
         image: user.image,
         role: user.role,
       } as unknown as import("next-auth").User;
+    },
+  }),
+  CredentialsProvider({
+    id: "email-verification",
+    name: "Email Verification",
+    credentials: {
+      token: { label: "Verification token", type: "text" },
+    },
+    async authorize(credentials) {
+      if (!credentials?.token) return null;
+      return verifyEmailTokenForLogin(credentials.token);
     },
   }),
 ];
