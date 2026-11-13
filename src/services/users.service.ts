@@ -9,7 +9,7 @@ import { sendRegistrationVerification } from "@/services/email-verification.serv
 import { findUserByEmail } from "@/services/auth-users.service";
 import { withPerformanceTiming } from "@/lib/performance-timing";
 
-export async function registerUser(input: unknown) {
+export async function registerUser(input: unknown, callbackUrl?: string) {
   const parsed = registerSchema.safeParse(input);
   if (!parsed.success) {
     return { ok: false as const, errors: fieldErrors(parsed.error) };
@@ -23,7 +23,7 @@ export async function registerUser(input: unknown) {
       id: existing.id,
       email: existing.email,
       name: existing.name,
-    });
+    }, callbackUrl);
     return { ok: true as const };
   }
   if (existing) return { ok: true as const };
@@ -41,7 +41,7 @@ export async function registerUser(input: unknown) {
     }
     throw error;
   }
-  await sendRegistrationVerification(user);
+  await sendRegistrationVerification(user, callbackUrl);
   return { ok: true as const };
 }
 

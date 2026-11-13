@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { safeCallbackUrl } from "@/lib/auth-client";
 
 // One transporter per process: connection pooling + no per-email setup cost.
 let cachedTransporter: ReturnType<typeof nodemailer.createTransport> | null = null;
@@ -74,6 +75,7 @@ export async function sendVerificationEmail(input: {
   email: string;
   name: string | null;
   token: string;
+  callbackUrl?: string;
 }) {
   const config = smtpConfiguration();
   const siteUrl = process.env.NEXTAUTH_URL;
@@ -81,6 +83,7 @@ export async function sendVerificationEmail(input: {
 
   const verificationUrl = new URL("/verify-email", siteUrl);
   verificationUrl.searchParams.set("token", input.token);
+  verificationUrl.searchParams.set("callbackUrl", safeCallbackUrl(input.callbackUrl));
   const greeting = input.name ? `Hello ${escapeHtml(input.name)},` : "Hello,";
   const link = escapeHtml(verificationUrl.toString());
 

@@ -28,14 +28,17 @@ export function RegisterForm({ googleEnabled }: { googleEnabled: boolean }) {
       const res = await fetch("/api/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, email, password }),
+        body: JSON.stringify({ name, email, password, callbackUrl }),
       });
       const data = await res.json();
       if (!res.ok || !data.ok) {
         setErrors(data.errors ?? { _: data.error ?? "Registration failed" });
         return;
       }
-      window.location.assign("/verify-email/pending");
+      const pendingUrl = new URL("/verify-email/pending", window.location.origin);
+      pendingUrl.searchParams.set("email", email.trim().toLowerCase());
+      pendingUrl.searchParams.set("callbackUrl", callbackUrl);
+      window.location.assign(pendingUrl.toString());
     } catch {
       setErrors({ _: "Network error — please try again." });
     } finally {

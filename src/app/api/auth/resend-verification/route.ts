@@ -5,8 +5,12 @@ import { jsonError, jsonOk, parseBody } from "@/lib/api";
 import { emailSchema } from "@/lib/validation";
 import { EmailDeliveryNotConfiguredError, isEmailDeliveryConfigured } from "@/services/email.service";
 import { resendVerificationEmail } from "@/services/email-verification.service";
+import { safeCallbackUrl } from "@/lib/auth-client";
 
-const resendSchema = z.object({ email: emailSchema });
+const resendSchema = z.object({
+  email: emailSchema,
+  callbackUrl: z.string().max(2048).optional(),
+});
 
 export async function POST(request: Request) {
   const parsed = await parseBody(request, resendSchema);
@@ -17,14 +21,19 @@ export async function POST(request: Request) {
   const ipLimit = rateLimit(`verify-resend-ip:${ip}`, 10, 15 * 60 * 1000);
   const emailLimit = rateLimit(`verify-resend-email:${emailKey}`, 3, 60 * 60 * 1000);
   if (!ipLimit.ok || !emailLimit.ok) {
-    return jsonError("Too many requests. Please try again later.", 429);
+    return jsonError("Too many requests. Please try again later.", 429, {
+      retryAfterSec: Math.max(ipLimit.retryAfterSec, emailLimit.retryAfterSec),
+    });
   }
 
   try {
     if (!isEmailDeliveryConfigured()) {
       throw new EmailDeliveryNotConfiguredError();
     }
-    await resendVerificationEmail(parsed.data.email);
+    await resendVerificationEmail(
+      parsed.data.email,
+      safeCallbackUrl(parsed.data.callbackUrl)
+    );
     return jsonOk({ message: "If an eligible account exists, a verification email has been sent." });
   } catch (error) {
     if (error instanceof EmailDeliveryNotConfiguredError) {
