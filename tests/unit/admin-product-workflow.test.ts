@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => {
     storageFrom: vi.fn(),
     storageUpload: vi.fn(),
     getPublicUrl: vi.fn(),
+    fetchRemoteImage: vi.fn(),
   };
 });
 
@@ -40,13 +41,18 @@ vi.mock("@supabase/supabase-js", () => ({
     storage: { from: mocks.storageFrom },
   })),
 }));
+vi.mock("@/lib/remote-image-import", () => ({
+  fetchRemoteImage: mocks.fetchRemoteImage,
+}));
 
 import { Prisma } from "../../generated/postgres-client";
 import { POST as uploadImage } from "@/app/api/admin/upload/route";
+import { POST as importProductImage } from "@/app/api/admin/products/import-image/route";
 import { POST as createProduct } from "@/app/api/admin/products/route";
 import { PUT as updateProduct } from "@/app/api/admin/products/[id]/route";
 import { readAdminApiResponse, adminApiErrorMessage } from "@/lib/admin-api-response";
 import { getProductImageExtension } from "@/lib/product-image-validation";
+import { SsrfBlockedError } from "@/lib/ssrf-guard";
 
 const category = { id: "category-1" };
 const product = { id: "product-1", name: "Test Product" };
@@ -58,6 +64,7 @@ function bytes(...values: number[]) {
 function productInput(overrides: Record<string, unknown> = {}) {
   return {
     name: "Test Product",
+    slug: "test-product",
     categoryId: category.id,
     price: 100,
     comparePrice: null,
@@ -65,6 +72,7 @@ function productInput(overrides: Record<string, unknown> = {}) {
     isFeatured: false,
     rating: 0,
     reviewCount: 0,
+    tags: "electronics",
     images: ["https://example.com/one.jpg"],
     stock: 3,
     lowStockThreshold: 5,
@@ -175,6 +183,93 @@ describe("admin product image upload", () => {
   });
 });
 
+describe("admin remote product image import", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://example.supabase.co");
+    vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", "test-service-key");
+    mocks.requireAdmin.mockResolvedValue(undefined);
+    mocks.fetchRemoteImage.mockResolvedValue({
+      bytes: new Uint8Array([0xff, 0xd8, 0xff, 0x00]),
+      contentType: "image/jpeg",
+      extension: "jpg",
+    });
+    mocks.storageUpload.mockResolvedValue({ error: null });
+    mocks.getPublicUrl.mockImplementation((path: string) => ({
+      data: {
+        publicUrl: `https://example.supabase.co/storage/v1/object/public/product-images/${path}`,
+      },
+    }));
+    mocks.storageFrom.mockReturnValue({
+      upload: mocks.storageUpload,
+      getPublicUrl: mocks.getPublicUrl,
+    });
+  });
+
+  it("imports a checked HTTPS image into persistent product storage", async () => {
+    const response = await importProductImage(
+      new Request("http://localhost/api/admin/products/import-image", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: "https://images.example.com/product.jpg" }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(await responseJson(response)).toMatchObject({
+      ok: true,
+      imported: true,
+      url: expect.stringMatching(
+        /^https:\/\/example\.supabase\.co\/storage\/v1\/object\/public\/product-images\/[0-9a-f-]+\.jpg$/
+      ),
+    });
+    expect(mocks.fetchRemoteImage).toHaveBeenCalledWith(
+      "https://images.example.com/product.jpg",
+      { requireHttps: true }
+    );
+    expect(mocks.storageFrom).toHaveBeenCalledWith("product-images");
+    expect(mocks.storageUpload).toHaveBeenCalledWith(
+      expect.stringMatching(/^[0-9a-f-]+\.jpg$/),
+      expect.any(Blob),
+      expect.objectContaining({ contentType: "image/jpeg", upsert: false })
+    );
+  });
+
+  it("returns an inline URL error when the image cannot be safely imported", async () => {
+    mocks.fetchRemoteImage.mockRejectedValueOnce(
+      new SsrfBlockedError("This URL points to a non-public address and cannot be imported.")
+    );
+    const response = await importProductImage(
+      new Request("http://localhost/api/admin/products/import-image", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: "https://images.example.com/product.jpg" }),
+      })
+    );
+
+    expect(response.status).toBe(422);
+    expect((await responseJson(response)).errors).toMatchObject({
+      imageUrl: expect.stringContaining("non-public address"),
+    });
+    expect(mocks.storageUpload).not.toHaveBeenCalled();
+  });
+
+  it("does not fetch or store images for non-admin requests", async () => {
+    mocks.requireAdmin.mockRejectedValueOnce(new mocks.TestAuthError("Not authorized", 403));
+    const response = await importProductImage(
+      new Request("http://localhost/api/admin/products/import-image", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: "https://images.example.com/product.jpg" }),
+      })
+    );
+
+    expect(response.status).toBe(403);
+    expect(mocks.fetchRemoteImage).not.toHaveBeenCalled();
+    expect(mocks.storageUpload).not.toHaveBeenCalled();
+  });
+});
+
 describe("admin product create and edit APIs", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -200,9 +295,17 @@ describe("admin product create and edit APIs", () => {
     expect(await responseJson(response)).toMatchObject({ ok: true, product });
     expect(mocks.adminCreateProduct).toHaveBeenCalledWith(
       expect.objectContaining({
+        name: input.name,
+        slug: input.slug,
         categoryId: category.id,
+        price: input.price,
+        comparePrice: input.comparePrice,
+        status: input.status,
+        isFeatured: input.isFeatured,
+        tags: input.tags,
         images: input.images,
         stock: 3,
+        lowStockThreshold: input.lowStockThreshold,
       })
     );
   });

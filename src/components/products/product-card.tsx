@@ -1,7 +1,7 @@
 // Product card — image, badges, name, price, rating, wishlist, add-to-cart (FR-47/FR-12).
 import Link from "next/link";
-import Image from "next/image";
 import { discountPercent, formatPKR } from "@/lib/utils";
+import { ProductImage } from "@/components/products/product-image";
 import { RatingStars } from "@/components/products/rating-stars";
 import { WishlistHeart } from "@/components/products/wishlist-heart";
 import { AddToCartButton } from "@/components/cart/add-to-cart-button";
@@ -33,7 +33,7 @@ export function ProductCard({
         className="relative block aspect-square overflow-hidden bg-muted/40"
         aria-label={product.name}
       >
-        <Image
+        <ProductImage
           src={product.image || FALLBACK_IMAGE}
           alt={product.name}
           fill

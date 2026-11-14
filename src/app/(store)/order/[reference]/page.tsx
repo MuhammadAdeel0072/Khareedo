@@ -1,5 +1,4 @@
 // Order confirmation + tracking (FR-25). Only shows success for real orders.
-import Image from "next/image";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
@@ -9,6 +8,7 @@ import { getSessionUser } from "@/lib/auth-guard";
 import { formatPKR, formatDateTime } from "@/lib/utils";
 import { STATUS_BADGE_CLASSES } from "@/lib/constants";
 import { WhatsAppIcon } from "@/components/layout/whatsapp-icon";
+import { ProductImage } from "@/components/products/product-image";
 import { getCachedSettings } from "@/services/settings.service";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
@@ -99,8 +99,8 @@ export default async function OrderPage({
           {order.items.map((item) => (
             <li key={item.id} className="flex items-center gap-3">
               <span className="relative h-14 w-14 shrink-0 overflow-hidden rounded-lg bg-muted">
-                <Image
-                  src={item.imageUrl ?? "/images/placeholder.svg"}
+                <ProductImage
+                  src={item.imageUrl}
                   alt={item.productName}
                   fill
                   sizes="56px"

@@ -79,6 +79,11 @@ describe("computeGiftWrapCharge — charged per wrapped item unit (FR-30, FR-31,
     expect(computeGiftWrapCharge(3, { enabled: true, charge: 150 })).toBe(450);
   });
 
+  it("adds the per-item fee to the cart estimate (Rs 2,499 + Rs 150)", () => {
+    expect(2499 + computeGiftWrapCharge(1, GIFT)).toBe(2649);
+    expect(2499 + computeGiftWrapCharge(0, GIFT)).toBe(2499);
+  });
+
   it("does not apply when disabled or nothing is wrapped", () => {
     expect(computeGiftWrapCharge(0, GIFT)).toBe(0);
     expect(computeGiftWrapCharge(2, { enabled: false, charge: 150 })).toBe(0);

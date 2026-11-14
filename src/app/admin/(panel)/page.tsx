@@ -1,6 +1,5 @@
 // Admin dashboard — overview with real DB data (FR-45).
 import Link from "next/link";
-import Image from "next/image";
 import {
   ArrowRight,
   ArrowUpRight,
@@ -32,6 +31,7 @@ import {
 import { getLowStockProducts } from "@/services/inventory.service";
 import { RevenueChart, StatusDonut } from "@/components/admin/dashboard-charts";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { ProductImage } from "@/components/products/product-image";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Admin Dashboard" };
@@ -231,7 +231,7 @@ export default async function AdminDashboardPage() {
                 {lowStock.map((p) => (
                   <li key={p.productId} className="flex items-center gap-3">
                     <span className="relative h-10 w-10 shrink-0 overflow-hidden rounded-lg bg-muted">
-                      <Image src={p.image ?? "/images/placeholder.svg"} alt="" fill sizes="40px" className="object-cover" />
+                      <ProductImage src={p.image} alt="" fill sizes="40px" className="object-cover" />
                     </span>
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-medium">{p.name}</p>

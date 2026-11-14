@@ -1,5 +1,4 @@
 // Customer order detail + status tracking (FR-26). Ownership enforced server-side.
-import Image from "next/image";
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { CheckCircle2, Circle, PackageCheck, Truck } from "lucide-react";
@@ -12,6 +11,7 @@ import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { withPerformanceTiming } from "@/lib/performance-timing";
+import { ProductImage } from "@/components/products/product-image";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Order Details" };
@@ -95,7 +95,7 @@ export default async function OrderDetailPage({
           {order.items.map((item) => (
             <li key={item.id} className="flex items-center gap-3">
               <span className="relative h-14 w-14 shrink-0 overflow-hidden rounded-lg bg-muted">
-                <Image src={item.imageUrl ?? "/images/placeholder.svg"} alt={item.productName} fill sizes="56px" className="object-cover" />
+                <ProductImage src={item.imageUrl} alt={item.productName} fill sizes="56px" className="object-cover" />
               </span>
               <div className="min-w-0 flex-1">
                 <p className="flex items-center gap-1.5 truncate text-sm font-medium">

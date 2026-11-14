@@ -47,9 +47,7 @@ export function LoginForm({ googleEnabled }: { googleEnabled: boolean }) {
         return;
       }
       toast.success("Welcome back!");
-      // Full navigation — router.push + refresh races the session cookie against
-      // the route guard on first /account load (intermittent bounce to /login)
-      window.location.assign(callbackUrl);
+      window.location.href = callbackUrl;
     } catch {
       setError("Something went wrong. Please try again.");
     } finally {

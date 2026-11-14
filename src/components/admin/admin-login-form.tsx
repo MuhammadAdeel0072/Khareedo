@@ -30,9 +30,8 @@ export function AdminLoginForm() {
         setError("Incorrect email or password.");
         return;
       }
-      // Role is re-verified by the proxy; if not admin this navigation bounces back
-      // (full navigation avoids the session-cookie vs client-router race)
-      window.location.assign("/admin");
+      // Reload so the protected route is checked after the session cookie is set.
+      window.location.href = new URL("/admin", window.location.origin).href;
     } catch {
       setError("Something went wrong. Please try again.");
     } finally {
@@ -45,10 +44,10 @@ export function AdminLoginForm() {
       <div className="rounded-2xl border bg-card p-6 shadow-sm sm:p-8">
         <div className="flex items-center gap-2">
           <Image
-            src="/images/khareedo-wordmark.png"
+            src="/logo.svg"
             alt="Khareedo"
-            width={217}
-            height={48}
+            width={520}
+            height={110}
             className="h-7 w-auto"
           />
           <h1 className="text-xl font-extrabold tracking-tight">Admin Panel</h1>

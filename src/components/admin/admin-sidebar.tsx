@@ -54,7 +54,7 @@ export function AdminSidebar({ pendingOrders }: { pendingOrders: number }) {
             alt=""
             width={36}
             height={36}
-            className="h-8 w-8"
+            className="h-8 w-8 rounded-full bg-white p-1"
           />
           <span className="text-base font-semibold">Khareedo Admin</span>
         </Link>
@@ -77,7 +77,7 @@ export function AdminSidebar({ pendingOrders }: { pendingOrders: number }) {
             alt=""
             width={36}
             height={36}
-            className="h-9 w-9"
+            className="h-9 w-9 rounded-full bg-white p-1"
           />
         </Link>
         <div>

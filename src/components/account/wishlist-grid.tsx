@@ -1,7 +1,6 @@
 "use client";
 
 // Wishlist grid (FR-05) — move to cart / remove.
-import Image from "next/image";
 import Link from "next/link";
 import { useState, useTransition } from "react";
 import { HeartOff, ShoppingBag } from "lucide-react";
@@ -10,6 +9,7 @@ import { AddToCartButton } from "@/components/cart/add-to-cart-button";
 import { RatingStars } from "@/components/products/rating-stars";
 import { formatPKR, discountPercent } from "@/lib/utils";
 import type { WishlistRow } from "@/services/wishlist.service";
+import { ProductImage } from "@/components/products/product-image";
 
 export function WishlistGrid({ initial }: { initial: WishlistRow[] }) {
   const [items, setItems] = useState(initial);
@@ -63,8 +63,8 @@ export function WishlistGrid({ initial }: { initial: WishlistRow[] }) {
           <article key={item.itemId} className="group flex flex-col overflow-hidden rounded-xl border bg-card">
             <div className="relative aspect-square overflow-hidden bg-muted/40">
               <Link href={`/product/${item.slug}`} aria-label={item.name}>
-                <Image
-                  src={item.image ?? "/images/placeholder.svg"}
+                <ProductImage
+                  src={item.image}
                   alt={item.name}
                   fill
                   sizes="(max-width: 640px) 50vw, 25vw"

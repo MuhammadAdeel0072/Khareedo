@@ -2,7 +2,7 @@
 
 // Registration form (FR-02).
 import { useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Loader2, UserPlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,7 @@ import { GoogleSignInButton } from "@/components/auth/google-sign-in-button";
 import { safeCallbackUrl } from "@/lib/auth-client";
 
 export function RegisterForm({ googleEnabled }: { googleEnabled: boolean }) {
+  const router = useRouter();
   const params = useSearchParams();
   const callbackUrl = safeCallbackUrl(params.get("callbackUrl"));
   const [name, setName] = useState("");
@@ -38,7 +39,7 @@ export function RegisterForm({ googleEnabled }: { googleEnabled: boolean }) {
       const pendingUrl = new URL("/verify-email/pending", window.location.origin);
       pendingUrl.searchParams.set("email", email.trim().toLowerCase());
       pendingUrl.searchParams.set("callbackUrl", callbackUrl);
-      window.location.assign(pendingUrl.toString());
+      router.push(`${pendingUrl.pathname}?${pendingUrl.searchParams.toString()}`);
     } catch {
       setErrors({ _: "Network error — please try again." });
     } finally {

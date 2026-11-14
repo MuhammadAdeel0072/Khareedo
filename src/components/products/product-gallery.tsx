@@ -1,11 +1,11 @@
 "use client";
 
 // Product gallery + quantity selector (FR-08) with thumbnails and zoom hover.
-import Image from "next/image";
 import { useState } from "react";
 import { Minus, Plus } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { ProductImage } from "@/components/products/product-image";
 
 export function ProductGallery({
   images,
@@ -20,7 +20,7 @@ export function ProductGallery({
   return (
     <div className="space-y-3">
       <div className="group relative aspect-square overflow-hidden rounded-xl border bg-muted/30">
-        <Image
+        <ProductImage
           key={imgs[active].url}
           src={imgs[active].url}
           alt={imgs[active].alt ?? name}
@@ -45,7 +45,7 @@ export function ProductGallery({
                 i === active ? "border-primary" : "border-transparent hover:border-muted-foreground/30"
               )}
             >
-              <Image src={img.url} alt="" fill sizes="80px" className="object-cover" />
+              <ProductImage src={img.url} alt="" fill sizes="80px" className="object-cover" />
             </button>
           ))}
         </div>
