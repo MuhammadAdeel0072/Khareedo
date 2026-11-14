@@ -6,6 +6,7 @@ const state = vi.hoisted(() => ({
   events: [] as string[],
   banner: {
     findMany: vi.fn(),
+    findUnique: vi.fn(),
     create: vi.fn(),
     update: vi.fn(),
     delete: vi.fn(),
@@ -71,6 +72,10 @@ describe("public editorial banner cache", () => {
     state.entries.clear();
     state.events.length = 0;
     state.banner.findMany.mockResolvedValue([original]);
+    // adminUpdateBanner/adminDeleteBanner read the previous record first for
+    // orphan-safe storage cleanup; the previous URL is not a banners/ storage
+    // object, so the cleanup path exits before any storage client is used.
+    state.banner.findUnique.mockResolvedValue({ imageUrl: input.imageUrl });
   });
 
   it("keeps active selection, sorting, default limit and Date values on hits and misses", async () => {
