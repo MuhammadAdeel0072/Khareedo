@@ -82,6 +82,12 @@ ALTER TABLE "PaymentRefund" ADD CONSTRAINT "PaymentRefund_reconciliation_check"
   CHECK (("reconcileAttempts" >= 0) IS TRUE);
 
 -- Match existing server-only access policy; no browser/anonymous/authenticated table grants.
-REVOKE ALL PRIVILEGES ON TABLE "PaymentRefund" FROM PUBLIC;
+-- Keep the financial refund ledger private.
+REVOKE ALL PRIVILEGES ON TABLE public."PaymentRefund"
+FROM PUBLIC, anon, authenticated;
+
+-- Block direct row access unless explicitly authorized.
+ALTER TABLE public."PaymentRefund"
+ENABLE ROW LEVEL SECURITY;
 
 COMMIT;
