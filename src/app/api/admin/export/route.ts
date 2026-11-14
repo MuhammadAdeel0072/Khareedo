@@ -206,12 +206,15 @@ export async function GET(request: Request) {
     }
 
     if (type === "orders") {
-      const { orders, items } = await getOrdersExportData();
+      // Mirror the list page's active search/status scope into the export.
+      const scopeQ = (searchParams.get("q") ?? "").trim().slice(0, 80) || undefined;
+      const scopeStatus = (searchParams.get("status") ?? "").trim() || undefined;
+      const { orders, items } = await getOrdersExportData(1000, { q: scopeQ, status: scopeStatus });
       if (format === "xlsx") {
         const buf = await buildWorkbook([
           {
             name: "Orders",
-            title: `Khareedo orders — ${orders.length} most recent`,
+            title: `Khareedo orders — ${orders.length} matching the current filter scope`,
             columns: [
               { label: "Reference", width: 17 },
               { label: "Customer", width: 18 },
@@ -253,7 +256,7 @@ export async function GET(request: Request) {
         return binaryResponse(buf, XLSX_MIME, filename);
       }
       const buf = await buildPdfReport(
-        { title: "Orders Report", subtitle: `${orders.length} most recent orders` },
+        { title: "Orders Report", subtitle: `${orders.length} orders matching the current filter scope` },
         [
           {
             heading: "Orders",

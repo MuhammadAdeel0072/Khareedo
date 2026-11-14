@@ -32,6 +32,11 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Separator } from "@/components/ui/separator";
 import { cn, formatPKR } from "@/lib/utils";
+import {
+  availablePaymentMethods,
+  defaultPaymentMethod,
+  type CheckoutPaymentMethod,
+} from "@/lib/payment-defaults";
 import type { CartDetails } from "@/types/cart";
 
 // ─── Types ───
@@ -147,9 +152,30 @@ export function CheckoutFlow({
 
   // Delivery / payment
   const [deliveryMethod, setDeliveryMethod] = useState<"STANDARD" | "EXPRESS">("STANDARD");
-  const [paymentMethod, setPaymentMethod] = useState<"COD" | "BANK_TRANSFER" | "ONLINE">(
-    config.codEnabled ? "COD" : "BANK_TRANSFER"
+  // Single authoritative selection value (FR-20): pre-selected to the first
+  // eligible method (COD preferred), switchable with exactly one click, and
+  // preserved across checkout steps — reset only if it becomes unavailable.
+  const [paymentMethod, setPaymentMethod] = useState<CheckoutPaymentMethod | null>(
+    () => defaultPaymentMethod(config)
   );
+  const availablePaymentMethodIds = useMemo(
+    () => availablePaymentMethods(config),
+    [config.codEnabled, config.bankTransferEnabled, config.sandboxPaymentEnabled]
+  );
+
+  // If the selected method becomes invalid/unavailable (e.g. store settings
+  // changed mid-session), fall back to the preferred eligible method. A valid
+  // customer choice is never overwritten. Render-time state adjustment — the
+  // React-recommended alternative to a resetting effect, so the fallback is
+  // committed in the same render that notices the change (no flicker).
+  const availableKey = availablePaymentMethodIds.join("|");
+  const [lastAvailableKey, setLastAvailableKey] = useState(availableKey);
+  if (lastAvailableKey !== availableKey) {
+    setLastAvailableKey(availableKey);
+    if (paymentMethod && !availablePaymentMethodIds.includes(paymentMethod)) {
+      setPaymentMethod(defaultPaymentMethod(config));
+    }
+  }
 
   // Extras — gift wrap is PER ITEM (toggled on each cart line below); only the
   // shared gift-card note is order-level state here.
@@ -273,6 +299,11 @@ export function CheckoutFlow({
 
   // ─── Place order (FR-21..27) ───
   async function placeOrder() {
+    if (!paymentMethod) {
+      setStep(3);
+      toast.error("Please choose an available payment method first.");
+      return;
+    }
     const address = activeAddress();
     if (!address || !validateAddress(address)) {
       setStep(1);
@@ -642,15 +673,19 @@ export function CheckoutFlow({
         {step === 3 && (
           <>
             <SectionCard icon={<CreditCard className="h-5 w-5" />} title="Payment Method" subtitle="Choose your preferred payment method">
+              {/* Radix RadioGroup: one authoritative value, label-wrapped cards,
+                  native radio semantics, arrow-key navigation, one-click switch. */}
               <RadioGroup
-                value={paymentMethod}
-                onValueChange={(v) => setPaymentMethod(v as "COD")}
+                value={paymentMethod ?? ""}
+                onValueChange={(v) => setPaymentMethod(v as CheckoutPaymentMethod)}
                 className="grid gap-3"
+                aria-label="Payment method"
               >
                 {config.codEnabled && (
                   <PaymentOption
+                    id="payment-COD"
+                    value="COD"
                     selected={paymentMethod === "COD"}
-                    onSelect={() => setPaymentMethod("COD")}
                     icon={<Banknote className="h-5 w-5" />}
                     title="Cash on Delivery"
                     desc="Pay when you receive your order"
@@ -658,8 +693,9 @@ export function CheckoutFlow({
                 )}
                 {config.bankTransferEnabled && (
                   <PaymentOption
+                    id="payment-BANK_TRANSFER"
+                    value="BANK_TRANSFER"
                     selected={paymentMethod === "BANK_TRANSFER"}
-                    onSelect={() => setPaymentMethod("BANK_TRANSFER")}
                     icon={<Landmark className="h-5 w-5" />}
                     title="Bank Transfer"
                     desc="Direct bank transfer — details shared after ordering"
@@ -667,8 +703,9 @@ export function CheckoutFlow({
                 )}
                 {config.sandboxPaymentEnabled && (
                   <PaymentOption
+                    id="payment-ONLINE"
+                    value="ONLINE"
                     selected={paymentMethod === "ONLINE"}
-                    onSelect={() => setPaymentMethod("ONLINE")}
                     icon={<CreditCard className="h-5 w-5" />}
                     title="Online Payment (Sandbox)"
                     desc="Test checkout using Safepay sandbox"
@@ -687,11 +724,30 @@ export function CheckoutFlow({
                   </div>
                 )}
               </RadioGroup>
+              {availablePaymentMethodIds.length === 0 && (
+                <div
+                  className="rounded-xl border border-dashed border-destructive/40 bg-destructive/5 p-4"
+                  role="alert"
+                >
+                  <p className="text-sm font-semibold text-destructive">No payment method available</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Online payment and other methods are currently disabled by the store. Please check back
+                    later — you cannot continue to order review without a payment method.
+                  </p>
+                </div>
+              )}
             </SectionCard>
 
             <div className="mt-5 flex justify-between gap-3">
               <Button variant="ghost" className="flex-1 sm:flex-none" onClick={() => setStep(2)}>← Back</Button>
-              <Button size="lg" className="flex-1 sm:flex-none" onClick={() => setStep(4)}>Review Order</Button>
+              <Button
+                size="lg"
+                className="flex-1 sm:flex-none"
+                onClick={() => setStep(4)}
+                disabled={!paymentMethod}
+              >
+                Review Order
+              </Button>
             </div>
           </>
         )}
@@ -716,7 +772,13 @@ export function CheckoutFlow({
                   onEdit={() => setStep(2)}
                   lines={[
                     deliveryMethod === "EXPRESS" ? "Express Delivery (1-2 days)" : "Standard Delivery (3-5 days)",
-                    paymentMethod === "COD" ? "Cash on Delivery" : paymentMethod === "BANK_TRANSFER" ? "Bank Transfer" : "Online Payment",
+                    paymentMethod === "COD"
+                      ? "Cash on Delivery"
+                      : paymentMethod === "BANK_TRANSFER"
+                        ? "Bank Transfer"
+                        : paymentMethod === "ONLINE"
+                          ? "Online Payment"
+                          : "No payment method selected",
                     wrappedUnits > 0
                       ? `Gift wrapping (${wrappedUnits} item${wrappedUnits === 1 ? "" : "s"} — ${formatPKR(quote?.giftWrapCharge ?? config.giftWrapCharge * wrappedUnits)})`
                       : "No gift wrapping",
@@ -977,26 +1039,33 @@ function DeliveryOption({
 }
 
 function PaymentOption({
+  id,
+  value,
   selected,
-  onSelect,
   icon,
   title,
   desc,
 }: {
+  id: string;
+  value: CheckoutPaymentMethod;
   selected: boolean;
-  onSelect: () => void;
   icon: React.ReactNode;
   title: string;
   desc: string;
 }) {
   return (
+    // htmlFor + id association: clicking ANYWHERE in the card toggles the
+    // radio (mouse + touch); radix keeps the group keyboard-navigable with
+    // a visible focus ring. No onClick here — onValueChange on the group is
+    // the ONLY writer, so switching is exactly one click.
     <Label
+      htmlFor={id}
       className={cn(
-        "flex cursor-pointer items-center gap-3 rounded-xl border p-4 transition",
+        "flex cursor-pointer items-center gap-3 rounded-xl border p-4 transition has-[button[data-state=checked]]:border-primary has-[button[data-state=checked]]:bg-brand-50 has-[button[data-state=checked]]:ring-1 has-[button[data-state=checked]]:ring-primary",
         selected ? "border-primary bg-brand-50 ring-1 ring-primary" : "hover:border-muted-foreground/40"
       )}
     >
-      <RadioGroupItem value={title} checked={selected} onClick={onSelect} />
+      <RadioGroupItem value={value} id={id} />
       <span className="text-primary" aria-hidden="true">{icon}</span>
       <span className="flex-1">
         <span className="block text-sm font-bold">{title}</span>

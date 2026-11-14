@@ -9,14 +9,18 @@ export function ExportButtons({
   type,
   formats = ["xlsx", "pdf"],
   className = "",
+  scopeQuery = "",
 }: {
   type: ExportType;
   formats?: ExportFormat[];
   className?: string;
+  /** Active list-filter scope (e.g. "q=…&status=…") applied to order exports. */
+  scopeQuery?: string;
 }) {
+  const scope = scopeQuery ? `&${scopeQuery}` : "";
   const link = (format: ExportFormat, icon: React.ReactNode, label: string) => (
     <Button asChild variant="outline" size="sm" className={`gap-1.5 bg-card ${className}`}>
-      <a href={`/api/admin/export?type=${type}&format=${format}`} download aria-label={`Export ${type} as ${label}`}>
+      <a href={`/api/admin/export?type=${type}&format=${format}${scope}`} download aria-label={`Export ${type} as ${label}`}>
         {icon}
         {label}
       </a>

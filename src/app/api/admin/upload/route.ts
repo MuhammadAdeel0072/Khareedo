@@ -1,4 +1,7 @@
-import { createClient } from "@supabase/supabase-js";
+// Admin image upload — Supabase Storage, server-side service-role client.
+// Shared by product images (bucket root) and banner images ("banners/" key
+// prefix, selected with target=banner). Admin-gated, request-size bounded,
+// magic-byte validated, collision-resistant object names, upsert disabled.
 import { requireAdmin } from "@/lib/auth-guard";
 import { handleRoute, jsonError, jsonOk } from "@/lib/api";
 import {
@@ -6,10 +9,9 @@ import {
   MAX_PRODUCT_IMAGE_REQUEST_SIZE,
   MAX_PRODUCT_IMAGE_SIZE,
 } from "@/lib/product-image-validation";
+import { buildObjectKey, getStorageClient, MEDIA_BUCKET } from "@/lib/storage";
 
 export const runtime = "nodejs";
-
-const BUCKET_NAME = "product-images";
 
 async function readBoundedBody(request: Request): Promise<ArrayBuffer | null> {
   const contentLength = Number(request.headers.get("content-length"));
@@ -92,26 +94,19 @@ export async function POST(request: Request) {
       );
     }
 
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-    if (!supabaseUrl || !serviceRoleKey) {
+    const supabase = getStorageClient();
+    if (!supabase) {
       console.error("[upload] Supabase Storage configuration is missing.");
       return jsonError("Image storage is not configured.", 500);
     }
 
-    const supabase = createClient(supabaseUrl, serviceRoleKey, {
-      auth: {
-        autoRefreshToken: false,
-        persistSession: false,
-        detectSessionInUrl: false,
-      },
-    });
-
-    const filePath = `${crypto.randomUUID()}.${extension}`;
+    // Product uploads keep their legacy bucket-root keys; banner uploads are
+    // namespaced so orphan cleanup can safely reason about banner objects.
+    const prefix = formData.get("target") === "banner" ? "banners" : undefined;
+    const filePath = buildObjectKey(extension, prefix);
 
     const { error } = await supabase.storage
-      .from(BUCKET_NAME)
+      .from(MEDIA_BUCKET)
       .upload(filePath, new Blob([bytes], { type: file.type }), {
         contentType: file.type,
         cacheControl: "31536000",
@@ -124,7 +119,7 @@ export async function POST(request: Request) {
     }
 
     const { data } = supabase.storage
-      .from(BUCKET_NAME)
+      .from(MEDIA_BUCKET)
       .getPublicUrl(filePath);
 
     return jsonOk({ url: data.publicUrl });

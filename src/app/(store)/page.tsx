@@ -1,6 +1,7 @@
 // Homepage — hero, side promos, categories, trust, featured, new arrivals, promotions (FR-12).
 import Image from "next/image";
 import Link from "next/link";
+import { BannerImage } from "@/components/home/banner-image";
 import { ArrowRight, Sparkles } from "lucide-react";
 import { HeroCarousel } from "@/components/home/hero-carousel";
 import { ProductCard } from "@/components/products/product-card";
@@ -107,12 +108,10 @@ async function renderHomePage(requestId: string) {
                 className="group relative overflow-hidden rounded-2xl bg-cream"
               >
                 <div className="relative aspect-[16/6.4] w-full lg:aspect-auto lg:h-full">
-                  <Image
+                  <BannerImage
                     src={b.imageUrl}
                     alt={b.title}
-                    fill
-                    sizes="33vw"
-                    className="object-cover transition-transform duration-300 group-hover:scale-105"
+                    className="absolute inset-0 h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
                   />
                   <div className="absolute inset-0 bg-gradient-to-t from-black/55 via-black/10 to-transparent" />
                   <div className="absolute bottom-0 left-0 right-0 p-5 text-white">

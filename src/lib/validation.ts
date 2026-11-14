@@ -187,11 +187,36 @@ export const promotionSchema = z
     path: ["value"],
   });
 
+/** Root-relative path ("/...") or absolute http(s) URL; blocks protocol-relative and dangerous schemes. */
+export function isSafeHttpReference(value: string): boolean {
+  if (value.startsWith("/")) return !value.startsWith("//");
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
 export const bannerSchema = z.object({
   title: z.string().trim().min(2, "Title is required").max(120),
   subtitle: z.string().trim().max(200).optional().or(z.literal("")),
-  imageUrl: z.string().trim().min(1, "Image is required").max(400),
-  linkUrl: z.string().trim().max(400).optional().or(z.literal("")),
+  // Stored image reference: an uploaded/storage URL, an external http(s) image
+  // URL, or a root-relative public path. javascript:, data:, blob: etc. rejected.
+  imageUrl: z
+    .string()
+    .trim()
+    .min(1, "Image is required")
+    .max(600)
+    .refine(isSafeHttpReference, "Use an uploaded image or an http(s) image URL"),
+  // Destination link: same safety rules — never javascript:/data: destinations.
+  linkUrl: z
+    .string()
+    .trim()
+    .max(600)
+    .optional()
+    .or(z.literal(""))
+    .refine((v) => !v || isSafeHttpReference(v), "Link must be a site path or an http(s) URL"),
   placement: z.enum(["HERO", "SIDE", "STRIP"]).default("HERO"),
   isActive: z.boolean().default(true),
   sortOrder: z.coerce.number().int().min(0).default(0),
