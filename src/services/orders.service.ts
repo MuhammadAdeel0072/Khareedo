@@ -143,20 +143,37 @@ export async function adminGetOrderById(id: string) {
   });
 }
 
-export async function adminListOrders(filters: AdminOrderFilters) {
-  const page = Math.max(1, filters.page ?? 1);
-  const perPage = 15;
+/** Shared WHERE builder for admin order listing AND exports (single source of truth). */
+export function adminOrderListWhere(filters: AdminOrderFilters): Prisma.OrderWhereInput {
   const where: Prisma.OrderWhereInput = {};
   if (filters.status) where.status = filters.status;
   if (filters.q) {
     const q = filters.q.trim();
-    where.OR = [
-      { reference: { contains: q } },
-      { customerName: { contains: q } },
-      { customerEmail: { contains: q } },
-      { customerPhone: { contains: q } },
-    ];
+    if (q) {
+      // Case-insensitive text search. PostgreSQL `contains` maps to a
+      // case-sensitive LIKE, so an explicit `insensitive` mode is required
+      // there; the disposable SQLite test harness runs ASCII case-insensitive
+      // LIKE natively (same user-visible behavior) and does not support the
+      // mode flag (perf/system-optimization convention).
+      const insensitive =
+        process.env.KHAREEDO_DISPOSABLE_SQLITE_TEST === "1"
+          ? undefined
+          : ("insensitive" as const);
+      where.OR = [
+        { reference: { contains: q, mode: insensitive } },
+        { customerName: { contains: q, mode: insensitive } },
+        { customerEmail: { contains: q, mode: insensitive } },
+        { customerPhone: { contains: q, mode: insensitive } },
+      ];
+    }
   }
+  return where;
+}
+
+export async function adminListOrders(filters: AdminOrderFilters) {
+  const page = Math.max(1, filters.page ?? 1);
+  const perPage = 15;
+  const where = adminOrderListWhere(filters);
   const [rows, total] = await Promise.all([
     db.order.findMany({
       where,

@@ -23,7 +23,7 @@ vi.mock("@/lib/db", async () => {
 
 import { db } from "@/lib/db";
 import { placeOrder } from "@/services/checkout.service";
-import { adminUpdateOrderStatus } from "@/services/orders.service";
+import { adminListOrders, adminUpdateOrderStatus } from "@/services/orders.service";
 import {
   adminListProducts,
   getProductBySlug,
@@ -595,5 +595,101 @@ describe("order placement integrity", () => {
     expect(await bcrypt.compare("Test@1234", hash)).toBe(true);
     expect(await bcrypt.compare("WrongPass1", hash)).toBe(false);
     expect(hash).not.toContain("Test@1234");
+  });
+});
+
+// ─── Admin order search & filters (FR-41, admin orders fix) ─────────────────
+describe("adminListOrders — search and filter integrity", () => {
+  async function seedSearchOrder(overrides: {
+    reference?: string;
+    customerName?: string;
+    customerEmail?: string;
+    customerPhone?: string;
+    status?: string;
+  }) {
+    const user = await db.user.create({
+      data: {
+        email: overrides.customerEmail ?? `search-${Date.now()}-${Math.random().toString(36).slice(2)}@example.com`,
+        name: overrides.customerName ?? "Search Probe",
+        passwordHash: await bcrypt.hash("Search@1234", 4),
+        role: "CUSTOMER",
+        emailVerified: new Date(),
+      },
+    });
+    const ref = overrides.reference ?? `KH-SEARCH-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    const order = await db.order.create({
+      data: {
+        reference: ref,
+        userId: user.id,
+        customerName: overrides.customerName ?? "Search Probe",
+        customerEmail: overrides.customerEmail ?? user.email,
+        customerPhone: overrides.customerPhone ?? "03001112223",
+        status: overrides.status ?? "PENDING",
+        paymentMethod: "COD",
+        paymentStatus: "PENDING",
+        isGuest: false,
+        idempotencyKey: `idem-${ref}`,
+        subtotal: 1000,
+        deliveryFee: 0,
+        total: 1000,
+        shipFullName: "Search Probe",
+        shipPhone: "03001112223",
+        shipLine1: "1 Test Street",
+        shipCity: "Lahore",
+        shipProvince: "Punjab",
+      },
+    });
+    return { user, order };
+  }
+
+  it("finds orders by reference fragment case-insensitively", async () => {
+    const { user, order } = await seedSearchOrder({ reference: "KH2611PROBE01" });
+    try {
+      const lower = await adminListOrders({ q: "probe01" });
+      expect(lower.items.some((o) => o.id === order.id)).toBe(true);
+
+      const upper = await adminListOrders({ q: "PROBE01" });
+      expect(upper.items.some((o) => o.id === order.id)).toBe(true);
+    } finally {
+      await db.order.delete({ where: { id: order.id } });
+      await db.user.delete({ where: { id: user.id } });
+    }
+  });
+
+  it("matches customer name, email and phone fragments", async () => {
+    const { user, order } = await seedSearchOrder({
+      customerName: "Ayesha Siddiqui",
+      customerEmail: "ayesha.siddiqui@example.com",
+      customerPhone: "03214445556",
+    });
+    try {
+      expect((await adminListOrders({ q: "ayesha sid" })).items.some((o) => o.id === order.id)).toBe(true);
+      expect((await adminListOrders({ q: "AYESHA.SIDD" })).items.some((o) => o.id === order.id)).toBe(true);
+      expect((await adminListOrders({ q: "4445556" })).items.some((o) => o.id === order.id)).toBe(true);
+      // no false positives for unrelated terms
+      expect((await adminListOrders({ q: "not-a-match-xyz" })).items.some((o) => o.id === order.id)).toBe(false);
+    } finally {
+      await db.order.delete({ where: { id: order.id } });
+      await db.user.delete({ where: { id: user.id } });
+    }
+  });
+
+  it("combines status filter with search and paginates deterministically", async () => {
+    const { user, order } = await seedSearchOrder({ status: "CONFIRMED" });
+    try {
+      const scoped = await adminListOrders({ status: "CONFIRMED", q: "search probe" });
+      expect(scoped.items.some((o) => o.id === order.id)).toBe(true);
+
+      const wrongStatus = await adminListOrders({ status: "DELIVERED", q: "search probe" });
+      expect(wrongStatus.items.some((o) => o.id === order.id)).toBe(false);
+
+      const paged = await adminListOrders({ q: "", page: 1 });
+      expect(paged.page).toBe(1);
+      expect(paged.pages).toBeGreaterThan(0);
+      expect(paged.items.length).toBeLessThanOrEqual(15);
+    } finally {
+      await db.order.delete({ where: { id: order.id } });
+      await db.user.delete({ where: { id: user.id } });
+    }
   });
 });

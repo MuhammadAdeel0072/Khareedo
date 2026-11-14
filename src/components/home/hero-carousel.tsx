@@ -3,7 +3,7 @@
 // Hero banner carousel (embla) — promotional banners managed by admin (FR-12, FR-51).
 import useEmblaCarousel from "embla-carousel-react";
 import Autoplay from "embla-carousel-autoplay";
-import Image from "next/image";
+import { BannerImage } from "@/components/home/banner-image";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { ArrowRight, ChevronLeft, ChevronRight } from "lucide-react";
@@ -43,13 +43,11 @@ export function HeroCarousel({ banners }: { banners: HeroBanner[] }) {
             {/* Min-height floors guarantee the text stack + CTA always fit inside the box
                 (fixed aspect alone clipped the eyebrow at top and Shop Now at bottom). */}
             <div className="relative aspect-[4/3] w-full min-h-[264px] sm:aspect-[2/1] sm:min-h-[360px] lg:aspect-[2.55/1] lg:min-h-[440px]">
-              <Image
+              <BannerImage
                 src={b.imageUrl}
                 alt={b.title}
-                fill
-                priority={index === 0}
-                sizes="(max-width: 1024px) 100vw, 66vw"
-                className="object-cover"
+                eager={index === 0}
+                className="absolute inset-0 h-full w-full object-cover"
               />
               <div className="absolute inset-0 bg-gradient-to-r from-cream via-cream/80 to-transparent sm:via-cream/40" />
               <div className="absolute inset-0 flex flex-col justify-center p-6 sm:p-10 lg:p-12">

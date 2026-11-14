@@ -1,5 +1,6 @@
 // Admin export data assembly — real DB rows only, no fabricated metrics.
 import { db } from "@/lib/db";
+import { adminOrderListWhere, type AdminOrderFilters } from "@/services/orders.service";
 import { getReportSummary } from "@/services/reports.service";
 import { getLowStockProducts } from "@/services/inventory.service";
 import { adminListCustomerSummaries } from "@/services/users.service";
@@ -94,9 +95,13 @@ export interface OrderItemExportRow {
 }
 
 export async function getOrdersExportData(
-  limit = 1000
+  limit = 1000,
+  filters: AdminOrderFilters = {}
 ): Promise<{ orders: OrdersExportRow[]; items: OrderItemExportRow[] }> {
+  // Exports follow the same filter scope as the admin orders list (search +
+  // status), so the downloaded file always matches what the administrator sees.
   const rows = await db.order.findMany({
+    where: adminOrderListWhere(filters),
     orderBy: { createdAt: "desc" },
     take: limit,
     select: {

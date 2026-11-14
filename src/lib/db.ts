@@ -26,7 +26,10 @@ function postgresConnectionUrl(): string {
     throw new Error("SUPABASE_POSTGRES_URL must be a PostgreSQL connection URL.");
   }
 
-  url.searchParams.set("sslmode", "verify-full");
+  // Loopback databases (local dev / preview / CI) have no TLS layer; anything
+  // else — including every real Supabase host — keeps strict verify-full TLS.
+  const isLoopbackDb = ["localhost", "127.0.0.1", "::1", "[::1]"].includes(url.hostname);
+  url.searchParams.set("sslmode", isLoopbackDb ? "disable" : "verify-full");
   if (
     url.hostname.endsWith(".pooler.supabase.com") &&
     Number(url.port || 5432) === 5432 &&
