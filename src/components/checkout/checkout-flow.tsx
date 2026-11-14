@@ -3,7 +3,6 @@
 // Checkout flow — 4 steps: Address → Delivery → Payment → Review (FR-19/20).
 // All amounts displayed come from the SERVER quote endpoint (BR-04/06/07).
 // Order placement uses a per-attempt idempotency key (FR-27/BR-08).
-import Image from "next/image";
 import Link from "next/link";
 import { useCallback, cloneElement, isValidElement, useId, useEffect, useMemo, useState, type ReactElement, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
@@ -16,6 +15,7 @@ import {
   Loader2,
   Lock,
   MapPin,
+  Minus,
   Pencil,
   Plus,
   ShieldCheck,
@@ -38,6 +38,8 @@ import {
   type CheckoutPaymentMethod,
 } from "@/lib/payment-defaults";
 import type { CartDetails } from "@/types/cart";
+import { ProductImage } from "@/components/products/product-image";
+import { WhatsAppSupportLink } from "@/components/layout/whatsapp-float";
 
 // ─── Types ───
 interface Quote {
@@ -134,6 +136,9 @@ export function CheckoutFlow({
 
   const [step, setStep] = useState(1);
   const [placing, setPlacing] = useState(false);
+  const [paymentAttemptInitiated, setPaymentAttemptInitiated] = useState(false);
+  const [updatingItemId, setUpdatingItemId] = useState<string | null>(null);
+  const [giftWrapPendingId, setGiftWrapPendingId] = useState<string | null>(null);
 
   // Address step
   const [addresses, setAddresses] = useState<CheckoutAddress[]>(savedAddresses);
@@ -194,10 +199,8 @@ export function CheckoutFlow({
 
   // ─── Per-item gift wrap toggle (single source of truth: DB cart item flag) ───
   const toggleGiftWrap = useCallback(async (itemId: string, wrap: boolean) => {
-    setCartState((prev) => ({
-      ...prev,
-      items: prev.items.map((i) => (i.itemId === itemId ? { ...i, giftWrap: wrap } : i)),
-    }));
+    if (placing || paymentAttemptInitiated || updatingItemId !== null || giftWrapPendingId !== null) return;
+    setGiftWrapPendingId(itemId);
     try {
       const res = await fetch("/api/cart", {
         method: "PATCH",
@@ -209,15 +212,42 @@ export function CheckoutFlow({
       setCartState(data.cart as CartDetails);
     } catch {
       toast.error("Could not update gift wrapping. Please try again.");
-      setCartState((prev) => ({
-        ...prev,
-        items: prev.items.map((i) => (i.itemId === itemId ? { ...i, giftWrap: !wrap } : i)),
-      }));
+    } finally {
+      setGiftWrapPendingId(null);
     }
-  }, []);
+  }, [giftWrapPendingId, paymentAttemptInitiated, placing, updatingItemId]);
+
+  async function updateQuantity(itemId: string, quantity: number) {
+    if (placing || paymentAttemptInitiated || updatingItemId !== null || giftWrapPendingId !== null) return;
+    const item = cartState.items.find((candidate) => candidate.itemId === itemId);
+    if (!item || quantity < 1 || quantity > item.stock) return;
+
+    setUpdatingItemId(itemId);
+    try {
+      const res = await fetch("/api/cart", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ itemId, quantity }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error ?? "Could not update quantity");
+      const updatedCart = data.cart as CartDetails;
+      setCartState(updatedCart);
+      window.dispatchEvent(
+        new CustomEvent("cart:updated", { detail: { itemCount: updatedCart.itemCount } })
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not update quantity");
+    } finally {
+      setUpdatingItemId(null);
+    }
+  }
 
   // ─── Server quote (BR-06/07) — wrap flags already live on the server cart ───
-  const quoteRequestKey = JSON.stringify([deliveryMethod, couponCode, wrappedUnits]);
+  const quoteCartKey = JSON.stringify(
+    cartState.items.map(({ itemId, quantity, giftWrap }) => [itemId, quantity, giftWrap])
+  );
+  const quoteRequestKey = JSON.stringify([deliveryMethod, couponCode, quoteCartKey]);
   const quoting = completedQuoteRequest !== quoteRequestKey;
 
   // Re-quote on mount, delivery/coupon change, and whenever the wrapped-unit
@@ -318,6 +348,7 @@ export function CheckoutFlow({
       }
 
       const onlinePayment = paymentMethod === "ONLINE";
+      if (onlinePayment) setPaymentAttemptInitiated(true);
       const res = await fetch(onlinePayment ? "/api/checkout/safepay/session" : "/api/checkout/place", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -394,7 +425,7 @@ export function CheckoutFlow({
 
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_400px]">
-      <div>
+      <div className="order-2 min-w-0 lg:order-1 lg:col-start-1 lg:row-start-1">
         {/* Stepper */}
         <ol className="mb-6 flex items-center justify-center gap-0 sm:gap-2" aria-label="Checkout progress">
           {STEPS.slice(1).map((label, i) => {
@@ -595,7 +626,7 @@ export function CheckoutFlow({
         {step === 2 && (
           <>
             <SectionCard icon={<Truck className="h-5 w-5" />} title="Delivery Method" subtitle="Choose how you want to receive your order">
-              <RadioGroup value={deliveryMethod} onValueChange={(v) => setDeliveryMethod(v as "STANDARD" | "EXPRESS")} className="grid gap-3">
+              <RadioGroup value={deliveryMethod} onValueChange={(v) => setDeliveryMethod(v as "STANDARD" | "EXPRESS")} className="grid gap-3" disabled={placing || paymentAttemptInitiated}>
                 <DeliveryOption
                   selected={deliveryMethod === "STANDARD"}
                   onSelect={() => setDeliveryMethod("STANDARD")}
@@ -628,10 +659,11 @@ export function CheckoutFlow({
                         <Checkbox
                           checked={item.giftWrap}
                           onCheckedChange={(c) => toggleGiftWrap(item.itemId, c === true)}
+                          disabled={placing || paymentAttemptInitiated || updatingItemId !== null || giftWrapPendingId !== null}
                           aria-label={`Gift wrap ${item.name}`}
                         />
                         <span className="relative h-10 w-10 shrink-0 overflow-hidden rounded-lg bg-muted">
-                          <Image src={item.image ?? "/images/placeholder.svg"} alt="" fill sizes="40px" className="object-cover" />
+                          <ProductImage src={item.image} alt="" fill sizes="40px" className="object-cover" />
                         </span>
                         <span className="min-w-0 flex-1">
                           <span className="block truncate text-sm font-semibold">{item.name}</span>
@@ -680,6 +712,7 @@ export function CheckoutFlow({
                 onValueChange={(v) => setPaymentMethod(v as CheckoutPaymentMethod)}
                 className="grid gap-3"
                 aria-label="Payment method"
+                disabled={placing || paymentAttemptInitiated}
               >
                 {config.codEnabled && (
                   <PaymentOption
@@ -744,7 +777,7 @@ export function CheckoutFlow({
                 size="lg"
                 className="flex-1 sm:flex-none"
                 onClick={() => setStep(4)}
-                disabled={!paymentMethod}
+                disabled={!paymentMethod || placing || paymentAttemptInitiated}
               >
                 Review Order
               </Button>
@@ -792,7 +825,7 @@ export function CheckoutFlow({
                 {cartState.items.map((item) => (
                   <li key={item.itemId} className="flex items-center gap-3">
                     <span className="relative h-14 w-14 shrink-0 overflow-hidden rounded-lg bg-muted">
-                      <Image src={item.image ?? "/images/placeholder.svg"} alt={item.name} fill sizes="56px" className="object-cover" />
+                      <ProductImage src={item.image} alt={item.name} fill sizes="56px" className="object-cover" />
                     </span>
                     <div className="min-w-0 flex-1">
                       <p className="flex items-center gap-1.5 truncate text-sm font-medium">
@@ -815,7 +848,7 @@ export function CheckoutFlow({
 
             <div className="mt-5 flex flex-col-reverse items-center justify-between gap-3 sm:flex-row">
               <Button variant="ghost" onClick={() => setStep(3)} disabled={placing}>← Back</Button>
-              <Button size="lg" className="h-12 w-full text-base sm:w-auto" onClick={placeOrder} disabled={placing || quoting}>
+              <Button size="lg" className="h-12 w-full text-base sm:w-auto" onClick={placeOrder} disabled={placing || quoting || updatingItemId !== null || giftWrapPendingId !== null}>
                 {placing ? (
                   <>
                     <Loader2 className="h-4 w-4 animate-spin" /> Placing Order...
@@ -835,25 +868,62 @@ export function CheckoutFlow({
       </div>
 
       {/* ─── Summary sidebar (server quote) ─── */}
-      <div className="h-fit rounded-xl border p-5 lg:sticky lg:top-40" aria-live="polite">
+      <div className="order-1 h-fit min-w-0 rounded-xl border p-4 sm:p-5 lg:sticky lg:top-40 lg:order-2 lg:col-start-2 lg:row-start-1" aria-live="polite">
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-bold">Order Summary</h2>
           <span className="text-sm text-muted-foreground">
-            {quote?.itemCount ?? cartState.itemCount} item{cartState.itemCount === 1 ? "" : "s"}
+            {quoting ? cartState.itemCount : quote?.itemCount ?? cartState.itemCount} item{cartState.itemCount === 1 ? "" : "s"}
           </span>
         </div>
 
-        <ul className="mt-4 max-h-64 space-y-3 overflow-y-auto thin-scrollbar pr-1">
+        <ul className="mt-4 max-h-80 space-y-3 overflow-y-auto thin-scrollbar pr-1">
           {cartState.items.map((item) => (
-            <li key={item.itemId} className="flex items-center gap-3">
-              <span className="relative h-12 w-12 shrink-0 overflow-hidden rounded-lg bg-muted">
-                <Image src={item.image ?? "/images/placeholder.svg"} alt="" fill sizes="48px" className="object-cover" />
+            <li key={item.itemId} className="flex min-w-0 items-center gap-2.5">
+              <span className="relative h-10 w-10 shrink-0 overflow-hidden rounded-lg bg-muted sm:h-12 sm:w-12">
+                <ProductImage src={item.image} alt="" fill sizes="48px" className="object-cover" />
               </span>
               <div className="min-w-0 flex-1">
-                <p className="truncate text-sm">{item.name}</p>
-                <p className="text-xs text-muted-foreground">Qty: {item.quantity}</p>
+                <div className="flex items-start justify-between gap-2">
+                  <p className="line-clamp-2 min-w-0 text-sm">{item.name}</p>
+                  <span className="shrink-0 text-xs font-semibold">{formatPKR(item.lineTotal)}</span>
+                </div>
+                <div className="mt-1 flex items-center justify-between gap-2">
+                  <div
+                    className="inline-flex h-8 shrink-0 items-center rounded-md border"
+                    role="group"
+                    aria-label={`Quantity for ${item.name}`}
+                  >
+                    <button
+                      type="button"
+                      className="flex h-7 w-7 items-center justify-center rounded-l-md transition hover:bg-muted disabled:opacity-40"
+                      onClick={() => updateQuantity(item.itemId, item.quantity - 1)}
+                      disabled={placing || paymentAttemptInitiated || updatingItemId !== null || giftWrapPendingId !== null || item.quantity <= 1}
+                      aria-label={`Decrease quantity of ${item.name}`}
+                    >
+                      <Minus className="h-3.5 w-3.5" aria-hidden="true" />
+                    </button>
+                    <span className="w-7 text-center text-xs font-semibold tabular-nums" aria-live="polite">
+                      {updatingItemId === item.itemId ? (
+                        <Loader2 className="mx-auto h-3 w-3 animate-spin" aria-label="Updating quantity" />
+                      ) : (
+                        item.quantity
+                      )}
+                    </span>
+                    <button
+                      type="button"
+                      className="flex h-7 w-7 items-center justify-center rounded-r-md transition hover:bg-muted disabled:opacity-40"
+                      onClick={() => updateQuantity(item.itemId, item.quantity + 1)}
+                      disabled={placing || paymentAttemptInitiated || updatingItemId !== null || giftWrapPendingId !== null || item.quantity >= item.stock}
+                      aria-label={`Increase quantity of ${item.name}`}
+                    >
+                      <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+                    </button>
+                  </div>
+                  <span className="truncate text-[11px] text-muted-foreground">
+                    {formatPKR(item.price)} each
+                  </span>
+                </div>
               </div>
-              <span className="text-sm font-semibold">{formatPKR(item.lineTotal)}</span>
             </li>
           ))}
         </ul>
@@ -870,13 +940,14 @@ export function CheckoutFlow({
               onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
               placeholder="e.g. WELCOME10"
               className="h-10 uppercase"
+              disabled={placing || paymentAttemptInitiated}
             />
             <Button
               type="button"
               variant="secondary"
               className="h-10"
               onClick={() => setCouponCode(couponInput.trim())}
-              disabled={!couponInput.trim()}
+              disabled={!couponInput.trim() || placing || paymentAttemptInitiated}
             >
               Apply
             </Button>
@@ -895,6 +966,7 @@ export function CheckoutFlow({
                   setCouponCode("");
                   setCouponInput("");
                 }}
+                disabled={placing || paymentAttemptInitiated}
                 aria-label="Remove coupon"
                 className="text-muted-foreground hover:text-destructive"
               >
@@ -941,6 +1013,16 @@ export function CheckoutFlow({
           <ShieldCheck className="h-5 w-5 shrink-0 text-primary" aria-hidden="true" />
           Safe &amp; Secure Checkout — prices and totals are verified on our server before your order is confirmed.
         </div>
+        {paymentAttemptInitiated && (
+          <p className="mt-2 text-xs text-muted-foreground" role="status">
+            Quantities and pricing are locked while your secure payment attempt is active.
+          </p>
+        )}
+        <WhatsAppSupportLink
+          number={config.whatsappNumber}
+          storeName={config.storeName}
+          className="mt-3 flex min-h-10 items-center justify-center gap-2 rounded-md border border-[#25D366]/40 px-3 text-sm font-medium text-[#128C4B] transition-colors hover:bg-[#25D366]/10"
+        />
       </div>
     </div>
   );

@@ -43,7 +43,7 @@ export function StoreFooter({ settings }: { settings: StoreSettings }) {
         <nav aria-label="Account links">
           <h3 className="mb-3 text-sm font-bold uppercase tracking-wide">My Account</h3>
           <ul className="space-y-2 text-sm text-muted-foreground">
-            <li><Link href="/account" className="hover:text-primary">My Profile</Link></li>
+            <li><Link href="/account/profile" className="hover:text-primary">My Profile</Link></li>
             <li><Link href="/account/orders" className="hover:text-primary">Order History</Link></li>
             <li><Link href="/account/wishlist" className="hover:text-primary">Wishlist</Link></li>
             <li><Link href="/cart" className="hover:text-primary">Shopping Cart</Link></li>

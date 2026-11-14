@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { signIn } from "next-auth/react";
 import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -14,6 +15,7 @@ export function VerifyEmailClient({
   token: string;
   callbackUrl: string;
 }) {
+  const router = useRouter();
   const started = useRef(false);
   const [status, setStatus] = useState<"verifying" | "failed">(
     token ? "verifying" : "failed"
@@ -33,7 +35,7 @@ export function VerifyEmailClient({
     })
       .then((result) => {
         if (result?.ok) {
-          window.location.assign(safeCallbackUrl(callbackUrl));
+          router.push(safeCallbackUrl(callbackUrl));
           return;
         }
         setStatus("failed");

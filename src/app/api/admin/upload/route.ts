@@ -114,7 +114,15 @@ export async function POST(request: Request) {
       });
 
     if (error) {
-      console.error("[upload] Storage upload failed.");
+      const errorDetails = typeof error === "object" && error !== null
+        ? {
+            name: "name" in error && typeof error.name === "string" ? error.name : undefined,
+            statusCode: "statusCode" in error ? (error as { statusCode?: number }).statusCode : undefined,
+            message: "message" in error && typeof error.message === "string" ? error.message : String(error),
+          }
+        : { message: String(error) };
+
+      console.error("[upload] Storage upload failed.", errorDetails);
       return jsonError("Image upload failed. Please try again.", 500);
     }
 

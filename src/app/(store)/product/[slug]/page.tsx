@@ -97,7 +97,7 @@ export default async function ProductPage({ params }: PageProps) {
         </BreadcrumbList>
       </Breadcrumb>
 
-      <div className="grid gap-8 lg:grid-cols-2 lg:gap-12">
+      <div className="grid gap-8 pb-24 lg:grid-cols-2 lg:gap-12 lg:pb-0" data-product-main>
         <ProductGallery images={product.images} name={product.name} />
 
         <div>

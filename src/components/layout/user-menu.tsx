@@ -63,7 +63,7 @@ export function UserMenu({
             <LayoutDashboard className="h-4 w-4" /> Admin Dashboard
           </DropdownMenuItem>
         )}
-        <DropdownMenuItem onClick={() => router.push("/account")}>
+        <DropdownMenuItem onClick={() => router.push("/account/profile")}>
           <User className="h-4 w-4" /> My Profile
         </DropdownMenuItem>
         <DropdownMenuItem onClick={() => router.push("/account/orders")}>

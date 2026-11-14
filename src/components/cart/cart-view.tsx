@@ -1,7 +1,6 @@
 "use client";
 
 // Cart view — quantity update, remove, per-item gift wrap, subtotal (FR-15/16), empty state.
-import Image from "next/image";
 import Link from "next/link";
 import { useState, useTransition } from "react";
 import { Gift, Loader2, Minus, Plus, ShoppingBag, Trash2, ArrowRight } from "lucide-react";
@@ -13,6 +12,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { WhatsAppCartButton } from "@/components/layout/whatsapp-float";
 import { cn, formatPKR } from "@/lib/utils";
 import type { CartDetails } from "@/types/cart";
+import { ProductImage } from "@/components/products/product-image";
+import { computeGiftWrapCharge } from "@/lib/pricing";
 
 export function CartView({
   initialCart,
@@ -107,9 +108,14 @@ export function CartView({
 
   const remainingForFree = Math.max(0, freeDeliveryThreshold - cart.subtotal);
   const progress = Math.min(100, Math.round((cart.subtotal / freeDeliveryThreshold) * 100));
+  const giftWrapTotal = computeGiftWrapCharge(cart.wrappedUnits, {
+    enabled: giftWrapEnabled,
+    charge: giftWrapCharge,
+  });
+  const estimatedTotal = cart.subtotal + giftWrapTotal;
 
   return (
-    <div className="grid grid-cols-1 min-w-0 gap-6 lg:grid-cols-[1fr_380px]">
+    <div className="grid min-w-0 grid-cols-1 gap-6 pb-24 lg:grid-cols-[1fr_380px] lg:pb-0">
       {/* Items */}
       <div className="min-w-0">
         {remainingForFree > 0 && (
@@ -141,8 +147,8 @@ export function CartView({
                 href={`/product/${item.slug}`}
                 className="relative h-24 w-24 shrink-0 overflow-hidden rounded-lg bg-muted sm:h-28 sm:w-28"
               >
-                <Image
-                  src={item.image ?? "/images/placeholder.svg"}
+                <ProductImage
+                  src={item.image}
                   alt={item.name}
                   fill
                   sizes="112px"
@@ -259,13 +265,13 @@ export function CartView({
             <span className="text-muted-foreground">Subtotal ({cart.itemCount} items)</span>
             <span className="font-semibold">{formatPKR(cart.subtotal)}</span>
           </div>
-          {cart.wrappedUnits > 0 && (
+          {giftWrapTotal > 0 && (
             <div className="flex justify-between">
               <span className="flex items-center gap-1 text-muted-foreground">
                 <Gift className="h-3.5 w-3.5 text-primary" aria-hidden="true" />
                 Gift wrapping ({cart.wrappedUnits} item{cart.wrappedUnits === 1 ? "" : "s"})
               </span>
-              <span className="text-muted-foreground">Added at checkout</span>
+              <span className="font-semibold">{formatPKR(giftWrapTotal)}</span>
             </div>
           )}
           <div className="flex justify-between">
@@ -276,7 +282,7 @@ export function CartView({
         <Separator className="my-4" />
         <div className="flex justify-between text-base">
           <span className="font-bold">Estimated Total</span>
-          <span className="font-extrabold text-primary">{formatPKR(cart.subtotal)}</span>
+          <span className="font-extrabold text-primary">{formatPKR(estimatedTotal)}</span>
         </div>
         <Button asChild size="lg" className="mt-4 h-12 w-full text-base">
           <Link href="/checkout">Proceed to Checkout</Link>
@@ -306,7 +312,7 @@ export function CartView({
             <p className="text-[11px] text-muted-foreground">
               {cart.itemCount} item{cart.itemCount === 1 ? "" : "s"}
             </p>
-            <p className="truncate text-lg font-extrabold text-primary">{formatPKR(cart.subtotal)}</p>
+            <p className="truncate text-lg font-extrabold text-primary">{formatPKR(estimatedTotal)}</p>
           </div>
           <Button asChild size="lg" className="ml-auto h-11 min-w-0 flex-1 justify-center text-base sm:max-w-64">
             <Link href="/checkout">Checkout</Link>

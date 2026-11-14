@@ -11,14 +11,19 @@ const nextConfig: NextConfig = {
     return [{ source: "/storage/:path*", destination: `${storageProxy}/storage/:path*` }];
   },
   images: {
-    remotePatterns: [
-      {
-        protocol: "https",
-        hostname: "evsxjmtireufyymgsehx.supabase.co",
-        pathname: "/storage/v1/object/public/product-images/**",
-      },
-    ],
-  },
+  remotePatterns: [
+    {
+      protocol: "https",
+      hostname: "evsxjmtireufyymgsehx.supabase.co",
+      pathname: "/storage/v1/object/public/product-images/**",
+    },
+    {
+      protocol: "https",
+      hostname: "i5.walmartimages.com",
+      pathname: "/seo/**",
+    },
+  ],
+},
   output: "standalone",
   outputFileTracingIncludes: {
     "/*": ["./generated/postgres-client/**/*"],

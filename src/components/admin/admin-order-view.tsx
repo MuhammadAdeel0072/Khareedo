@@ -1,7 +1,6 @@
 "use client";
 
 // Admin order detail — status transitions via the state machine (FR-41, BR-11).
-import Image from "next/image";
 import Link from "next/link";
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
@@ -23,6 +22,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { formatPKR, formatDateTime } from "@/lib/utils";
 import { cn } from "@/lib/utils";
+import { ProductImage } from "@/components/products/product-image";
 
 export interface AdminOrderDetail {
   id: string;
@@ -158,7 +158,7 @@ export function AdminOrderView({ order }: { order: AdminOrderDetail }) {
             {order.items.map((item) => (
               <li key={item.id} className="flex items-center gap-3">
                 <span className="relative h-14 w-14 shrink-0 overflow-hidden rounded-lg bg-muted">
-                  <Image src={item.imageUrl ?? "/images/placeholder.svg"} alt="" fill sizes="56px" className="object-cover" />
+                  <ProductImage src={item.imageUrl} alt="" fill sizes="56px" className="object-cover" />
                 </span>
                 <div className="min-w-0 flex-1">
                   <p className="flex items-center gap-1.5 truncate text-sm font-medium">

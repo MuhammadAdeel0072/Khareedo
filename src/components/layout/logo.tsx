@@ -15,12 +15,12 @@ export function Logo({
       className={cn("inline-flex items-center gap-2 shrink-0", className)}
     >
       <Image
-        src="/images/khareedo-wordmark.png"
+        src="/logo.svg"
         alt="Khareedo"
-        width={217}
-        height={48}
+        width={520}
+        height={110}
         priority
-        className="h-9 w-auto"
+        className="h-9 w-auto max-[359px]:h-7"
       />
     </Link>
   );

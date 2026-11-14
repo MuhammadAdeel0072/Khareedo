@@ -209,7 +209,7 @@ function CategoryNav({ categories }: { categories: CategoryNode[] }) {
       {/* Mobile / tablet category chips — horizontal scroll, larger touch targets */}
       <nav
         aria-label="Product categories"
-        className="overflow-x-auto border-b bg-background shadow-sm [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden lg:hidden"
+        className="touch-pan-x overscroll-x-contain overflow-x-auto border-b bg-background shadow-sm [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden lg:hidden"
       >
         <ul className="flex w-max items-center gap-2 px-4 py-2.5 text-[13px] font-medium text-foreground/80">
           <li>

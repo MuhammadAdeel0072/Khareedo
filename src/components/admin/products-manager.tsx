@@ -2,7 +2,6 @@
 
 // Admin products manager (FR-39) — table + inline Add/Edit dialog (like Categories).
 import Link from "next/link";
-import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { Archive, Loader2, Pencil, Plus, Search, Upload } from "lucide-react";
@@ -27,6 +26,7 @@ import {
 } from "@/components/admin/product-dialog";
 import { ExportButtons } from "@/components/admin/export-buttons";
 import { ImportProductsDialog } from "@/components/admin/import-products-dialog";
+import { ProductImage } from "@/components/products/product-image";
 import { STATUS_BADGE_CLASSES } from "@/lib/constants";
 import { formatPKR, formatDate } from "@/lib/utils";
 
@@ -176,7 +176,7 @@ export function ProductsManager({
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-3">
                     <span className="relative h-11 w-11 shrink-0 overflow-hidden rounded-lg bg-muted">
-                      <Image src={p.image ?? "/images/placeholder.svg"} alt="" fill sizes="44px" className="object-cover" />
+                      <ProductImage src={p.image} alt="" fill sizes="44px" className="object-cover" />
                     </span>
                     <div className="min-w-0">
                       <p className="max-w-56 truncate font-medium">{p.name}</p>
@@ -239,7 +239,7 @@ export function ProductsManager({
           <div key={p.id} className="rounded-xl border bg-card p-3">
             <div className="flex gap-3">
               <span className="relative h-16 w-16 shrink-0 overflow-hidden rounded-lg bg-muted">
-                <Image src={p.image ?? "/images/placeholder.svg"} alt="" fill sizes="64px" className="object-cover" />
+                <ProductImage src={p.image} alt="" fill sizes="64px" className="object-cover" />
               </span>
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-semibold">{p.name}</p>

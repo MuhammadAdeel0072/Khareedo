@@ -28,8 +28,14 @@ export const metadata: Metadata = {
     "Khareedo is a premium online store for watches, electronics, bags, jewellery and perfumes. Cash on Delivery, easy returns and WhatsApp assistance.",
   keywords: ["Khareedo", "online shopping", "watches", "earbuds", "Pakistan", "e-commerce"],
   icons: {
-    icon: "/favicon.svg",
+    icon: [
+      { url: "/favicon.ico", sizes: "any" },
+      { url: "/favicon.svg", type: "image/svg+xml" },
+      { url: "/icon-192.png", sizes: "192x192", type: "image/png" },
+    ],
+    apple: [{ url: "/apple-touch-icon.png", sizes: "180x180", type: "image/png" }],
   },
+  manifest: "/site.webmanifest",
   openGraph: {
     title: `${SITE_NAME} — ${SITE_TAGLINE}`,
     description: "Premium products for your everyday life. COD available.",
@@ -41,7 +47,7 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
-  themeColor: "#11402B",
+  themeColor: "#00563F",
 };
 
 export default function RootLayout({

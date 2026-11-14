@@ -16,8 +16,8 @@ import { requireAdmin } from "@/lib/auth-guard";
 import { handleRoute, jsonError, jsonOk, parseBody } from "@/lib/api";
 import { rateLimit, clientIp } from "@/lib/rate-limit";
 import { z } from "zod";
-import { assertPublicHttpUrl, SsrfBlockedError } from "@/lib/ssrf-guard";
-import { getProductImageExtension, MAX_PRODUCT_IMAGE_SIZE } from "@/lib/product-image-validation";
+import { fetchRemoteImage } from "@/lib/remote-image-import";
+import { SsrfBlockedError } from "@/lib/ssrf-guard";
 import { buildObjectKey, getStorageClient, MEDIA_BUCKET } from "@/lib/storage";
 
 export const runtime = "nodejs";
@@ -25,75 +25,6 @@ export const runtime = "nodejs";
 const importSchema = z.object({
   url: z.string().trim().min(8).max(2048),
 });
-
-const MAX_REDIRECTS = 3;
-const FETCH_TIMEOUT_MS = 10_000;
-
-async function fetchBoundedImage(rawUrl: string): Promise<{ bytes: Uint8Array<ArrayBuffer>; contentType: string; extension: string }> {
-  let currentUrl: string = rawUrl;
-
-  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    const url = await assertPublicHttpUrl(currentUrl);
-
-    const response = await fetch(url, {
-      redirect: "manual",
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      headers: { "user-agent": "KhareedoBannerImport/1.0", accept: "image/*" },
-    });
-
-    // Redirects: re-validate each hop against the SSRF guard.
-    if (response.status >= 300 && response.status < 400) {
-      const location = response.headers.get("location");
-      if (!location) throw new SsrfBlockedError("The image server returned an invalid redirect.");
-      if (hop === MAX_REDIRECTS) throw new SsrfBlockedError("Too many redirects while fetching the image.");
-      currentUrl = new URL(location, url).toString();
-      continue;
-    }
-
-    if (!response.ok) {
-      throw new SsrfBlockedError(`The image host responded with HTTP ${response.status}.`);
-    }
-
-    const contentType = (response.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
-    if (!contentType.startsWith("image/")) {
-      throw new SsrfBlockedError("The URL does not point to an image.");
-    }
-
-    // Stream with a hard byte cap — never buffer an unbounded body.
-    const reader = response.body?.getReader();
-    if (!reader) throw new SsrfBlockedError("The image response had no content.");
-
-    const chunks: Uint8Array[] = [];
-    let total = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > MAX_PRODUCT_IMAGE_SIZE) {
-        await reader.cancel();
-        throw new SsrfBlockedError("The remote image is larger than 5 MB.");
-      }
-      chunks.push(value);
-    }
-
-    const bytes = new Uint8Array(new ArrayBuffer(total));
-    let offset = 0;
-    for (const chunk of chunks) {
-      bytes.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-
-    if (bytes.length === 0) throw new SsrfBlockedError("The remote image is empty.");
-    const extension = getProductImageExtension(bytes, contentType);
-    if (!extension) {
-      throw new SsrfBlockedError("The remote file is not a supported image (JPEG, PNG, WebP or GIF).");
-    }
-
-    return { bytes, contentType, extension };
-  }
-
-  throw new SsrfBlockedError("Too many redirects while fetching the image.");
-}
 
 export async function POST(request: Request) {
   return handleRoute(async () => {
@@ -112,7 +43,7 @@ export async function POST(request: Request) {
     let contentType: string;
     let extension: string;
     try {
-      ({ bytes, contentType, extension } = await fetchBoundedImage(parsed.data.url));
+      ({ bytes, contentType, extension } = await fetchRemoteImage(parsed.data.url));
     } catch (error) {
       if (error instanceof SsrfBlockedError) {
         return jsonError(error.message, 422, { code: "IMPORT_BLOCKED" });

@@ -1,5 +1,6 @@
 ﻿// Typed store settings service â€” DB-driven configuration (FR-44, FR-51, FR-32).
 import { cache } from "react";
+import { Prisma } from "@prisma/client";
 import { revalidateTag, unstable_cache } from "next/cache";
 import { db } from "@/lib/db";
 
@@ -115,23 +116,41 @@ export async function saveSettings(
   const entries = Object.entries(values);
   if (entries.length === 0) return;
 
-  // Save all settings atomically using Prisma's supported API.
-  await db.$transaction(
-    entries.map(([key, value]) =>
-      db.storeSetting.upsert({
-        where: { key },
-        create: {
-          key,
-          value: String(value),
-        },
-        update: {
-          value: String(value),
-        },
-      })
-    )
-  );
+  const executeRaw = (db as any).$executeRaw;
+  if (typeof executeRaw === "function") {
+    const rows = entries.map(([key, value]) =>
+      Prisma.sql`(${key}, ${String(value)}, CURRENT_TIMESTAMP)`
+    );
 
-  // Refresh storefront settings only after a successful commit.
-  revalidateTag(SETTINGS_CACHE_TAG, { expire: 0 });
+    await executeRaw(Prisma.sql`
+      INSERT INTO "StoreSetting" ("key", "value", "updatedAt")
+      VALUES ${Prisma.join(rows)}
+      ON CONFLICT ("key") DO UPDATE
+      SET "value" = EXCLUDED."value", "updatedAt" = CURRENT_TIMESTAMP
+    `);
+
+    revalidateTag(SETTINGS_CACHE_TAG, { expire: 0 });
+    return;
+  }
+
+  const storeSettingModel = (db as any).storeSetting ?? (db as any).storeSettings;
+  if (storeSettingModel?.upsert) {
+    await db.$transaction(
+      entries.map(([key, value]) =>
+        storeSettingModel.upsert({
+          where: { key },
+          create: {
+            key,
+            value: String(value),
+          },
+          update: {
+            value: String(value),
+          },
+        })
+      )
+    );
+
+    revalidateTag(SETTINGS_CACHE_TAG, { expire: 0 });
+  }
 }
 
