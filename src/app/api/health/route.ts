@@ -73,22 +73,41 @@ export function buildHealthPayload(
   };
 }
 
+// Database liveness probe.
+//
+// The 5s timeout is a response deadline only, not query cancellation: Prisma
+// 6's `$queryRaw` accepts no AbortSignal, so a timed-out query cannot be
+// cancelled from here and may run to completion on the server. That is safe
+// for this probe because the query is a read-only `SELECT 1`: it takes no
+// locks, writes nothing and returns one row, so it cannot consume meaningful
+// database resources. The worst case is one pooled connection held until the
+// driver settles the query (completion, or connection failure releasing it),
+// and the pool is capped. A late rejection after the timeout wins is
+// swallowed (see below) so it can never surface as an unhandled rejection.
 async function checkDatabase(): Promise<HealthCheck> {
   const startedAt = Date.now();
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
   try {
-    await Promise.race([
-      db.$queryRaw`SELECT 1`,
-      new Promise((_resolve, reject) => {
-        setTimeout(
-          () => reject(new Error("database check timed out")),
-          DATABASE_CHECK_TIMEOUT_MS,
-        );
-      }),
-    ]);
+    const query = db.$queryRaw`SELECT 1`;
+    // If the timeout wins the race below, the query promise is no longer
+    // observed — a late rejection would otherwise become an unhandled
+    // rejection. Swallow it here; the race still observes the original.
+    void query.catch(() => {});
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timeoutId = setTimeout(
+        () => reject(new Error("database check timed out")),
+        DATABASE_CHECK_TIMEOUT_MS,
+      );
+    });
+    await Promise.race([query, timeout]);
     return { status: "ok", latencyMs: Date.now() - startedAt };
   } catch {
     // Deliberately generic: no error text, no connection detail.
     return { status: "error", latencyMs: Date.now() - startedAt };
+  } finally {
+    // Always clear the timer: a completed query must not leave a 5s timer
+    // holding the event loop, and a fired timer needs no clearing.
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
   }
 }
 

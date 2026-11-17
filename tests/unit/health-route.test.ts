@@ -19,6 +19,16 @@ import {
 
 const T0 = 1_780_000_000_000;
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("GET /api/health", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -81,6 +91,45 @@ describe("GET /api/health", () => {
     const body = await response.json();
     expect(body.status).toBe("degraded");
     expect(body.checks.worker.status).toBe("stopped");
+  });
+
+  it("clears the timeout timer when the database query completes first", async () => {
+    vi.useFakeTimers();
+    try {
+      recordWorkerStarted();
+      recordSweepSucceeded();
+      const response = await GET();
+      expect(response.status).toBe(200);
+      // The 5s timer must not survive a fast query and hold the event loop.
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns 503 down when the database check times out, and swallows a late query failure", async () => {
+    vi.useFakeTimers();
+    try {
+      const query = deferred<unknown>();
+      mocks.queryRaw.mockReturnValue(query.promise);
+      recordWorkerStarted();
+      recordSweepSucceeded();
+      const responsePromise = GET();
+      await vi.advanceTimersByTimeAsync(5_000);
+      const response = await responsePromise;
+      expect(response.status).toBe(503);
+      const body = await response.json();
+      expect(body.status).toBe("down");
+      expect(body.checks.database).toMatchObject({ status: "error" });
+      expect(body.checks.database.latencyMs).toBe(5_000);
+      // The query is still pending after the timeout wins; a late failure
+      // must not surface as an unhandled rejection or change the response.
+      query.reject(new Error("late database failure"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(response.status).toBe(503);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("returns 503 down when the database is unreachable, without leaking details", async () => {
