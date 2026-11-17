@@ -106,3 +106,29 @@ export function isEmailDeliveryConfigured() {
     throw error;
   }
 }
+
+/** Send an operator alert email (error monitoring). Reuses the same SMTP
+ * configuration and pooled transporter as verification mail. The caller is
+ * responsible for keeping the subject/body free of customer data, payment
+ * credentials and payloads — identifiers and codes only. Throws
+ * EmailDeliveryNotConfiguredError when SMTP is not configured. */
+export async function sendAlertEmail(input: {
+  to: string;
+  subject: string;
+  text: string;
+}) {
+  const config = smtpConfiguration();
+  const to = input.to.trim();
+  if (!to || to.includes("\n") || to.includes("\r") || !to.includes("@")) {
+    throw new Error("Alert email recipient is invalid.");
+  }
+  const subject = input.subject.replace(/[\r\n]/g, " ").trim();
+  if (!subject) throw new Error("Alert email subject is required.");
+  const transporter = getTransporter(config);
+  await transporter.sendMail({
+    from: config.from,
+    to,
+    subject,
+    text: input.text,
+  });
+}

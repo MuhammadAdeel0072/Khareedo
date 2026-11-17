@@ -1,4 +1,5 @@
 import { loadSafepayConfig, loadSafepayWebhookSecret, SafepayConfigurationError } from "@/lib/safepay/config";
+import { capturePaymentAlert } from "@/lib/error-monitoring";
 import { requestOrigin } from "@/lib/request-origin";
 import { createPaymentWebhookService } from "@/services/payment-webhook.service";
 import { createPaymentPayloadVault } from "@/lib/payments/payload-vault";
@@ -80,13 +81,33 @@ export async function POST(request: Request) {
   try {
     result = await inbox.receive(input);
   } catch {
+    capturePaymentAlert("WEBHOOK_FAILURE", {
+      operation: "webhook-receive",
+      code: "PERSISTENCE_UNAVAILABLE",
+    });
     return reply(503, { ok: false, code: "PERSISTENCE_UNAVAILABLE" });
   }
   if (result.kind === "blocked") {
     // BUSY/PERSISTENCE_UNAVAILABLE → 503 so Safepay retries; INVALID_INPUT → terminal 400.
+    if (result.code !== "INVALID_INPUT") {
+      capturePaymentAlert("WEBHOOK_FAILURE", {
+        operation: "webhook-receive",
+        code: result.code,
+      });
+    }
     return result.code === "INVALID_INPUT"
       ? reply(400, { ok: false, code: "INVALID_PAYLOAD" })
       : reply(503, { ok: false, code: result.code });
+  }
+  if (result.kind === "quarantined" || result.kind === "conflict") {
+    // The signed bytes are durably in custody, so the delivery is still
+    // acknowledged 200 — but a parked/conflicting event is a payment failure
+    // signal that needs operator review, not silent acceptance.
+    capturePaymentAlert("WEBHOOK_FAILURE", {
+      operation: "webhook-receive",
+      code: result.kind === "quarantined" ? "QUARANTINED" : "CONFLICT",
+      eventId: result.eventId,
+    });
   }
   // stored | duplicate | quarantined | conflict: the signed bytes are durably in custody.
   // Acknowledge 200 even for quarantined/unrecognized events so the provider does not

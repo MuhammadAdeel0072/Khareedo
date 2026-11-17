@@ -2,6 +2,8 @@
 import { NextResponse } from "next/server";
 import { ZodError, type ZodSchema } from "zod";
 import { AuthError } from "@/lib/auth-guard";
+import { captureError } from "@/lib/error-monitoring";
+import { getPerformanceRequestId } from "@/lib/performance-timing";
 
 export function jsonOk<T>(data: T, init?: ResponseInit) {
   return NextResponse.json({ ok: true, ...data }, init);
@@ -37,11 +39,13 @@ export async function parseBody<T>(
   }
 }
 
-/** Wrap a route handler with uniform error handling (NFR-05). */
+/** Wrap a route handler with uniform error handling (NFR-05). Unexpected
+ * errors are captured centrally (sanitised, structured — see
+ * src/lib/error-monitoring.ts) instead of being logged raw. */
 export function handleRoute(fn: () => Promise<Response>): Promise<Response> {
   return fn().catch((e) => {
     if (e instanceof AuthError) return jsonError(e.message, e.status);
-    console.error("[api] unhandled error:", e);
+    captureError(e, { operation: "api-route", requestId: getPerformanceRequestId() });
     return jsonError("Something went wrong. Please try again.", 500);
   });
 }

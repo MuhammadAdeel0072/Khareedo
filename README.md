@@ -80,6 +80,28 @@ bun scripts/generate-images.ts --max-seconds=300 --concurrency=2
   may see different states per instance. This matches the current
   single-instance deployment assumption.
 
+## Operations: error monitoring and payment alerts
+
+- Unexpected server-side errors are captured centrally by
+  `src/lib/error-monitoring.ts`: one sanitised, structured JSON log line per
+  error (name, scrubbed message, operation, request id — no secrets, no
+  customer data, no payloads; stacks in development only). Sources: every
+  route wrapped in `handleRoute`, process-level unhandled rejections and
+  uncaught exceptions (registered in `src/instrumentation.ts`), and worker
+  start failures.
+- Critical payment failures additionally raise a `payment-alert`:
+  `WORKER_FAILURE` (sweep threw), `WEBHOOK_FAILURE` (receive failure,
+  blocked delivery, quarantined/conflicting event, blocked inbox
+  processing), `PAYMENT_FAILURE` (failed refund submission), and
+  `RECONCILIATION_FAILURE` (provider fetch failed during reconciliation or
+  targeted verification). When `ERROR_MONITORING_ALERT_EMAIL` is set and
+  SMTP is configured, alerts are also emailed (throttled to one per
+  kind+code every 15 minutes by default); without credentials the email is
+  skipped and the log line still fires. Set
+  `ERROR_MONITORING_ENABLED=false` to disable capture entirely.
+  See `docs/ERROR-MONITORING.md` for setup, configuration and failure
+  scenarios.
+
 ## Architecture
 
 ```
