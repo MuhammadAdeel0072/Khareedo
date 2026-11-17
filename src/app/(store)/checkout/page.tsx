@@ -60,7 +60,6 @@ export default async function CheckoutPage() {
         initialEmail={user.email}
         config={{
           codEnabled: settings.cod_enabled,
-          bankTransferEnabled: settings.bank_transfer_enabled,
           sandboxPaymentEnabled: isSafepaySandboxSessionConfigured(),
           giftWrapEnabled: settings.gift_wrap_enabled,
           giftWrapCharge: settings.gift_wrap_charge,

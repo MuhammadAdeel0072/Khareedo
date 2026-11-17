@@ -159,7 +159,13 @@ async function placeOrderImpl(
     }),
   ]);
 
-  // Payment method guards (BR-10, D-02): no fake online confirmations
+  // Payment method guards (BR-10, D-02): no fake online confirmations, and
+  // bank transfer is not supported. placeOrderSchema rejects BANK_TRANSFER
+  // before this service runs; this guard is defense in depth for direct
+  // callers, so an untyped or future caller cannot create a bank-transfer
+  // order by bypassing the route validation.
+  if (input.paymentMethod !== "COD" && input.paymentMethod !== "ONLINE")
+    return { ok: false, error: "This payment method is not supported.", code: "PAYMENT_DISABLED" };
   if (input.paymentMethod === "COD" && !settings.cod_enabled)
     return { ok: false, error: "Cash on Delivery is currently unavailable.", code: "PAYMENT_DISABLED" };
   if (input.paymentMethod === "ONLINE")
@@ -168,8 +174,6 @@ async function placeOrderImpl(
       error: "Online payments are coming soon. Please choose Cash on Delivery.",
       code: "PAYMENT_DISABLED",
     };
-  if (input.paymentMethod === "BANK_TRANSFER" && !settings.bank_transfer_enabled)
-    return { ok: false, error: "Bank transfer is currently unavailable.", code: "PAYMENT_DISABLED" };
 
   if (existing) {
     if (existing.userId !== userId || existing.isGuest) {

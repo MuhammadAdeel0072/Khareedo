@@ -6,21 +6,16 @@
 // can never bypass business rules — they only keep the UI consistent with
 // them (HCI: an obvious default, no dead-ends, no double-click selection).
 
-export const PAYMENT_METHOD_IDS = ["COD", "BANK_TRANSFER", "ONLINE"] as const;
+export const PAYMENT_METHOD_IDS = ["COD", "ONLINE"] as const;
 export type CheckoutPaymentMethod = (typeof PAYMENT_METHOD_IDS)[number];
 
 export interface PaymentEligibility {
   codEnabled: boolean;
-  bankTransferEnabled: boolean;
   sandboxPaymentEnabled: boolean;
 }
 
 /** Preference order — Cash on Delivery first, per business rules. */
-const PREFERENCE: readonly CheckoutPaymentMethod[] = [
-  "COD",
-  "BANK_TRANSFER",
-  "ONLINE",
-];
+const PREFERENCE: readonly CheckoutPaymentMethod[] = ["COD", "ONLINE"];
 
 /** Methods currently enabled for the store, in preference order. */
 export function availablePaymentMethods(
@@ -28,7 +23,6 @@ export function availablePaymentMethods(
 ): CheckoutPaymentMethod[] {
   return PREFERENCE.filter((method) => {
     if (method === "COD") return eligibility.codEnabled;
-    if (method === "BANK_TRANSFER") return eligibility.bankTransferEnabled;
     return eligibility.sandboxPaymentEnabled;
   });
 }

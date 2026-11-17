@@ -89,7 +89,7 @@ export const placeOrderSchema = z.object({
   customer: checkoutCustomerSchema,
   address: checkoutAddressSchema,
   deliveryMethod: z.enum(["STANDARD", "EXPRESS"]),
-  paymentMethod: z.enum(["COD", "BANK_TRANSFER", "ONLINE"]),
+  paymentMethod: z.enum(["COD", "ONLINE"]),
   // gift wrap selection is PER CART ITEM — read from the DB cart, never trusted from the client
   giftWrapMessage: z.string().trim().max(200).optional().or(z.literal("")),
   couponCode: z.string().trim().max(40).optional().or(z.literal("")),
@@ -235,7 +235,6 @@ export const settingsSchema = z.object({
     .regex(/^[0-9]{10,14}$/, "Use digits only with country code, e.g. 923001234567"),
   announcement_text: z.string().trim().max(120).optional().or(z.literal("")),
   cod_enabled: z.boolean().default(true),
-  bank_transfer_enabled: z.boolean().default(false),
   online_payment_enabled: z.boolean().default(false),
   delivery_fee_standard: z.coerce.number().int().min(0),
   delivery_fee_express: z.coerce.number().int().min(0),

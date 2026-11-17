@@ -61,6 +61,16 @@ describe("checkout API authentication", () => {
     expect(mocks.placeOrder).not.toHaveBeenCalled();
   });
 
+  it("rejects a bank-transfer placement from an authenticated user before order creation", async () => {
+    mocks.getSessionUser.mockResolvedValue({ id: "session-customer" });
+    const response = await place(request("/api/checkout/place", {
+      ...checkoutBody, paymentMethod: "BANK_TRANSFER",
+    }));
+
+    expect(response.status).toBe(422);
+    expect(mocks.placeOrder).not.toHaveBeenCalled();
+  });
+
   it("derives order ownership from the verified session, not request fields", async () => {
     mocks.getSessionUser.mockResolvedValue({ id: "session-customer" });
     const response = await place(request("/api/checkout/place", {

@@ -3,7 +3,9 @@ import { expect, test, type Page } from "@playwright/test";
 import { db } from "../../src/lib/db";
 
 // Self-cleaning: remove the product this suite creates (archived or not), so
-// repeat runs never pollute the 51-product demo catalogue (audit Phase 11).
+// repeat runs never pollute the 51-product demo catalogue (audit Phase 11),
+// and remove any COD orders this suite places.
+const placedOrderReferences: string[] = [];
 test.afterAll(async () => {
   const junk = await db.product.findMany({
     where: { name: "E2E Test Product" },
@@ -13,6 +15,13 @@ test.afterAll(async () => {
     await db.inventory.deleteMany({ where: { productId: p.id } });
     await db.productImage.deleteMany({ where: { productId: p.id } });
     await db.product.delete({ where: { id: p.id } });
+  }
+  for (const reference of placedOrderReferences) {
+    const order = await db.order.findUnique({ where: { reference }, select: { id: true } });
+    if (!order) continue;
+    await db.payment.deleteMany({ where: { orderId: order.id } });
+    await db.orderItem.deleteMany({ where: { orderId: order.id } });
+    await db.order.delete({ where: { id: order.id } });
   }
   await db.$disconnect();
 });
@@ -66,6 +75,61 @@ test.describe("registered customer journey", () => {
     await page.goto("/order/KH26030110021"); // Ali's delivered order
     // Should be 404 — not visible to another customer
     await expect(page.getByText("Page not found")).toBeVisible();
+  });
+
+  test("places a COD order through checkout (FR-19..25, D-01/D-02)", async ({ page }) => {
+    await customerLogin(page);
+
+    await page.goto("/product/casio-mens-analog-watch");
+    await page.getByRole("button", { name: /add to cart/i }).first().click();
+    await expect(page.getByText("Added to cart")).toBeVisible({ timeout: 10000 });
+
+    await page.goto("/checkout");
+    // A saved address is pre-selected when one exists; otherwise the new
+    // address form shows. Either way, fill a new address when the form is hidden.
+    if (!(await page.getByLabel("Full Name").isVisible().catch(() => false))) {
+      await page.getByText("Add New Address").click();
+    }
+    await page.getByLabel("Full Name").fill("Ali Hassan");
+    await page.getByLabel("Phone Number").fill("0321 5556677");
+    await page.getByLabel("Street Address").fill("Test House 99, E2E Lane");
+    await page.getByLabel("City").fill("Lahore");
+    await page.getByRole("button", { name: /continue to delivery/i }).click();
+
+    // Step 2: delivery (standard pre-selected) → continue
+    await page.getByRole("button", { name: /continue to payment/i }).click();
+
+    // Step 3: COD pre-selected, bank transfer is not offered → review
+    await expect(page.getByRole("radio", { name: /bank transfer/i })).toHaveCount(0);
+    await page.getByRole("button", { name: /review order/i }).click();
+
+    // Step 4: confirm
+    await page.getByRole("button", { name: /confirm order/i }).click();
+
+    // Confirmation page with order reference (never shown for failed orders)
+    await expect(page.getByText("Order Confirmed!")).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText(/Order Reference/i)).toBeVisible();
+    const reference = await page.locator("text=/^KH\\d{11,13}$/").first().innerText();
+    placedOrderReferences.push(reference.trim());
+    await expect(page.getByText("Cash on Delivery").first()).toBeVisible();
+  });
+
+  test("cannot place a bank-transfer order through the API (PR-04, D-02)", async ({ page }) => {
+    await customerLogin(page);
+
+    const response = await page.request.post("/api/checkout/place", {
+      data: {
+        idempotencyKey: "e2e-bank-transfer-attempt",
+        customer: { name: "Ali Hassan", email: "ali.hassan@example.com", phone: "03001234567" },
+        address: {
+          fullName: "Ali Hassan", phone: "03001234567",
+          line1: "Test House 99, E2E Lane", city: "Lahore", province: "Punjab",
+        },
+        deliveryMethod: "STANDARD",
+        paymentMethod: "BANK_TRANSFER",
+      },
+    });
+    expect(response.status()).toBe(422);
   });
 });
 

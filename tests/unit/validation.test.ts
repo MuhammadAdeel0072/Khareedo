@@ -79,6 +79,12 @@ describe("place order schema (FR-27 idempotency)", () => {
       placeOrderSchema.safeParse({ ...base, idempotencyKey: "chk-abc123def456789", paymentMethod: "BITCOIN" }).success
     ).toBe(false);
   });
+
+  it("rejects bank transfer — only COD and Safepay (ONLINE) are supported (PR-04, D-02)", () => {
+    expect(
+      placeOrderSchema.safeParse({ ...base, idempotencyKey: "chk-abc123def456789", paymentMethod: "BANK_TRANSFER" }).success
+    ).toBe(false);
+  });
 });
 
 describe("coupon schema (D-06)", () => {

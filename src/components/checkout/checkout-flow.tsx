@@ -11,7 +11,6 @@ import {
   Check,
   CreditCard,
   Gift,
-  Landmark,
   Loader2,
   Lock,
   MapPin,
@@ -71,7 +70,6 @@ export interface CheckoutAddress {
 
 export interface CheckoutConfig {
   codEnabled: boolean;
-  bankTransferEnabled: boolean;
   sandboxPaymentEnabled: boolean;
   giftWrapEnabled: boolean;
   giftWrapCharge: number;
@@ -165,7 +163,7 @@ export function CheckoutFlow({
   );
   const availablePaymentMethodIds = useMemo(
     () => availablePaymentMethods(config),
-    [config.codEnabled, config.bankTransferEnabled, config.sandboxPaymentEnabled]
+    [config.codEnabled, config.sandboxPaymentEnabled]
   );
 
   // If the selected method becomes invalid/unavailable (e.g. store settings
@@ -284,8 +282,10 @@ export function CheckoutFlow({
   function validateAddress(a: CheckoutAddress): boolean {
     const errors: Record<string, string> = {};
     if (a.fullName.trim().length < 2) errors.fullName = "Recipient name is required";
-    // Guests must supply a contact email for the order record (FR-19, BR-02)
-    if (!user && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(a.email ?? ""))
+    // A contact email is required for the order record (FR-19, BR-02).
+    // Checkout requires sign-in (PR-04, D-01), so the signed-in customer's
+    // email is prefilled — this only re-validates the field value.
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(a.email ?? ""))
       errors.email = "Please enter a valid email address";
     if (!/^(\+?92|0)?\d{10}$/.test(a.phone.replace(/[\s-]/g, "")))
       errors.phone = "Enter a valid phone (e.g. 0300 1234567)";
@@ -724,16 +724,6 @@ export function CheckoutFlow({
                     desc="Pay when you receive your order"
                   />
                 )}
-                {config.bankTransferEnabled && (
-                  <PaymentOption
-                    id="payment-BANK_TRANSFER"
-                    value="BANK_TRANSFER"
-                    selected={paymentMethod === "BANK_TRANSFER"}
-                    icon={<Landmark className="h-5 w-5" />}
-                    title="Bank Transfer"
-                    desc="Direct bank transfer — details shared after ordering"
-                  />
-                )}
                 {config.sandboxPaymentEnabled && (
                   <PaymentOption
                     id="payment-ONLINE"
@@ -807,11 +797,9 @@ export function CheckoutFlow({
                     deliveryMethod === "EXPRESS" ? "Express Delivery (1-2 days)" : "Standard Delivery (3-5 days)",
                     paymentMethod === "COD"
                       ? "Cash on Delivery"
-                      : paymentMethod === "BANK_TRANSFER"
-                        ? "Bank Transfer"
-                        : paymentMethod === "ONLINE"
-                          ? "Online Payment"
-                          : "No payment method selected",
+                      : paymentMethod === "ONLINE"
+                        ? "Online Payment"
+                        : "No payment method selected",
                     wrappedUnits > 0
                       ? `Gift wrapping (${wrappedUnits} item${wrappedUnits === 1 ? "" : "s"} — ${formatPKR(quote?.giftWrapCharge ?? config.giftWrapCharge * wrappedUnits)})`
                       : "No gift wrapping",

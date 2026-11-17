@@ -46,9 +46,9 @@ const inbox = createPaymentWebhookService(database, vault, options);
 const settlement = createPaymentSettlementService(database, options);
 const reconciliation = createPaymentReconciliationService(database, inbox, clock);
 const reservations = createSafepayReservationService(database, clock);
-const settings = { ...DEFAULT_SETTINGS, bank_transfer_enabled: true };
+const settings = { ...DEFAULT_SETTINGS };
 const productIds: string[] = [], categoryIds: string[] = [], cartIds: string[] = [], couponIds: string[] = [], userIds: string[] = [], eventIds: string[] = [];
-function checkoutInput(method: "ONLINE" | "COD" | "BANK_TRANSFER" = "ONLINE", couponCode?: string) {
+function checkoutInput(method: "ONLINE" | "COD" = "ONLINE", couponCode?: string) {
   return { idempotencyKey: randomUUID(), paymentMethod: method, deliveryMethod: "STANDARD" as const,
     customer: { name: "Synthetic Buyer", email: "synthetic@example.invalid", phone: "03001234567" },
     address: { fullName: "Synthetic Buyer", phone: "03001234567", line1: "Synthetic Street 1", city: "Lahore", province: "Punjab" }, couponCode };
@@ -435,7 +435,8 @@ describe("Inbox replay, reconciliation, races and atomic rollback", () => {
       await expect(inbox.pending(limit)).rejects.toThrow(); await expect(reconciliation.due(limit)).rejects.toThrow();
     }
   });
-  it.each(["COD", "BANK_TRANSFER"] as const)("preserves %s checkout/cancellation beside settled Safepay stock", async method => {
+  it("preserves COD checkout/cancellation beside settled Safepay stock", async () => {
+    const method = "COD" as const;
     const f = await fixture({ coupon: true }); await processObservation(f.observation);
     vi.spyOn(settingsService, "getSettings").mockResolvedValue(settings);
     const product = f.products[0];

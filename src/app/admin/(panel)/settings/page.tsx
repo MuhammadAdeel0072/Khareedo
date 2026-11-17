@@ -26,7 +26,6 @@ export default async function AdminSettingsPage() {
           whatsapp_number: s.whatsapp_number,
           announcement_text: s.announcement_text,
           cod_enabled: s.cod_enabled,
-          bank_transfer_enabled: s.bank_transfer_enabled,
           online_payment_enabled: s.online_payment_enabled,
           delivery_fee_standard: s.delivery_fee_standard,
           delivery_fee_express: s.delivery_fee_express,
