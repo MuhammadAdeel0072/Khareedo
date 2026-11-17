@@ -86,8 +86,10 @@ bun scripts/generate-images.ts --max-seconds=300 --concurrency=2
   `src/lib/error-monitoring.ts`: one sanitised, structured JSON log line per
   error (name, scrubbed message, operation, request id — no secrets, no
   customer data, no payloads; stacks in development only). Sources: every
-  route wrapped in `handleRoute`, process-level unhandled rejections and
-  uncaught exceptions (registered in `src/instrumentation.ts`), and worker
+  route wrapped in `handleRoute`, process-level uncaught exceptions and
+  escalated unhandled rejections (captured through the observe-only
+  `uncaughtExceptionMonitor` listener in `src/instrumentation.ts`, which
+  never changes Node.js default termination behaviour), and worker
   start failures.
 - Critical payment failures additionally raise a `payment-alert`:
   `WORKER_FAILURE` (sweep threw), `WEBHOOK_FAILURE` (receive failure,

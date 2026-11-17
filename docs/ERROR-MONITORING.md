@@ -14,7 +14,7 @@ route handler. A Sentry transport can be added later behind the same
 | Source | How | What is reported |
 | --- | --- | --- |
 | Any route wrapped in `handleRoute` (`src/lib/api.ts`) | `captureError` on unexpected throws | Sanitised error name/message, operation `api-route`, request id |
-| Process-level failures (`src/instrumentation.ts`) | `unhandledRejection` / `uncaughtException` handlers | Same, operation `process-unhandled-rejection` / `process-uncaught-exception` |
+| Process-level failures (`src/instrumentation.ts`) | `uncaughtExceptionMonitor` listener (observe-only) | Same, operation `process-uncaught-exception` |
 | Worker start failure (`src/instrumentation.ts`) | `captureError` | Operation `payment-maintenance-worker-start` |
 | Worker sweep failure (`payment-maintenance-worker.service.ts`) | `WORKER_FAILURE` alert | Code `SWEEP_FAILED` |
 | Webhook receive failure (`src/app/api/webhooks/safepay/route.ts`) | `WEBHOOK_FAILURE` alert | `PERSISTENCE_UNAVAILABLE`, `BUSY`, `QUARANTINED`, `CONFLICT` (+ event id) |
@@ -85,10 +85,18 @@ send is logged once as `type:"payment-alert-delivery-failed"`.
 - **Persistently failing worker:** each failed sweep alerts, but the
   per-kind+code throttle (default 15 min) bounds email volume; the heartbeat
   (`GET /api/health`) still reports the worker as `failing`.
-- **Uncaught exception:** captured, then the process exits with code 1
-  (the Node.js default) — the process is in an unknown state, so swallowing
-  the exception would be worse. Unhandled rejections are captured without
-  exiting, matching previous behaviour.
+- **Uncaught exception:** captured through `uncaughtExceptionMonitor` and
+  the process exits with code 1 under Node.js default behaviour. The monitor
+  only observes — it does not swallow, recover from, or change the exit
+  behaviour of the exception, and no explicit `process.exit()` call exists.
+  An unhandled promise rejection escalates to an uncaught exception under
+  Node's default `--unhandled-rejections=throw` mode, so it is captured by
+  the same monitor and the process still exits non-zero. Deliberately NOT
+  used: a `process.on("unhandledRejection", …)` listener would suppress
+  that escalation and let the app keep running in an unsafe state, and a
+  `process.on("uncaughtException", …)` listener would replace the default
+  termination behaviour. Verified by child-process tests in
+  `tests/unit/process-error-monitoring.test.ts` (see Tests below).
 
 ## Tests
 
@@ -100,6 +108,11 @@ send is logged once as `type:"payment-alert-delivery-failed"`.
   generic, auth errors not captured), worker `WORKER_FAILURE` alert, and the
   runner alert decisions (`alertOnBlockedInboxOutcomes`,
   `alertOnRefundReconciliationOutcomes`, `alertOnProviderFetchFailures`).
+- `tests/unit/process-error-monitoring.test.ts` — child-process tests that
+  run the real `src/instrumentation.ts` under plain Node.js (not Vitest):
+  an unhandled rejection is captured and the process still exits 1, and an
+  uncaught synchronous exception is captured and still terminates the
+  process. The harness is `tests/helpers/process-error-harness.ts`.
 - `tests/unit/webhook-route-alerts.test.ts` — webhook route alerts for
   receive failures, quarantined/conflicted events, blocked deliveries, and
   the no-alert cases (stored, duplicate, invalid input).
