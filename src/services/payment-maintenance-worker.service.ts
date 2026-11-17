@@ -1,5 +1,12 @@
 import "server-only";
 import { createPaymentMaintenanceRunner, type MaintenanceAction, type MaintenanceRunResult } from "./payment-maintenance.service";
+import {
+  recordSweepFailed,
+  recordSweepStarted,
+  recordSweepSucceeded,
+  recordWorkerStarted,
+  recordWorkerStopped,
+} from "./worker-heartbeat";
 
 // In-process background worker that executes the SAME bounded maintenance actions as
 // the admin maintenance endpoint — reservation expiry, webhook-inbox processing,
@@ -48,6 +55,7 @@ export function createPaymentMaintenanceWorker(runner: {
   async function sweep(): Promise<void> {
     if (running || suspended) return;
     running = true;
+    recordSweepStarted();
     try {
       for (const step of SWEEP_PLAN) {
         if (suspended) break;
@@ -71,8 +79,11 @@ export function createPaymentMaintenanceWorker(runner: {
           if (settled > 0) log(`[payments-worker] reconciliation considered=${result.considered} settled=${settled}`);
         }
       }
+      recordSweepSucceeded();
    } catch {
   // Never log secrets, provider payloads or customer information.
+  // The heartbeat records a generic code only — no error text.
+  recordSweepFailed("SWEEP_FAILED");
   log("[payments-worker] sweep failed; retrying next sweep");
 } finally {
   running = false;
@@ -82,6 +93,7 @@ export function createPaymentMaintenanceWorker(runner: {
   return {
     start(): void {
       if (timer) return;
+      recordWorkerStarted();
       timer = setInterval(() => { void sweep(); }, intervalMs);
       // Do not hold the event loop open for maintenance work.
       timer.unref?.();
@@ -89,6 +101,7 @@ export function createPaymentMaintenanceWorker(runner: {
     },
     stop(): void {
       suspended = true;
+      recordWorkerStopped();
       if (timer) clearInterval(timer);
       timer = undefined;
     },

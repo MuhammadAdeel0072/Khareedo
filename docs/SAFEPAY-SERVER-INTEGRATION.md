@@ -325,6 +325,11 @@ additions close that gap without weakening any check:
    webhook-inbox processing, reconciliation sweep) run every ~60s in-process, single-flight,
    unref'd timer, batches 10/10/5. Opt out with `PAYMENT_MAINTENANCE_WORKER=off` (serverless
    deploys should schedule `POST /api/admin/payments/maintenance` externally instead).
+   The worker records an in-process heartbeat (`src/services/worker-heartbeat.ts`:
+   start time, last success/failure, consecutive failures, sweep counts; stale
+   after 3 minutes without a successful sweep), reported by the public
+   `GET /api/health` endpoint (see README, "Operations: health and worker
+   heartbeat"). The heartbeat is per-process and in-memory.
    The admin endpoint gained a scoped `verify_order_payment` action (admin session mandatory,
    optional `x-khd-maintenance-token`, rate-limited) — a re-check, never a manual status override.
 4. **Admin diagnostics** (read-only): the admin order detail page shows the managed payment's
