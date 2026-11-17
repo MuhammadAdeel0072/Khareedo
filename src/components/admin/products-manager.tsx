@@ -192,7 +192,7 @@ export function ProductsManager({
                   )}
                 </td>
                 <td className="px-4 py-3">
-                  <span className={p.stock === 0 ? "font-bold text-red-600" : p.stock <= 5 ? "font-semibold text-amber-600" : ""}>
+                  <span className={p.stock === 0 ? "font-bold text-destructive" : p.stock <= 5 ? "font-semibold text-warning" : ""}>
                     {p.stock}
                   </span>
                 </td>
@@ -250,7 +250,7 @@ export function ProductsManager({
                 <Badge variant="outline" className={STATUS_BADGE_CLASSES[p.status] ?? ""}>
                   {p.status}
                 </Badge>
-                <span className={`text-xs font-semibold ${p.stock === 0 ? "text-red-600" : p.stock <= 5 ? "text-amber-600" : "text-muted-foreground"}`}>
+                <span className={`text-xs font-semibold ${p.stock === 0 ? "text-destructive" : p.stock <= 5 ? "text-warning" : "text-muted-foreground"}`}>
                   Stock: {p.stock}
                 </span>
               </div>

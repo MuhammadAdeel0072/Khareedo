@@ -6,7 +6,7 @@ export default function SafepayCancelPage() {
   return (
     <main className="container-khd max-w-2xl py-16">
       <section
-        className="rounded-xl border border-amber-200 bg-amber-50 p-6 text-center text-amber-950 sm:p-8"
+        className="rounded-xl border border-warning/30 bg-warning/10 p-6 text-center text-warning-dark sm:p-8"
         aria-live="polite"
       >
         <h1 className="text-2xl font-bold">Payment checkout cancelled</h1>

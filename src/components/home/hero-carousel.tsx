@@ -6,7 +6,7 @@ import Autoplay from "embla-carousel-autoplay";
 import { BannerImage } from "@/components/home/banner-image";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
-import { ArrowRight, ChevronLeft, ChevronRight } from "lucide-react";
+import { ArrowRight, ChevronLeft, ChevronRight, Pause, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -23,6 +23,7 @@ export function HeroCarousel({ banners }: { banners: HeroBanner[] }) {
     Autoplay({ delay: 6000, stopOnInteraction: false, stopOnMouseEnter: true }),
   ]);
   const [selected, setSelected] = useState(0);
+  const [autoplayOn, setAutoplayOn] = useState(true);
 
   const onSelect = useCallback(() => {
     if (emblaApi) setSelected(emblaApi.selectedScrollSnap());
@@ -32,6 +33,36 @@ export function HeroCarousel({ banners }: { banners: HeroBanner[] }) {
     if (!emblaApi) return;
     emblaApi.on("select", onSelect);
   }, [emblaApi, onSelect]);
+
+  // Respect reduced-motion: never autoplay for users who asked for less motion.
+  // The button state follows the carousel's own autoplay events, so the effect
+  // itself never calls setState (react-hooks/set-state-in-effect).
+  useEffect(() => {
+    if (!emblaApi) return;
+    const onPlay = () => setAutoplayOn(true);
+    const onStop = () => setAutoplayOn(false);
+    emblaApi.on("autoplay:play", onPlay);
+    emblaApi.on("autoplay:stop", onStop);
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      emblaApi.plugins()?.autoplay?.stop();
+    }
+    return () => {
+      emblaApi.off("autoplay:play", onPlay);
+      emblaApi.off("autoplay:stop", onStop);
+    };
+  }, [emblaApi]);
+
+  const toggleAutoplay = useCallback(() => {
+    const autoplay = emblaApi?.plugins()?.autoplay;
+    if (!autoplay) return;
+    if (autoplay.isPlaying()) {
+      autoplay.stop();
+      setAutoplayOn(false);
+    } else {
+      autoplay.play();
+      setAutoplayOn(true);
+    }
+  }, [emblaApi]);
 
   if (banners.length === 0) return null;
 
@@ -92,13 +123,22 @@ export function HeroCarousel({ banners }: { banners: HeroBanner[] }) {
           >
             <ChevronRight className="h-5 w-5" />
           </button>
-          <div className="absolute bottom-4 left-1/2 flex -translate-x-1/2 gap-1.5" role="tablist" aria-label="Banner slides">
+          <button
+            type="button"
+            onClick={toggleAutoplay}
+            aria-pressed={autoplayOn}
+            aria-label={autoplayOn ? "Pause banner rotation" : "Resume banner rotation"}
+            className="absolute bottom-4 right-4 flex h-9 w-9 items-center justify-center rounded-full bg-background/90 shadow-md transition hover:bg-background"
+          >
+            {autoplayOn ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+          </button>
+          {/* Dots are plain navigation buttons, not tabs (there are no tab panels). */}
+          <div className="absolute bottom-4 left-1/2 flex -translate-x-1/2 gap-1.5" aria-label="Banner slides">
             {banners.map((b, i) => (
               <button
                 key={b.id}
                 type="button"
-                role="tab"
-                aria-selected={selected === i}
+                aria-current={selected === i}
                 aria-label={`Go to banner ${i + 1}`}
                 onClick={() => emblaApi?.scrollTo(i)}
                 className={cn(

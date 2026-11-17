@@ -49,7 +49,7 @@ export default async function OrderDetailPage({
 
       {/* Status tracker */}
       {cancelled ? (
-        <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+        <div className="mb-4 rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
           This order was cancelled. Any authorised refunds follow our store policy — contact us if
           you have questions.
         </div>

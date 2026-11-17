@@ -337,7 +337,7 @@ export function BannersManager({ initial }: { initial: AdminBanner[] }) {
                       {b.subtitle && <p className="truncate text-xs text-muted-foreground">{b.subtitle}</p>}
                       <p className="mt-1 truncate text-xs text-muted-foreground">→ {b.linkUrl ?? "no link"}</p>
                       <div className="mt-2 flex items-center gap-2">
-                        <span className={cn("rounded-full px-2 py-0.5 text-[10px] font-bold", b.isActive ? "bg-emerald-50 text-emerald-700" : "bg-muted text-muted-foreground")}>
+                        <span className={cn("rounded-full px-2 py-0.5 text-[10px] font-bold", b.isActive ? "bg-brand-50 text-primary" : "bg-muted text-muted-foreground")}>
                           {b.isActive ? "Active" : "Hidden"}
                         </span>
                         <span className="text-[10px] text-muted-foreground">sort {b.sortOrder}</span>
@@ -531,7 +531,7 @@ export function BannersManager({ initial }: { initial: AdminBanner[] }) {
                       <span
                         className={cn(
                           "rounded-full px-2.5 py-1 text-[11px] font-semibold",
-                          looksPersistent(previewUrl) ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"
+                          looksPersistent(previewUrl) ? "bg-brand-50 text-primary" : "bg-warning/10 text-warning"
                         )}
                       >
                         {looksPersistent(previewUrl) ? "Stored in your media library" : "External URL — can break if the host removes it"}

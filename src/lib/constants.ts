@@ -61,17 +61,20 @@ export type CouponType = (typeof COUPON_TYPES)[number];
 export const BANNER_PLACEMENTS = ["HERO", "SIDE", "STRIP"] as const;
 export type BannerPlacement = (typeof BANNER_PLACEMENTS)[number];
 
+// Order/status badges use four semantic tones only: warning (awaiting action),
+// brand tint (in progress), solid brand (completed), destructive (failed /
+// cancelled) and muted (terminal-neutral). No per-status rainbow hues.
 export const STATUS_BADGE_CLASSES: Record<string, string> = {
-  PENDING: "bg-amber-50 text-amber-700 border-amber-200",
-  CONFIRMED: "bg-sky-50 text-sky-700 border-sky-200",
-  PROCESSING: "bg-indigo-50 text-indigo-700 border-indigo-200",
-  SHIPPED: "bg-purple-50 text-purple-700 border-purple-200",
-  DELIVERED: "bg-emerald-50 text-emerald-700 border-emerald-200",
-  CANCELLED: "bg-red-50 text-red-700 border-red-200",
-  PAID: "bg-emerald-50 text-emerald-700 border-emerald-200",
-  FAILED: "bg-red-50 text-red-700 border-red-200",
-  REFUNDED: "bg-gray-100 text-gray-700 border-gray-200",
-  DRAFT: "bg-gray-100 text-gray-700 border-gray-200",
-  PUBLISHED: "bg-emerald-50 text-emerald-700 border-emerald-200",
-  ARCHIVED: "bg-gray-100 text-gray-500 border-gray-200",
+  PENDING: "bg-warning/10 text-warning-dark border-warning/30",
+  CONFIRMED: "bg-brand-50 text-primary border-primary/20",
+  PROCESSING: "bg-brand-50 text-primary border-primary/20",
+  SHIPPED: "bg-brand-50 text-primary border-primary/20",
+  DELIVERED: "bg-primary text-primary-foreground border-transparent",
+  CANCELLED: "bg-destructive/10 text-destructive border-destructive/30",
+  PAID: "bg-primary text-primary-foreground border-transparent",
+  FAILED: "bg-destructive/10 text-destructive border-destructive/30",
+  REFUNDED: "bg-muted text-muted-foreground border-border",
+  DRAFT: "bg-muted text-muted-foreground border-border",
+  PUBLISHED: "bg-primary text-primary-foreground border-transparent",
+  ARCHIVED: "bg-muted text-muted-foreground border-border",
 };

@@ -102,11 +102,11 @@ export function ImportProductsDialog({
           {result && (
             <div className="rounded-lg border bg-muted/40 p-3 text-sm" role="status">
               <p className="font-semibold">
-                <span className="text-emerald-700">{result.created} created</span>
+                <span className="text-primary">{result.created} created</span>
                 <span className="mx-1.5 text-muted-foreground">·</span>
-                <span className="text-amber-600">{result.skipped} skipped</span>
+                <span className="text-warning">{result.skipped} skipped</span>
                 <span className="mx-1.5 text-muted-foreground">·</span>
-                <span className="text-red-600">{result.failed} failed</span>
+                <span className="text-destructive">{result.failed} failed</span>
               </p>
               {result.errors.length > 0 && (
                 <ul className="mt-2 max-h-40 list-disc space-y-1 overflow-y-auto pl-4 text-xs text-muted-foreground">

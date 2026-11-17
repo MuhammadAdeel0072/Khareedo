@@ -157,7 +157,7 @@ export function CategoriesManager({ initial }: { initial: AdminCategory[] }) {
           </div>
           <span
             className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
-              c.isActive ? "bg-emerald-50 text-emerald-700" : "bg-muted text-muted-foreground"
+              c.isActive ? "bg-brand-50 text-primary" : "bg-muted text-muted-foreground"
             }`}
           >
             {c.isActive ? "Active" : "Hidden"}

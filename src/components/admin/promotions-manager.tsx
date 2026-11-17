@@ -163,7 +163,7 @@ export function PromotionsManager({ initial }: { initial: AdminPromotion[] }) {
                 {p.endsAt ? ` until ${new Date(p.endsAt).toLocaleDateString("en-GB")}` : ""}
                 {!p.startsAt && !p.endsAt && "always"}
               </div>
-              <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${p.isActive ? "bg-emerald-50 text-emerald-700" : "bg-muted text-muted-foreground"}`}>
+              <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${p.isActive ? "bg-brand-50 text-primary" : "bg-muted text-muted-foreground"}`}>
                 {p.isActive ? "Active" : "Inactive"}
               </span>
               <div className="flex gap-1">

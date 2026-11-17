@@ -3,6 +3,7 @@ import Link from "next/link";
 import {
   ArrowRight,
   ArrowUpRight,
+  Check,
   DollarSign,
   Package,
   ShoppingCart,
@@ -78,21 +79,21 @@ export default async function AdminDashboardPage() {
         />
         <StatCard
           icon={<Users className="h-5 w-5" />}
-          tint="bg-sky-50 text-sky-600"
+          tint="bg-brand-50 text-primary"
           label="Total Customers"
           value={stats.totalCustomers.toLocaleString()}
           sub="registered accounts"
         />
         <StatCard
           icon={<Package className="h-5 w-5" />}
-          tint="bg-amber-50 text-amber-600"
+          tint="bg-warning/10 text-warning"
           label="Total Products"
           value={stats.totalProducts.toLocaleString()}
           sub={`${stats.lowStockCount} low in stock`}
         />
         <StatCard
           icon={<DollarSign className="h-5 w-5" />}
-          tint="bg-emerald-50 text-emerald-600"
+          tint="bg-brand-50 text-primary"
           label="Total Revenue"
           value={formatPKR(stats.totalRevenue)}
           sub={`${formatPKR(stats.revenueThisMonth)} this month`}
@@ -225,7 +226,9 @@ export default async function AdminDashboardPage() {
           </CardHeader>
           <CardContent>
             {lowStock.length === 0 ? (
-              <p className="py-6 text-center text-sm text-muted-foreground">All products are well stocked ✓</p>
+              <p className="flex items-center justify-center gap-1.5 py-6 text-center text-sm text-muted-foreground">
+                <Check className="h-4 w-4 text-primary" aria-hidden="true" /> All products are well stocked
+              </p>
             ) : (
               <ul className="space-y-3">
                 {lowStock.map((p) => (
@@ -235,7 +238,7 @@ export default async function AdminDashboardPage() {
                     </span>
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-medium">{p.name}</p>
-                      <p className="text-xs font-semibold text-red-600">
+                      <p className="text-xs font-semibold text-destructive">
                         {p.quantity === 0 ? "Out of stock" : `Only ${p.quantity} left`}
                       </p>
                     </div>
@@ -290,7 +293,7 @@ export default async function AdminDashboardPage() {
                 {stats.ordersThisMonth}
                 <span className="text-xs font-medium text-muted-foreground">orders</span>
                 {stats.ordersLastMonth > 0 && (
-                  <span className="ml-1 flex items-center gap-0.5 text-xs font-bold text-emerald-600">
+                  <span className="ml-1 flex items-center gap-0.5 text-xs font-bold text-primary">
                     <ArrowUpRight className="h-3 w-3" />
                     {Math.round(((stats.ordersThisMonth - stats.ordersLastMonth) / stats.ordersLastMonth) * 100)}%
                   </span>
@@ -303,7 +306,7 @@ export default async function AdminDashboardPage() {
               <p className="text-xs text-muted-foreground">revenue this month</p>
             </div>
             <div>
-              <p className="text-sm font-bold text-amber-600">{pendingOrders} pending</p>
+              <p className="text-sm font-bold text-warning">{pendingOrders} pending</p>
               <p className="text-xs text-muted-foreground">orders awaiting confirmation</p>
             </div>
           </CardContent>

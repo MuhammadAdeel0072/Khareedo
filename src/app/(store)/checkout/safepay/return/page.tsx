@@ -174,17 +174,17 @@ export default async function SafepayReturnPage({
     success: {
       title: "Payment verified",
       message: `Payment for order ${result.kind === "success" ? result.reference : ""} has been confirmed.`,
-      tone: "border-green-200 bg-green-50 text-green-900",
+      tone: "border-primary/20 bg-brand-50 text-primary",
     },
     pending: {
       title: "Payment verification pending",
       message: `Order ${result.kind === "pending" ? result.reference : ""} is awaiting secure server-side payment verification. This page is not proof of payment. Verification with Safepay runs automatically (or retry this page in a minute) — please do not start another payment attempt.`,
-      tone: "border-amber-200 bg-amber-50 text-amber-950",
+      tone: "border-warning/30 bg-warning/10 text-warning-dark",
     },
     failure: {
       title: "Payment not completed",
       message: `The payment for order ${result.kind === "failure" ? result.reference : ""} is recorded as failed. The order has not been confirmed.`,
-      tone: "border-red-200 bg-red-50 text-red-900",
+      tone: "border-destructive/30 bg-destructive/10 text-destructive",
     },
     invalid: {
       title: "Return could not be verified",

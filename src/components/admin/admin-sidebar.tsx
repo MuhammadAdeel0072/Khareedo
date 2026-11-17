@@ -111,7 +111,7 @@ export function AdminSidebar({ pendingOrders }: { pendingOrders: number }) {
               <item.icon className="h-4.5 w-4.5 shrink-0" aria-hidden="true" />
               <span className="flex-1">{item.label}</span>
               {item.href === "/admin/orders" && pendingOrders > 0 && (
-                <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold">
+                <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-destructive/100 px-1 text-[10px] font-bold">
                   {pendingOrders}
                 </span>
               )}

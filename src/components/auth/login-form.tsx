@@ -14,7 +14,13 @@ import { WhatsAppIcon } from "@/components/layout/whatsapp-icon";
 import { GoogleSignInButton } from "@/components/auth/google-sign-in-button";
 import { safeCallbackUrl } from "@/lib/auth-client";
 
-export function LoginForm({ googleEnabled }: { googleEnabled: boolean }) {
+export function LoginForm({
+  googleEnabled,
+  whatsappNumber,
+}: {
+  googleEnabled: boolean;
+  whatsappNumber: string;
+}) {
   const params = useSearchParams();
   const callbackUrl = safeCallbackUrl(params.get("callbackUrl"));
   const checkoutRequired = params.get("reason") === "checkout";
@@ -144,10 +150,10 @@ export function LoginForm({ googleEnabled }: { googleEnabled: boolean }) {
       <p className="mt-4 text-center text-xs text-muted-foreground">
         Need assistance? Message us on{" "}
         <a
-          href="https://wa.me/923001234567"
+          href={`https://wa.me/${whatsappNumber.replace(/\D/g, "")}`}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center gap-0.5 font-medium text-[#128C4B] hover:underline"
+          className="inline-flex items-center gap-0.5 font-medium text-whatsapp-dark hover:underline"
         >
           <WhatsAppIcon className="h-3 w-3" /> WhatsApp
         </a>

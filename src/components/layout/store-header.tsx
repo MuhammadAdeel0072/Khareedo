@@ -192,14 +192,14 @@ function CategoryNav({ categories }: { categories: CategoryNode[] }) {
               </li>
             ))}
             <li className="ml-auto">
+              {/* "Lowest Price" is honest: it sorts by price ascending. There is no
+                  discount-only filter (comparePrice vs price needs a schema change),
+                  so this is not labelled "Sale". */}
               <Link
                 href="/products?sort=price-asc"
-                className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-destructive transition-colors hover:bg-destructive/10"
+                className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-primary transition-colors hover:bg-accent hover:text-accent-foreground"
               >
-                Sale
-                <span className="rounded bg-destructive px-1.5 py-0.5 text-[10px] font-bold uppercase text-white">
-                  Hot
-                </span>
+                Lowest Price
               </Link>
             </li>
           </ul>
@@ -230,9 +230,9 @@ function CategoryNav({ categories }: { categories: CategoryNode[] }) {
           <li>
             <Link
               href="/products?sort=price-asc"
-              className="block whitespace-nowrap rounded-full border border-destructive/30 bg-destructive/5 px-4 py-2 text-destructive"
+              className="block whitespace-nowrap rounded-full border border-primary/30 bg-brand-50 px-4 py-2 text-primary"
             >
-              Sale
+              Lowest Price
             </Link>
           </li>
         </ul>

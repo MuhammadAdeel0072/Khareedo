@@ -47,7 +47,7 @@ export default async function OrderPage({
       <div className="flex flex-col items-center text-center">
         <span
           className={`flex h-16 w-16 items-center justify-center rounded-full ${
-            isConfirmed ? "bg-brand-50 text-primary" : isPaymentPending ? "bg-amber-50 text-amber-700" : "bg-red-50 text-destructive"
+            isConfirmed ? "bg-brand-50 text-primary" : isPaymentPending ? "bg-warning/10 text-warning" : "bg-destructive/10 text-destructive"
           }`}
         >
           {isConfirmed ? (
@@ -221,7 +221,7 @@ export default async function OrderPage({
           )}`}
           target="_blank"
           rel="noopener noreferrer"
-          className="flex h-10 w-full items-center justify-center gap-2 rounded-md border border-[#25D366]/40 px-4 text-sm font-medium text-[#128C4B] transition hover:bg-[#25D366]/10 sm:w-auto"
+          className="flex h-10 w-full items-center justify-center gap-2 rounded-md border border-whatsapp/40 px-4 text-sm font-medium text-whatsapp-dark transition hover:bg-whatsapp/10 sm:w-auto"
         >
           <WhatsAppIcon className="h-4 w-4" />
           Ask about this order

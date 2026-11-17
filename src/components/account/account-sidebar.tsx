@@ -2,12 +2,12 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Heart, MapPin, Package, User } from "lucide-react";
+import { Heart, LayoutDashboard, MapPin, Package, User } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { initials } from "@/lib/utils";
+import { cn, initials } from "@/lib/utils";
 
 const NAV = [
-  { href: "/account", label: "Overview", icon: User },
+  { href: "/account", label: "Overview", icon: LayoutDashboard },
   { href: "/account/orders", label: "My Orders", icon: Package },
   { href: "/account/wishlist", label: "Wishlist", icon: Heart },
   { href: "/account/addresses", label: "Addresses", icon: MapPin },
@@ -37,16 +37,28 @@ export function AccountSidebar({
         </div>
       </div>
       <nav aria-label="Account navigation" className="mt-3 space-y-1">
-        {NAV.map((item) => (
-          <Link
-            key={item.href}
-            href={item.href}
-            className="flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-          >
-            <item.icon className="h-4 w-4" aria-hidden="true" />
-            {item.label}
-          </Link>
-        ))}
+        {NAV.map((item) => {
+          const active =
+            item.href === "/account"
+              ? pathname === "/account"
+              : pathname === item.href || pathname.startsWith(`${item.href}/`);
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              aria-current={active ? "page" : undefined}
+              className={cn(
+                "flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors",
+                active
+                  ? "bg-accent font-semibold text-accent-foreground"
+                  : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+              )}
+            >
+              <item.icon className="h-4 w-4" aria-hidden="true" />
+              {item.label}
+            </Link>
+          );
+        })}
       </nav>
     </aside>
   );

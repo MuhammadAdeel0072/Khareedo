@@ -49,6 +49,13 @@
   --color-brand-50: var(--brand-50);
   --color-brand-100: var(--brand-100);
   --color-cream: var(--cream);
+  /* Semantic tokens — one source of truth for status colours. Success uses the
+     brand green (primary / brand-50); danger uses the destructive token. */
+  --color-whatsapp: var(--whatsapp);
+  --color-whatsapp-dark: var(--whatsapp-dark);
+  --color-warning: var(--warning);
+  --color-warning-dark: var(--warning-dark);
+  --color-star: var(--star);
 }
 
 :root {
@@ -61,6 +68,14 @@
   --brand-50: oklch(0.968 0.02 155);      /* tinted surfaces       ≈ #EFF7F1 */
   --brand-100: oklch(0.93 0.045 155);     /* soft badges           ≈ #D9EBDD */
   --cream: oklch(0.96 0.017 85);          /* hero cream            ≈ #F7F3EA */
+
+  /* Semantic colours — WhatsApp green and warning amber, as tokens so no
+     component hard-codes hex or Tailwind palette values. */
+  --whatsapp: oklch(0.73 0.16 156);       /* WhatsApp green        ≈ #25D366 */
+  --whatsapp-dark: oklch(0.55 0.13 157);  /* WhatsApp dark green   ≈ #128C4B */
+  --warning: oklch(0.66 0.15 78);         /* warning amber         ≈ #D97706 */
+  --warning-dark: oklch(0.45 0.14 78);    /* warning text on tints ≈ #92400E */
+  --star: oklch(0.80 0.15 85);            /* rating stars          ≈ #FBBF24 */
 
   --background: oklch(1 0 0);
   --foreground: oklch(0.2 0.012 150);

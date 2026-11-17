@@ -116,13 +116,13 @@ export function InventoryManager({ initial }: { initial: InventoryRow[] }) {
                 <td className="px-4 py-3">
                   <p className="font-medium">{row.productName}</p>
                   {row.isLow && !row.isOut && (
-                    <p className="text-xs font-semibold text-amber-600">Low stock — {row.quantity} left</p>
+                    <p className="text-xs font-semibold text-warning">Low stock — {row.quantity} left</p>
                   )}
-                  {row.isOut && <p className="text-xs font-semibold text-red-600">Out of stock</p>}
+                  {row.isOut && <p className="text-xs font-semibold text-destructive">Out of stock</p>}
                 </td>
                 <td className="px-4 py-3 text-muted-foreground">{row.category}</td>
                 <td className="px-4 py-3">
-                  <span className={cn("font-bold", row.isOut ? "text-red-600" : row.isLow ? "text-amber-600" : "")}>
+                  <span className={cn("font-bold", row.isOut ? "text-destructive" : row.isLow ? "text-warning" : "")}>
                     {row.quantity}
                   </span>
                   <span className="ml-1 text-xs text-muted-foreground">/ low at {row.lowStockThreshold}</span>

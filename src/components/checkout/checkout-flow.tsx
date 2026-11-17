@@ -426,7 +426,11 @@ export function CheckoutFlow({
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_400px]">
       <div className="order-2 min-w-0 lg:order-1 lg:col-start-1 lg:row-start-1">
-        {/* Stepper */}
+        {/* Stepper — step labels are hidden below sm, so name the current step for
+            small screens instead of showing bare numbers. */}
+        <p className="mb-3 text-center text-sm font-medium text-muted-foreground sm:hidden" aria-live="polite">
+          Step {step} of 3: <span className="font-semibold text-foreground">{STEPS[step]}</span>
+        </p>
         <ol className="mb-6 flex items-center justify-center gap-0 sm:gap-2" aria-label="Checkout progress">
           {STEPS.slice(1).map((label, i) => {
             const n = i + 1;
@@ -1009,7 +1013,7 @@ export function CheckoutFlow({
         <WhatsAppSupportLink
           number={config.whatsappNumber}
           storeName={config.storeName}
-          className="mt-3 flex min-h-10 items-center justify-center gap-2 rounded-md border border-[#25D366]/40 px-3 text-sm font-medium text-[#128C4B] transition-colors hover:bg-[#25D366]/10"
+          className="mt-3 flex min-h-10 items-center justify-center gap-2 rounded-md border border-whatsapp/40 px-3 text-sm font-medium text-whatsapp-dark transition-colors hover:bg-whatsapp/10"
         />
       </div>
     </div>
