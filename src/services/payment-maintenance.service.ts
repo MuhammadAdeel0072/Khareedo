@@ -1,5 +1,6 @@
 ﻿import "server-only";
 import { db } from "@/lib/db";
+import { capturePaymentAlert } from "@/lib/error-monitoring";
 import { loadSafepayApiOnlyConfig, SafepayConfigurationError, type SafepayConfig } from "@/lib/safepay/config";
 import { createSafepayProvider } from "@/lib/safepay/provider";
 import { createSafepayReservationService } from "@/services/safepay-reservations.service";
@@ -67,6 +68,65 @@ function createPaymentStack(database: PaymentDatabase): PaymentStack | null {
   };
 }
 
+// --- Payment failure alerts ------------------------------------------------
+// Pure alert decisions, exported so they are unit-testable (same precedent as
+// the health endpoint's evaluateHealthStatus). Each helper emits at most one
+// throttled alert per sweep for the first failing item; the underlying
+// error-monitoring throttle also bounds repeat alerts across sweeps.
+
+export function alertOnBlockedInboxOutcomes(
+  outcomes: Array<{ eventId: string; result: string }>,
+): void {
+  const blocked = outcomes.filter((o) => o.result === "blocked");
+  if (blocked.length === 0) return;
+  capturePaymentAlert("WEBHOOK_FAILURE", {
+    operation: "process-webhook-inbox",
+    code: "INBOX_PROCESSING_BLOCKED",
+    count: blocked.length,
+    eventId: blocked[0].eventId,
+  });
+}
+
+export function alertOnRefundReconciliationOutcomes(
+  outcomes: Array<{ refundId: string; disposition: string; outcome?: string; code?: string }>,
+): void {
+  const failedSubmissions = outcomes.filter(
+    (o) => o.disposition === "submitted" && o.outcome === "failed",
+  );
+  if (failedSubmissions.length > 0) {
+    capturePaymentAlert("PAYMENT_FAILURE", {
+      operation: "reconcile-refunds",
+      code: failedSubmissions[0].code ?? "REFUND_SUBMISSION_FAILED",
+      count: failedSubmissions.length,
+    });
+  }
+  const providerFetchFailed = outcomes.filter(
+    (o) => o.disposition === "provider_fetch_failed",
+  );
+  if (providerFetchFailed.length > 0) {
+    capturePaymentAlert("RECONCILIATION_FAILURE", {
+      operation: "reconcile-refunds",
+      code: providerFetchFailed[0].code ?? "PROVIDER_FETCH_FAILED",
+      count: providerFetchFailed.length,
+    });
+  }
+}
+
+export function alertOnProviderFetchFailures(
+  outcomes: Array<{ paymentId?: string; orderId?: string; outcome: string; code?: string }>,
+  operation: "reconcile-due-payments" | "verify-order-payment",
+): void {
+  const fetchFailed = outcomes.filter((o) => o.outcome === "provider_fetch_failed");
+  if (fetchFailed.length === 0) return;
+  capturePaymentAlert("RECONCILIATION_FAILURE", {
+    operation,
+    code: fetchFailed[0].code ?? "PROVIDER_FETCH_FAILED",
+    count: fetchFailed.length,
+    ...(fetchFailed[0].paymentId ? { paymentId: fetchFailed[0].paymentId } : {}),
+    ...(fetchFailed[0].orderId ? { orderId: fetchFailed[0].orderId } : {}),
+  });
+}
+
 export function createPaymentMaintenanceRunner(injectedDatabase?: PaymentDatabase) {
   const database = injectedDatabase ?? (db as unknown as PaymentDatabase);
 
@@ -92,6 +152,7 @@ export function createPaymentMaintenanceRunner(injectedDatabase?: PaymentDatabas
           const processed = await stack.inbox.process(event.id);
           outcomes.push({ eventId: event.id, result: processed.kind });
         }
+        alertOnBlockedInboxOutcomes(outcomes);
         return { action, batch, considered: events.length, outcomes };
       }
 
@@ -124,6 +185,7 @@ export function createPaymentMaintenanceRunner(injectedDatabase?: PaymentDatabas
           environment: config.environment,
           merchantAccountRef: config.merchantAccountRef,
         }, batch);
+        alertOnRefundReconciliationOutcomes(result.outcomes);
         return { action, batch, ...result };
       }
 
@@ -344,6 +406,10 @@ export function createPaymentMaintenanceRunner(injectedDatabase?: PaymentDatabas
         });
         if (!payment) return { action, orderId, outcome: "skipped", code: "ORDER_NOT_FOUND" };
         const outcome = await stack.verification(config).verifyPaymentNow(payment.id);
+        alertOnProviderFetchFailures(
+          [{ paymentId: payment.id, orderId, outcome: outcome.kind, ...("code" in outcome ? { code: outcome.code } : {}) }],
+          "verify-order-payment",
+        );
         return { action, orderId, outcome: outcome.kind, ...("code" in outcome ? { code: outcome.code } : {}) };
       }
 
@@ -356,6 +422,7 @@ export function createPaymentMaintenanceRunner(injectedDatabase?: PaymentDatabas
         const outcome = await stack.verification(config).verifyPaymentNow(payment.id);
         outcomes.push({ paymentId: payment.id, outcome: outcome.kind, ...("code" in outcome ? { code: outcome.code } : {}) });
       }
+      alertOnProviderFetchFailures(outcomes, "reconcile-due-payments");
       return { action, batch, considered: due.length, outcomes };
     },
   };

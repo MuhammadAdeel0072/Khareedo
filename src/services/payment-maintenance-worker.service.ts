@@ -1,4 +1,5 @@
 import "server-only";
+import { capturePaymentAlert } from "@/lib/error-monitoring";
 import { createPaymentMaintenanceRunner, type MaintenanceAction, type MaintenanceRunResult } from "./payment-maintenance.service";
 import {
   recordSweepFailed,
@@ -85,6 +86,10 @@ export function createPaymentMaintenanceWorker(runner: {
   // The heartbeat records a generic code only — no error text.
   recordSweepFailed("SWEEP_FAILED");
   log("[payments-worker] sweep failed; retrying next sweep");
+  capturePaymentAlert("WORKER_FAILURE", {
+    operation: "payment-maintenance-sweep",
+    code: "SWEEP_FAILED",
+  });
 } finally {
   running = false;
 }

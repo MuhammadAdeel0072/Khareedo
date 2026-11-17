@@ -129,7 +129,7 @@ Legend: **Impl** = primary implementing file(s); **Verify** = how it is verified
 | NFR-06 | No duplicate orders | Idempotency key unique constraint |
 | NFR-07 | Order consistency | Single transaction: order + items + stock decrement |
 | NFR-08 | Backups | Supabase automated backups documented in deployment guide |
-| NFR-09 | Monitoring | Error logging hooks + dev.log in sandbox; Sentry boundary documented |
+| NFR-09 | Monitoring | Centralized error monitoring (`src/lib/error-monitoring.ts`): sanitised structured JSON logs for unexpected server errors (handleRoute, process handlers, worker start) and throttled email alerts for critical payment failures (worker, webhook, refund, reconciliation); see docs/ERROR-MONITORING.md. No vendor SDK; Sentry transport is a future step behind the same capture calls. |
 | NFR-10 | AuthN/AuthZ enforced | proxy + per-route + service-level checks |
 | NFR-11 | Customer data isolation | All customer queries scoped by `userId` from session (never from client) |
 | NFR-12 | Admin verification | `role=ADMIN` server-side; RLS `is_admin()` SQL in Supabase version |
