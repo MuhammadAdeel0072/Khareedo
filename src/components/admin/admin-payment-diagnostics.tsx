@@ -25,7 +25,7 @@ function minorToPkr(minor: string | null): string {
 
 function Bool({ value }: { value: boolean }) {
   return value
-    ? <span className="font-semibold text-green-700">Yes</span>
+    ? <span className="font-semibold text-primary">Yes</span>
     : <span className="text-muted-foreground">No</span>;
 }
 
@@ -84,7 +84,7 @@ export function AdminPaymentDiagnosticsPanel({ data }: { data: AdminPaymentDiagn
           <Badge variant="outline" className={STATUS_BADGE_CLASSES[latest?.status ?? ""] ?? ""}>
             {latest?.status ?? "—"}
           </Badge>
-          {verified && <Badge variant="outline" className="border-green-200 bg-green-50 text-green-800">verified</Badge>}
+          {verified && <Badge variant="outline" className="border-primary/20 bg-brand-50 text-green-800">verified</Badge>}
         </div>
       </div>
       <p className="mt-1 text-xs text-muted-foreground">

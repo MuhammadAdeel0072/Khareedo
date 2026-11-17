@@ -30,9 +30,9 @@ export function ExportButtons({
   return (
     <div className="flex flex-wrap gap-2" role="group" aria-label={`${type} exports`}>
       {formats.includes("xlsx") &&
-        link("xlsx", <FileSpreadsheet className="h-4 w-4 text-emerald-700" />, "Excel")}
+        link("xlsx", <FileSpreadsheet className="h-4 w-4 text-primary" />, "Excel")}
       {formats.includes("pdf") &&
-        link("pdf", <FileText className="h-4 w-4 text-red-600" />, "PDF")}
+        link("pdf", <FileText className="h-4 w-4 text-destructive" />, "PDF")}
     </div>
   );
 }

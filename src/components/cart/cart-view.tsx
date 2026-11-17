@@ -172,11 +172,11 @@ export function CartView({
                         Out of stock — remove to checkout
                       </p>
                     ) : item.quantity > item.stock ? (
-                      <p className="mt-1 text-xs font-medium text-amber-600">
+                      <p className="mt-1 text-xs font-medium text-warning">
                         Only {item.stock} available — please reduce quantity
                       </p>
                     ) : item.lowStock ? (
-                      <p className="mt-1 text-xs font-medium text-amber-600">
+                      <p className="mt-1 text-xs font-medium text-warning">
                         Hurry — only {item.stock} left
                       </p>
                     ) : null}
@@ -297,7 +297,7 @@ export function CartView({
             storeName={storeName}
             items={cart.items.map((i) => ({ name: i.name, quantity: i.quantity }))}
             subtotal={cart.subtotal}
-            className="flex h-10 w-full items-center justify-center gap-2 rounded-md border border-[#25D366]/40 text-sm font-medium text-[#128C4B] transition-colors hover:bg-[#25D366]/10"
+            className="flex h-10 w-full items-center justify-center gap-2 rounded-md border border-whatsapp/40 text-sm font-medium text-whatsapp-dark transition-colors hover:bg-whatsapp/10"
           />
           <p className="mt-2 text-center text-[11px] leading-4 text-muted-foreground">
             WhatsApp chat is an inquiry only — not a confirmed order.

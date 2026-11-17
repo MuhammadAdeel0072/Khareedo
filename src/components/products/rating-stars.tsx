@@ -26,9 +26,9 @@ export function RatingStars({
             className={cn(
               size === "sm" ? "h-3.5 w-3.5" : "h-4.5 w-4.5",
               i <= rounded
-                ? "fill-amber-400 text-amber-400"
+                ? "fill-star text-star"
                 : i - 0.5 === rounded
-                  ? "fill-amber-400/50 text-amber-400"
+                  ? "fill-star/50 text-star"
                   : "fill-muted text-muted-foreground/30"
             )}
           />

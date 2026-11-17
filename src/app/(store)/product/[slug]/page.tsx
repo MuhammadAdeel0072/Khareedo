@@ -141,7 +141,7 @@ export default async function ProductPage({ params }: PageProps) {
           </div>
 
           {product.stock > 0 && (
-            <p className={`mt-2 flex items-center gap-1.5 text-sm ${lowStock ? "font-medium text-amber-600" : "text-emerald-600"}`}>
+            <p className={`mt-2 flex items-center gap-1.5 text-sm ${lowStock ? "font-medium text-warning" : "text-primary"}`}>
               <PackageCheck className="h-4 w-4" aria-hidden="true" />
               {lowStock ? `Hurry — only ${product.stock} left in stock` : "In stock and ready to ship"}
             </p>
@@ -171,7 +171,7 @@ export default async function ProductPage({ params }: PageProps) {
             href={waHref}
             target="_blank"
             rel="noopener noreferrer"
-            className="mt-3 hidden h-11 w-full items-center justify-center gap-2 rounded-md border border-[#25D366]/40 text-sm font-medium text-[#128C4B] transition-colors hover:bg-[#25D366]/10 lg:flex"
+            className="mt-3 hidden h-11 w-full items-center justify-center gap-2 rounded-md border border-whatsapp/40 text-sm font-medium text-whatsapp-dark transition-colors hover:bg-whatsapp/10 lg:flex"
           >
             <WhatsAppIcon className="h-4 w-4" />
             Ask about this product on WhatsApp

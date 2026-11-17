@@ -78,7 +78,7 @@ export function ResendVerificationForm({
           />
         </div>
       )}
-      {message && <p className="text-sm text-emerald-700" role="status">{message}</p>}
+      {message && <p className="text-sm text-primary" role="status">{message}</p>}
       {error && <p className="text-sm text-destructive" role="alert">{error}</p>}
       <Button
         type="submit"

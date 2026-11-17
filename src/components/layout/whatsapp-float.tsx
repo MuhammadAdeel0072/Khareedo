@@ -33,14 +33,14 @@ export function WhatsAppFloat({
             target="_blank"
             rel="noopener noreferrer"
             aria-label="Chat with us on WhatsApp (inquiry only — not an order)"
-            className={`fixed bottom-[calc(6.5rem+env(safe-area-inset-bottom))] right-4 z-40 h-14 w-14 items-center justify-center rounded-full bg-[#25D366] text-white shadow-lg transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 lg:bottom-5 lg:right-5 ${
+            className={`fixed bottom-[calc(6.5rem+env(safe-area-inset-bottom))] right-4 z-40 h-14 w-14 items-center justify-center rounded-full bg-whatsapp text-white shadow-lg transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 lg:bottom-5 lg:right-5 ${
               hasInlineSupport ? "hidden lg:flex" : "flex"
             }`}
           >
             <WhatsAppIcon className="h-7 w-7" />
             <span className="absolute -right-0.5 -top-0.5 flex h-3.5 w-3.5">
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white opacity-60" />
-              <span className="relative inline-flex h-3.5 w-3.5 rounded-full border-2 border-white bg-[#25D366]" />
+              <span className="relative inline-flex h-3.5 w-3.5 rounded-full border-2 border-white bg-whatsapp" />
             </span>
           </a>
         </TooltipTrigger>

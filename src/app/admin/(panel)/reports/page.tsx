@@ -132,7 +132,7 @@ export default async function AdminReportsPage() {
                   {lowStock.map((p) => (
                     <tr key={p.productId}>
                       <td className="py-2.5 font-medium">{p.name}</td>
-                      <td className={`py-2.5 text-right font-bold ${p.quantity === 0 ? "text-red-600" : "text-amber-600"}`}>
+                      <td className={`py-2.5 text-right font-bold ${p.quantity === 0 ? "text-destructive" : "text-warning"}`}>
                         {p.quantity}
                       </td>
                       <td className="py-2.5 text-right">{formatPKR(p.price)}</td>

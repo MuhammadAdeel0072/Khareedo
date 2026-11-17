@@ -24,9 +24,9 @@ export default async function ContactPage() {
           href={waHref}
           target="_blank"
           rel="noopener noreferrer"
-          className="flex items-center gap-4 rounded-xl border p-5 transition hover:border-[#25D366]/50 hover:bg-[#25D366]/5 sm:col-span-2"
+          className="flex items-center gap-4 rounded-xl border p-5 transition hover:border-whatsapp/50 hover:bg-whatsapp/5 sm:col-span-2"
         >
-          <span className="flex h-12 w-12 items-center justify-center rounded-full bg-[#25D366] text-white">
+          <span className="flex h-12 w-12 items-center justify-center rounded-full bg-whatsapp text-white">
             <WhatsAppIcon className="h-6 w-6" />
           </span>
           <div>
