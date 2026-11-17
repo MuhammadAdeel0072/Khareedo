@@ -1,3 +1,0 @@
-Khareedo GitHub diagnostic test file.
-Created 2026-11-18 to test Contents write access on a temporary diagnostic branch.
-This file is temporary and will be deleted after verification.
