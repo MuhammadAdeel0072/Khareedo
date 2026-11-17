@@ -1,3 +1,0 @@
-Khareedo GitHub diagnostic test file 2.
-Created 2026-11-18 to test push_files (git/trees) with a non-workflow file.
-Temporary, will be deleted after verification.
