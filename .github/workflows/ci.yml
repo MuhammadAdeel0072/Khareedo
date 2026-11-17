@@ -1,0 +1,56 @@
+name: Khareedo CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate PostgreSQL Prisma client
+        run: npm run db:generate:postgres
+
+      - name: Generate SQLite Prisma client
+        run: npm run db:generate
+
+      - name: TypeScript check
+        run: npx tsc --noEmit
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: Database tests
+        run: npm run test:db
+        env:
+          DATABASE_URL: file:./ci-placeholder.sqlite
+          SUPABASE_POSTGRES_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+
+      - name: Production build
+        run: npm run build
+        env:
+          SUPABASE_POSTGRES_URL: postgresql://ci:ci@127.0.0.1:5432/ci

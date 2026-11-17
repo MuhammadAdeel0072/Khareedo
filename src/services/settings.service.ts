@@ -1,6 +1,6 @@
 ﻿// Typed store settings service â€” DB-driven configuration (FR-44, FR-51, FR-32).
 import { cache } from "react";
-import { Prisma } from "@prisma/client";
+import { Prisma } from "../../generated/postgres-client";
 import { revalidateTag, unstable_cache } from "next/cache";
 import { db } from "@/lib/db";
 
