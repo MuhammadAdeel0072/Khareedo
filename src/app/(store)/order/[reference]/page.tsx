@@ -1,6 +1,6 @@
 // Order confirmation + tracking (FR-25). Only shows success for real orders.
 import Link from "next/link";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import type { Metadata } from "next";
 import { CheckCircle2, MapPin, Package, CreditCard, MessageCircle } from "lucide-react";
 import { getOrderByReference } from "@/services/orders.service";
@@ -26,9 +26,11 @@ export default async function OrderPage({
   return withPerformanceTiming("page.order-confirmation", async () => {
   const { reference } = await params;
   const user = await getSessionUser();
+  // Order tracking requires authentication (PR-04, D-01).
+  if (!user) redirect(`/login?callbackUrl=${encodeURIComponent(`/order/${reference}`)}&reason=tracking`);
   // Order fetch and display settings are independent reads — one batch.
   const [order, settings] = await Promise.all([
-    getOrderByReference(reference, user?.id),
+    getOrderByReference(reference, user.id),
     getCachedSettings(),
   ]);
   if (!order) notFound();

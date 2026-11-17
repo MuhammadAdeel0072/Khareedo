@@ -8,8 +8,8 @@
 
 | # | Decision | Value |
 |---|----------|-------|
-| D-01 | Guest checkout | **Enabled** |
-| D-02 | Initial payment method | **Cash on Delivery (COD)**. Online payments deferred until a provider + credentials exist (FR-23/BR-10 boundary implemented, disabled) |
+| D-01 | Guest checkout | **Disabled — checkout requires sign-in (PR-04)** |
+| D-02 | Initial payment method | **Cash on Delivery (COD)**. Online payments deferred until a provider + credentials exist (FR-23/BR-10 boundary implemented, disabled). Bank transfer is **disabled and unsupported** (PR-04) |
 | D-03 | Delivery fee | Configurable **flat fee per delivery method** (Standard / Express), free-delivery threshold configurable |
 | D-04 | Gift wrapping | **One configurable charge per order**, optional, disclosed before confirmation |
 | D-05 | Promotions | **Store-managed** promotions, banners, featured products; third-party advertising deferred |
@@ -25,7 +25,7 @@
 
 | Actor | Capabilities | Enforcement |
 |-------|--------------|-------------|
-| Guest | Browse, search, filter, cart, promotions, WhatsApp inquiry, guest checkout | Public routes + server validation |
+| Guest | Browse, search, filter, cart, promotions, WhatsApp inquiry | Public routes + server validation |
 | Registered customer | Everything guest + profile, addresses, wishlist, order history/tracking | Session-protected routes + ownership checks in services |
 | Administrator | Products, categories, inventory, orders, promotions/banners/coupons, gift-wrap & store settings, dashboard & reports | `ADMIN` role checked in proxy (route guard), in every admin API route and in server services |
 | External systems | Supabase (DB/Auth/Storage), Google OAuth, WhatsApp, optional payment gateway | Integration boundaries behind typed service interfaces |
@@ -67,13 +67,13 @@ Legend: **Impl** = primary implementing file(s); **Verify** = how it is verified
 ### 3.4 Checkout & Orders
 | ID | Requirement | Impl | Verify |
 |----|-------------|------|--------|
-| FR-19 | Collect customer + delivery info | `/checkout` step 1 (guest inline or saved addresses) | E2E |
+| FR-19 | Collect customer + delivery info | `/checkout` step 1 (saved addresses or new address form; sign-in required, PR-04) | E2E |
 | FR-20 | Order summary before confirm | `/checkout` review step + summary sidebar | E2E |
 | FR-21 | Final amount server-calculated | `pricing.ts` (subtotal, discounts, delivery, gift-wrap, total) | UT/IT |
 | FR-22 | COD support | `paymentMethod=COD` + settings toggle | E2E |
 | FR-23 | Online payment boundary | `payments` table + disabled toggle + provider interface stub (no fake confirmation) | M |
 | FR-24 | Unique order reference | `generateOrderReference()` `KH` + date + random, unique index | UT |
-| FR-25 | Order confirmation + status | `/order/[reference]` | E2E |
+| FR-25 | Order confirmation + status | `/order/[reference]` (sign-in + ownership required, PR-04) | E2E |
 | FR-26 | Order history for customers | `/account/orders`, `/account/orders/[id]` | E2E |
 | FR-27 | No duplicate orders | unique `idempotencyKey` on `orders` + client-generated key per attempt | IT/E2E |
 
@@ -159,7 +159,7 @@ Legend: **Impl** = primary implementing file(s); **Verify** = how it is verified
 | ID | Rule | Enforcement point |
 |----|------|-------------------|
 | BR-01 | Guest browsing | public routes |
-| BR-02 | Guest checkout contact+delivery required | checkout zod schema |
+| BR-02 | Checkout requires sign-in; contact+delivery collected at checkout | checkout page auth guard + checkout zod schema |
 | BR-03 | Google sign-in | NextAuth Google provider |
 | BR-04 | Server uses current prices | `pricing.ts` / `checkout.service` |
 | BR-05 | Stock re-validated at submission | `checkout.service.placeOrder` |

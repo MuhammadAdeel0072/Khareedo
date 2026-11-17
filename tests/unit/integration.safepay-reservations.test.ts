@@ -420,9 +420,10 @@ describe("Reservation-aware close, expire, admin writers and fulfilment", () => 
     expect(await db.$transaction(tx => reserveCoupon(tx, f.coupon!.code, 1000))).toHaveProperty("error");
     expect(await db.coupon.findUniqueOrThrow({ where: { id: f.coupon!.id } })).toMatchObject({ usedCount: 0, reservedCount: 1 });
   });
-  it.each(["COD", "BANK_TRANSFER"] as const)("keeps %s checkout, cancellation and stock behavior alongside a Safepay hold", async method => {
+  it("keeps COD checkout, cancellation and stock behavior alongside a Safepay hold", async () => {
+    const method = "COD" as const;
     const f = await prepare({ coupon: true });
-    vi.spyOn(settingsService, "getSettings").mockResolvedValue({ ...settings, bank_transfer_enabled: true });
+    vi.spyOn(settingsService, "getSettings").mockResolvedValue(settings);
     vi.spyOn(cartService, "getCartDetails").mockResolvedValue({ id: "synthetic-mock-cart", subtotal: 1000, itemCount: 1, wrappedUnits: 0,
       items: [{ itemId: "synthetic", productId: f.product.id, name: f.product.name, slug: f.product.slug, price: 1000,
         comparePrice: null, image: null, quantity: 1, stock: 4, lowStock: true, outOfStock: false, lineTotal: 1000,

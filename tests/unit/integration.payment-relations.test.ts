@@ -16,7 +16,7 @@ import { db } from "@/lib/db";
 assertDisposableTestDatabase();
 
 const createdOrderIds: string[] = [];
-type PaymentMethod = "COD" | "BANK_TRANSFER";
+type PaymentMethod = "COD";
 type Pointer = "active" | "accepted" | "both";
 
 function orderData(paymentMethod: PaymentMethod = "COD") {
@@ -77,7 +77,8 @@ afterAll(async () => {
 });
 
 describe("automatic order IDs with payment ownership relations", () => {
-  it.each(["COD", "BANK_TRANSFER"] as const)("generates a cuid for a plain %s order", async (method) => {
+  it("generates a cuid for a plain COD order", async () => {
+    const method = "COD" as const;
     const data = orderData(method);
     expect(data).not.toHaveProperty("id");
     const order = await db.order.create({ data });
@@ -93,7 +94,8 @@ describe("automatic order IDs with payment ownership relations", () => {
     });
   });
 
-  it.each(["COD", "BANK_TRANSFER"] as const)("generates linked IDs for nested %s items and payment", async (method) => {
+  it("generates linked IDs for nested COD items and payment", async () => {
+    const method = "COD" as const;
     const order = await nestedOrder(method);
     expect(order.id).toMatch(/^c[a-z0-9]+$/);
     expect(order.items).toHaveLength(1);

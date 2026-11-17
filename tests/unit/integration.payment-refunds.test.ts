@@ -40,7 +40,7 @@ const key = randomBytes(32), vault = createPaymentPayloadVault("synthetic-key", 
 const inbox = createPaymentWebhookService(database, vault, options);
 const settlement = createPaymentSettlementService(database, options);
 const reconciliation = createPaymentReconciliationService(database, inbox, clock);
-const settings = { ...DEFAULT_SETTINGS, bank_transfer_enabled: true };
+const settings = { ...DEFAULT_SETTINGS };
 const productIds: string[] = [], categoryIds: string[] = [], cartIds: string[] = [], userIds: string[] = [],
   eventIds: string[] = [], refundIds: string[] = [], paymentIds: string[] = [];
 const submittedViaProvider: Array<{ trackerToken: string; amountMinor: bigint }> = [];
@@ -67,7 +67,7 @@ const refundOptions = {
 };
 const refunds = createPaymentRefundService(database, providerStub(), refundOptions);
 
-function checkoutInput(method: "ONLINE" | "COD" | "BANK_TRANSFER" = "ONLINE") {
+function checkoutInput(method: "ONLINE" | "COD" = "ONLINE") {
   return { idempotencyKey: randomUUID(), paymentMethod: method, deliveryMethod: "STANDARD" as const,
     customer: { name: "Synthetic Buyer", email: "synthetic@example.invalid", phone: "03001234567" },
     address: { fullName: "Synthetic Buyer", phone: "03001234567", line1: "Synthetic Street 1", city: "Lahore", province: "Punjab" } };

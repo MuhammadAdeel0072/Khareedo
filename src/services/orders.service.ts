@@ -68,8 +68,12 @@ export async function getOrderByReference(reference: string, userId?: string) {
         },
       });
       if (!order) return null;
-      // Guests may view via reference (know-only link); customers must own the order (NFR-11)
-      if (order.userId && order.userId !== userId) return null;
+      // Order tracking requires authentication (PR-04, D-01): only the signed-in
+      // customer who placed the order may view it by reference. A know-only
+      // reference grants no access — legacy guest orders (userId null) are not
+      // viewable this way at all; they remain visible to admins only.
+      if (!userId) return null;
+      if (order.userId !== userId) return null;
       return order;
     });
   }

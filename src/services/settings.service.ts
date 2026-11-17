@@ -13,7 +13,6 @@ export interface StoreSettings {
   whatsapp_number: string; // digits only, country code first (e.g. 923001234567)
   announcement_text: string;
   cod_enabled: boolean;
-  bank_transfer_enabled: boolean;
   online_payment_enabled: boolean;
   delivery_fee_standard: number;
   delivery_fee_express: number;
@@ -34,7 +33,6 @@ export const DEFAULT_SETTINGS: StoreSettings = {
   whatsapp_number: "923001234567",
   announcement_text: "Free Delivery on Orders Above Rs 3,000",
   cod_enabled: true,
-  bank_transfer_enabled: false,
   online_payment_enabled: false,
   delivery_fee_standard: 200,
   delivery_fee_express: 400,
@@ -65,7 +63,6 @@ function parse(raw: Record<string, string>): StoreSettings {
     whatsapp_number: str("whatsapp_number", DEFAULT_SETTINGS.whatsapp_number),
     announcement_text: str("announcement_text", DEFAULT_SETTINGS.announcement_text),
     cod_enabled: bool("cod_enabled", DEFAULT_SETTINGS.cod_enabled),
-    bank_transfer_enabled: bool("bank_transfer_enabled", DEFAULT_SETTINGS.bank_transfer_enabled),
     online_payment_enabled: bool("online_payment_enabled", DEFAULT_SETTINGS.online_payment_enabled),
     delivery_fee_standard: int("delivery_fee_standard", DEFAULT_SETTINGS.delivery_fee_standard),
     delivery_fee_express: int("delivery_fee_express", DEFAULT_SETTINGS.delivery_fee_express),

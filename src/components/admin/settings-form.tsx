@@ -21,7 +21,6 @@ export interface SettingsValues {
   whatsapp_number: string;
   announcement_text: string;
   cod_enabled: boolean;
-  bank_transfer_enabled: boolean;
   online_payment_enabled: boolean;
   delivery_fee_standard: number | string;
   delivery_fee_express: number | string;
@@ -127,12 +126,6 @@ export function SettingsForm({ initial }: { initial: SettingsValues }) {
               onChange={(c) => set("cod_enabled", c)}
               label="Cash on Delivery"
               desc="Pay when the order is delivered"
-            />
-            <Toggle
-              checked={values.bank_transfer_enabled}
-              onChange={(c) => set("bank_transfer_enabled", c)}
-              label="Bank Transfer"
-              desc="Manual transfer — details shared with customer"
             />
             <Toggle
               checked={values.online_payment_enabled}

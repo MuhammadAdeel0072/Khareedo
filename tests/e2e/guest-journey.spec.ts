@@ -1,22 +1,9 @@
-// E2E: guest browsing → search/filter → cart → guest checkout (COD) → confirmation.
+// E2E: guest browsing → search/filter → cart. Checkout and order tracking
+// require sign-in (PR-04, D-01) — a guest is redirected to /login instead of
+// reaching checkout or a confirmation page, and cannot place an order
+// through the API either.
 // Mirrors the customer journey in the activity model (Phase 4.2).
 import { expect, test } from "@playwright/test";
-import { db } from "../../src/lib/db";
-
-// Self-cleaning: purge the COD order this suite places, so repeat runs never
-// pollute the demo database (audit Phase 11 — isolated test data).
-test.afterAll(async () => {
-  const junk = await db.order.findMany({
-    where: { customerName: "E2E Guest Tester" },
-    select: { id: true },
-  });
-  for (const o of junk) {
-    await db.payment.deleteMany({ where: { orderId: o.id } });
-    await db.orderItem.deleteMany({ where: { orderId: o.id } });
-    await db.order.delete({ where: { id: o.id } });
-  }
-  await db.$disconnect();
-});
 
 test.describe("guest shopping journey", () => {
   test("browses homepage and sees featured products", async ({ page }) => {
@@ -60,36 +47,39 @@ test.describe("guest shopping journey", () => {
     await expect(page.getByText("Subtotal (2 items)")).toBeVisible();
   });
 
-  test("completes guest checkout with COD (FR-19..25, D-01/D-02)", async ({ page }) => {
+  test("cannot reach checkout without signing in (PR-04, D-01)", async ({ page }) => {
     await page.goto("/product/casio-mens-analog-watch");
     await page.getByRole("button", { name: /add to cart/i }).first().click();
-    // Wait for the add-to-cart POST to complete (toast confirms the cart write)
     await expect(page.getByText("Added to cart")).toBeVisible({ timeout: 10000 });
 
     await page.goto("/checkout");
-    // Step 1: address
-    await page.getByLabel("Full Name").fill("E2E Guest Tester");
-    await page.getByLabel("Phone Number").fill("0321 5556677");
-    await page.getByLabel("Email Address").fill("guest.e2e@example.com");
-    await page.getByLabel("Street Address").fill("Test House 99, E2E Lane");
-    await page.getByLabel("City").fill("Lahore");
-    await page.getByRole("button", { name: /continue to delivery/i }).click();
+    // Unauthenticated visitors are sent to sign-in, with checkout as the return target
+    await expect(page).toHaveURL(/\/login\?callbackUrl=%2Fcheckout&reason=checkout/);
+    await expect(page.getByLabel("Email address")).toBeVisible();
+  });
 
-    // Step 2: delivery (standard pre-selected) → continue
-    await page.getByRole("button", { name: /continue to payment/i }).click();
+  test("cannot track an order without signing in (PR-04, D-01)", async ({ page }) => {
+    // A know-only order reference must not grant access to the confirmation page
+    await page.goto("/order/KH26030110021");
+    await expect(page).toHaveURL(/\/login\?callbackUrl=%2Forder%2FKH26030110021&reason=tracking/);
+    await expect(page.getByLabel("Email address")).toBeVisible();
+  });
 
-    // Step 3: COD pre-selected → review
-    await page.getByRole("button", { name: /review order/i }).click();
-
-    // Step 4: confirm
-    await page.getByRole("button", { name: /confirm order/i }).click();
-
-    // Confirmation page with order reference (never shown for failed orders)
-    await expect(page.getByText("Order Confirmed!")).toBeVisible({ timeout: 15000 });
-    await expect(page.getByText(/Order Reference/i)).toBeVisible();
-    // Seeded orders use KH+11 digits; runtime orders KH+13 — accept both
-    await expect(page.locator("text=/^KH\\d{11,13}$/").first()).toBeVisible();
-    await expect(page.getByText("Cash on Delivery").first()).toBeVisible();
+  test("cannot place an order through the API without signing in (PR-04, D-01)", async ({ page }) => {
+    const response = await page.request.post("/api/checkout/place", {
+      data: {
+        idempotencyKey: "e2e-unauthenticated-place",
+        customer: { name: "E2E Guest", email: "guest.e2e@example.com", phone: "0321 5556677" },
+        address: {
+          fullName: "E2E Guest", phone: "0321 5556677",
+          line1: "Test House 99, E2E Lane", city: "Lahore", province: "Punjab",
+        },
+        deliveryMethod: "STANDARD",
+        paymentMethod: "COD",
+      },
+    });
+    expect(response.status()).toBe(401);
+    expect(await response.json()).toMatchObject({ code: "AUTHENTICATION_REQUIRED" });
   });
 
   test("empty cart shows empty state (alternative flow)", async ({ page }) => {

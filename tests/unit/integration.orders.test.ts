@@ -23,7 +23,7 @@ vi.mock("@/lib/db", async () => {
 
 import { db } from "@/lib/db";
 import { placeOrder } from "@/services/checkout.service";
-import { adminListOrders, adminUpdateOrderStatus } from "@/services/orders.service";
+import { adminListOrders, adminUpdateOrderStatus, getOrderByReference } from "@/services/orders.service";
 import {
   adminListProducts,
   getProductBySlug,
@@ -174,7 +174,6 @@ beforeEach(() => {
   vi.spyOn(settingsService, "getSettings").mockResolvedValue({
     ...settingsService.DEFAULT_SETTINGS,
     cod_enabled: true,
-    bank_transfer_enabled: false,
     online_payment_enabled: false,
     delivery_fee_standard: 0,
     delivery_fee_express: 0,
@@ -188,6 +187,44 @@ beforeEach(() => {
 
 afterAll(async () => {
   await db.$disconnect();
+});
+
+describe("order tracking requires authentication (PR-04, D-01)", () => {
+  it("does not expose a guest order by reference, with or without a signed-in user", async () => {
+    const { cat, product } = await seedProduct(4);
+    const guestOrder = await createOrderWithItems(
+      [{ id: product.id, name: product.name, slug: product.slug }],
+      [1]
+    );
+    try {
+      // A know-only reference must not grant access: no session, and no
+      // signed-in user owns a guest order.
+      expect(await getOrderByReference(guestOrder.reference)).toBeNull();
+      expect(await getOrderByReference(guestOrder.reference, "some-other-user")).toBeNull();
+    } finally {
+      await db.orderItem.deleteMany({ where: { orderId: guestOrder.id } });
+      await db.order.delete({ where: { id: guestOrder.id } });
+      await db.product.delete({ where: { id: product.id } });
+      await db.category.delete({ where: { id: cat.id } });
+    }
+  });
+
+  it("shows a customer's own order only to that customer", async () => {
+    const { product } = await seedProduct(4);
+    vi.mocked(cartService.getCartDetails).mockResolvedValue(checkoutCart(product, 4));
+    const result = await placeOrder(
+      { ...checkoutInput(`tracking-own-${Date.now()}`), paymentMethod: "COD" },
+      checkoutUserId
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error);
+
+    expect(await getOrderByReference(result.reference, checkoutUserId)).toMatchObject({
+      id: result.orderId,
+    });
+    expect(await getOrderByReference(result.reference, "another-customer")).toBeNull();
+    expect(await getOrderByReference(result.reference)).toBeNull();
+  });
 });
 
 describe("order placement integrity", () => {
@@ -222,12 +259,12 @@ describe("order placement integrity", () => {
     expect(settingsService.getSettings).not.toHaveBeenCalled();
   });
 
-  it.each(["COD", "BANK_TRANSFER"] as const)("preserves %s checkout with automatic order IDs", async (paymentMethod) => {
+  it("preserves COD checkout with automatic order IDs", async () => {
+    const paymentMethod = "COD" as const;
     const { product } = await seedProduct(4);
     vi.mocked(settingsService.getSettings).mockResolvedValue({
       ...settingsService.DEFAULT_SETTINGS,
       cod_enabled: true,
-      bank_transfer_enabled: true,
       online_payment_enabled: false,
       delivery_fee_standard: 0,
       free_delivery_threshold: 0,
@@ -259,6 +296,23 @@ describe("order placement integrity", () => {
     expect(order.payments).toHaveLength(1);
     expect(order.payments[0]).toMatchObject({ provider: paymentMethod, amount: 1000, status: "PENDING" });
     expect((await db.inventory.findUniqueOrThrow({ where: { productId: product.id } })).quantity).toBe(3);
+  });
+
+  it("rejects a bank-transfer checkout at the service layer (PR-04, D-02)", async () => {
+    const { product } = await seedProduct(4);
+    vi.mocked(cartService.getCartDetails).mockResolvedValue(checkoutCart(product, 4));
+    const key = `bank-transfer-rejected-${Date.now()}`;
+
+    const result = await placeOrder(
+      {
+        ...checkoutInput(key),
+        paymentMethod: "BANK_TRANSFER" as never,
+      },
+      checkoutUserId
+    );
+
+    expect(result).toMatchObject({ ok: false, code: "PAYMENT_DISABLED" });
+    expect(await db.order.count({ where: { idempotencyKey: key } })).toBe(0);
   });
 
   it("creates order + items + payment and decrements stock once", async () => {

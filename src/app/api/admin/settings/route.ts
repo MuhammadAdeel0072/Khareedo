@@ -19,7 +19,6 @@ export async function PUT(request: Request) {
       whatsapp_number: d.whatsapp_number,
       announcement_text: d.announcement_text || "",
       cod_enabled: d.cod_enabled,
-      bank_transfer_enabled: d.bank_transfer_enabled,
       online_payment_enabled: d.online_payment_enabled,
       delivery_fee_standard: d.delivery_fee_standard,
       delivery_fee_express: d.delivery_fee_express,
