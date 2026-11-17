@@ -57,6 +57,29 @@ bun scripts/generate-images.ts --max-seconds=300 --concurrency=2
                      # regenerate product/banner images (resumable, skips existing)
 ```
 
+## Operations: health and worker heartbeat
+
+- `GET /api/health` is a public, unauthenticated endpoint for load balancers
+  and uptime monitors. It returns `{ status, timestamp, checks: { database, worker } }`
+  with `Cache-Control: no-store`. Status is `ok` (database reachable and worker
+  heartbeat fresh), `degraded` (database reachable but the worker is stale,
+  failing, stopped or never started — HTTP 200), or `down` (database
+  unreachable — HTTP 503). The response contains only coarse statuses, ISO
+  timestamps and counts — no error messages, stack traces, connection strings
+  or environment values.
+- The payment maintenance worker (`src/instrumentation.ts` →
+  `src/services/payment-maintenance-worker.service.ts`) records a heartbeat on
+  every sweep: start time, last success, last failure (generic code only),
+  consecutive failures and sweep counts (`src/services/worker-heartbeat.ts`).
+  A heartbeat is stale after 3 minutes without a successful sweep (3x the 60s
+  sweep interval). Set `PAYMENT_MAINTENANCE_WORKER=off` to disable the
+  in-process worker (serverless deploys should call
+  `POST /api/admin/payments/maintenance` from an external cron instead).
+- Limitation: the heartbeat is per-process and in-memory. In a multi-instance
+  deployment each instance reports its own worker state, so a load balancer
+  may see different states per instance. This matches the current
+  single-instance deployment assumption.
+
 ## Architecture
 
 ```
