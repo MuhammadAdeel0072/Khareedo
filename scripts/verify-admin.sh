@@ -1,4 +1,7 @@
 #!/bin/bash
+# Test credentials come from the environment (chosen when seeding — see
+# docs/SEEDING.md). Never hardcode passwords in this repo.
+if [ -z "${SEED_ADMIN_PASSWORD:-}" ]; then echo "Set SEED_ADMIN_PASSWORD before running this script." >&2; exit 1; fi
 cd /home/z/my-project
 setsid nohup npm run dev > dev.log 2>&1 < /dev/null & disown
 for i in $(seq 1 30); do
@@ -14,7 +17,7 @@ agent-browser open "http://localhost:3000/admin/login" >/dev/null 2>&1
 agent-browser wait 1500 >/dev/null 2>&1
 agent-browser snapshot -i 2>/dev/null | grep -E "textbox|button" | head -4
 
-agent-browser eval "(() => { const inputs=[...document.querySelectorAll('input')]; const em=inputs.find(i=>/email/i.test(i.type+i.name+i.id)); const pw=inputs.find(i=>i.type==='password'); if(em){em.value='admin@khareedo.pk'; em.dispatchEvent(new Event('input',{bubbles:true}))} if(pw){pw.value='Admin@123'; pw.dispatchEvent(new Event('input',{bubbles:true}))} return 'filled'; })()" >/dev/null 2>&1
+agent-browser eval "(() => { const inputs=[...document.querySelectorAll('input')]; const em=inputs.find(i=>/email/i.test(i.type+i.name+i.id)); const pw=inputs.find(i=>i.type==='password'); if(em){em.value='admin@khareedo.pk'; em.dispatchEvent(new Event('input',{bubbles:true}))} if(pw){pw.value='$SEED_ADMIN_PASSWORD'; pw.dispatchEvent(new Event('input',{bubbles:true}))} return 'filled'; })()" >/dev/null 2>&1
 agent-browser eval "document.querySelector('form')?.requestSubmit()" >/dev/null 2>&1
 agent-browser wait 3500 >/dev/null 2>&1
 echo "AFTER_LOGIN: $(agent-browser eval "location.pathname")"

@@ -1,4 +1,12 @@
 import { chromium } from "playwright";
+// Test credentials come from the environment (chosen when seeding — see
+// docs/SEEDING.md). Never hardcode passwords in this repo.
+const SEED_CUSTOMER_PASSWORD = process.env.SEED_CUSTOMER_PASSWORD;
+if (!SEED_CUSTOMER_PASSWORD) {
+  console.error("Set SEED_CUSTOMER_PASSWORD before running this script.");
+  process.exit(1);
+}
+
 
 // Task 1 verification: payment-method default selection, single-click switching,
 // step round-trip persistence.
@@ -11,7 +19,7 @@ const log = (...a) => console.log(...a);
 // Login as customer
 await page.goto("http://localhost:3000/login", { waitUntil: "networkidle" });
 await page.getByLabel(/email/i).first().fill("ali.hassan@example.com");
-await page.getByLabel(/password/i).first().fill("Customer@123");
+await page.getByLabel(/password/i).first().fill(SEED_CUSTOMER_PASSWORD);
 await Promise.all([
   page.waitForLoadState("networkidle").catch(() => {}),
   page.getByRole("button", { name: /sign in/i }).click(),

@@ -1,9 +1,19 @@
 /**
- * Export live SQLite catalog data → supabase/seed.sql (Postgres demo seed).
+ * Export live catalog data → supabase/migrations/seed.sql (Postgres demo seed).
  * Reads via Prisma, emits idempotent SQL keyed on natural keys (slug/email/sku).
+ *
+ * Catalog and settings ONLY. This exporter never exports accounts, password
+ * hashes, or addresses: SQL seeds must never provision login accounts (see
+ * docs/SEEDING.md). Accounts are created through registration or the guarded
+ * `scripts/seed.ts`, with operator-chosen passwords.
+ *
+ * Reads the database configured by SUPABASE_POSTGRES_URL (the application
+ * database) — it never writes to it.
  */
 import { db } from '../src/lib/db';
 import { writeFileSync } from 'fs';
+import { dirname, resolve } from 'path';
+import { fileURLToPath } from 'url';
 
 function q(v: unknown): string {
   if (v === null || v === undefined) return 'null';
@@ -19,10 +29,7 @@ async function main() {
   lines.push(`-- Khareedo — Supabase demo seed (OPTIONAL)`);
   lines.push(`-- Run AFTER 0001_schema.sql and 0002_rls.sql (Supabase SQL Editor).`);
   lines.push(`-- Idempotent: uses ON CONFLICT on natural keys (slug / email / key).`);
-  lines.push(`-- Demo logins after seeding (bcrypt):`);
-  lines.push(`--   admin@khareedo.pk        / Admin@123      (ADMIN)`);
-  lines.push(`--   ali.hassan@example.com   / Customer@123   (CUSTOMER)`);
-  lines.push(`--   sara.khan@example.com    / Customer@123   (CUSTOMER)`);
+  lines.push(`-- Catalog and settings only: this file never creates accounts.`);
   lines.push(`-- ============================================================`);
   lines.push(``);
 
@@ -114,27 +121,10 @@ async function main() {
   }
   lines.push(``);
 
-  // ── Demo users (bcrypt hashes reused from sandbox seed) ─────
-  const users = await db.user.findMany({
-    where: { email: { in: ['admin@khareedo.pk', 'ali.hassan@example.com', 'sara.khan@example.com'] } },
-    include: { addresses: true },
-  });
-  lines.push(`-- ── Demo profiles (bcrypt password hashes carried over) ──`);
-  for (const u of users) {
-    lines.push(
-      `insert into public.profiles (email, password_hash, name, phone, role, email_verified) values (${q(u.email)}, ${q(u.passwordHash)}, ${q(u.name)}, ${q(u.phone)}, ${q(u.role)}, now()) on conflict (email) do update set password_hash = excluded.password_hash, role = excluded.role;`
-    );
-  }
-  for (const u of users) {
-    for (const a of u.addresses) {
-      lines.push(
-        `insert into public.addresses (user_id, label, full_name, phone, line1, line2, city, province, postal_code, is_default) values ((select id from public.profiles where email = ${q(u.email)}), ${q(a.label)}, ${q(a.fullName)}, ${q(a.phone)}, ${q(a.line1)}, ${q(a.line2)}, ${q(a.city)}, ${q(a.province)}, ${q(a.postalCode)}, ${a.isDefault}) on conflict do nothing;`
-      );
-    }
-  }
-  lines.push(``);
-
-  writeFileSync('/home/z/my-project/supabase/migrations/seed.sql', lines.join('\n') + '\n');
+  // No accounts are exported here on purpose: a SQL seed must never
+  // provision login accounts or carry password hashes (see docs/SEEDING.md).
+  const outPath = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'supabase', 'migrations', 'seed.sql');
+  writeFileSync(outPath, lines.join('\n') + '\n');
   console.log('seed.sql written:', lines.length, 'lines');
 }
 

@@ -18,7 +18,7 @@
 | D-08 | Ratings & reviews | **Display-only** ratings (admin-editable product fields); customer review submission deferred |
 | D-09 | WhatsApp number | Placeholder, admin-configurable via Store Settings |
 | D-10 | Database for sandbox build | Fully functional build on Prisma/SQLite + equivalent **Supabase Postgres migration SQL incl. RLS** shipped in `supabase/migrations/` with setup guide |
-| D-11 | Authentication | Working email/password (seeded demo accounts) + **Google-ready** OAuth provider that activates when `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` are configured |
+| D-11 | Authentication | Working email/password (accounts created via the guarded seed with operator-chosen passwords, or self-registration — no demo accounts with known passwords) + **Google-ready** OAuth provider that activates when `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` are configured |
 | D-12 | Product variants | Deferred ("when needed" per doc §7.2); inventory attaches to products |
 
 ## 2. Actors

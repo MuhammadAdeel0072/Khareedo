@@ -4,10 +4,10 @@
 -- Khareedo — Supabase demo seed (OPTIONAL)
 -- Run AFTER 0001_schema.sql and 0002_rls.sql (Supabase SQL Editor).
 -- Idempotent: uses ON CONFLICT on natural keys (slug / email / key).
--- Demo logins after seeding (bcrypt):
---   admin@khareedo.pk        / Admin@123      (ADMIN)
---   ali.hassan@example.com   / Customer@123   (CUSTOMER)
---   sara.khan@example.com    / Customer@123   (CUSTOMER)
+-- Catalog and settings only: this file never creates accounts. SQL seeds
+-- must never provision login accounts or carry password hashes — create
+-- accounts through registration or the guarded scripts/seed.ts with
+-- operator-chosen passwords (see docs/SEEDING.md).
 -- ============================================================
 
 -- ── Store settings ──
@@ -220,11 +220,3 @@ insert into public.coupons (code, description, type, value, min_order_amount, st
 
 -- ── Promotions ──
 insert into public.promotions (title, description, type, value, min_order_amount, starts_at, ends_at, is_active) values ('Mid-Season Sale', 'Up to 20% off on selected watches and earbuds. Limited time only.', 'PERCENT', 20, null, null, null, true);
-
--- ── Demo profiles (bcrypt password hashes carried over) ──
-insert into public.profiles (email, password_hash, name, phone, role, email_verified) values ('admin@khareedo.pk', '$2b$12$Y2D/r0R29XilSrOcqu5SNuZl1AvFMrSSrmU8D9aYJ.E93E2EXDCXq', 'Store Administrator', '03001234567', 'ADMIN', now()) on conflict (email) do update set password_hash = excluded.password_hash, role = excluded.role;
-insert into public.profiles (email, password_hash, name, phone, role, email_verified) values ('ali.hassan@example.com', '$2b$12$3xsMJI3IjkMj4sRdifwut..iozC954RNsJ1ifa5ztscVtEJzJMqVm', 'Ali Hassan', '03001234567', 'CUSTOMER', now()) on conflict (email) do update set password_hash = excluded.password_hash, role = excluded.role;
-insert into public.profiles (email, password_hash, name, phone, role, email_verified) values ('sara.khan@example.com', '$2b$12$3xsMJI3IjkMj4sRdifwut..iozC954RNsJ1ifa5ztscVtEJzJMqVm', 'Sara Khan', '03219876543', 'CUSTOMER', now()) on conflict (email) do update set password_hash = excluded.password_hash, role = excluded.role;
-insert into public.addresses (user_id, label, full_name, phone, line1, line2, city, province, postal_code, is_default) values ((select id from public.profiles where email = 'ali.hassan@example.com'), 'Home', 'Ali Hassan', '03001234567', 'House No 12, Street 5, Gulberg', null, 'Lahore', 'Punjab', '54000', true) on conflict do nothing;
-insert into public.addresses (user_id, label, full_name, phone, line1, line2, city, province, postal_code, is_default) values ((select id from public.profiles where email = 'ali.hassan@example.com'), 'Office', 'Ali Hassan', '03001234567', 'Office No 45, 3rd Floor, Tech Tower, Johar Town', null, 'Lahore', 'Punjab', '54000', false) on conflict do nothing;
-insert into public.addresses (user_id, label, full_name, phone, line1, line2, city, province, postal_code, is_default) values ((select id from public.profiles where email = 'sara.khan@example.com'), 'Home', 'Sara Khan', '03219876543', 'Flat 3-B, Clifton Block 2', null, 'Karachi', 'Sindh', '75600', true) on conflict do nothing;

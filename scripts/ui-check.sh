@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Test credentials come from the environment (chosen when seeding — see
+# docs/SEEDING.md). Never hardcode passwords in this repo.
+if [ -z "${SEED_ADMIN_PASSWORD:-}" ]; then echo "Set SEED_ADMIN_PASSWORD before running this script." >&2; exit 1; fi
 set -u
 cd /home/z/my-project
 NODE_ENV=production bun .next/standalone/server.js > server.log 2>&1 &
@@ -7,7 +10,7 @@ for i in $(seq 1 30); do curl -s -o /dev/null http://localhost:3000/ && break; s
 AB="agent-browser"
 $AB open http://localhost:3000/admin/login > /dev/null 2>&1; sleep 1
 $AB find label "Email address" fill "admin@khareedo.pk" > /dev/null 2>&1
-$AB find label "Password" fill "Admin@123" > /dev/null 2>&1
+$AB find label "Password" fill "$SEED_ADMIN_PASSWORD" > /dev/null 2>&1
 $AB find role button click --name "Sign In to Admin" > /dev/null 2>&1
 sleep 3
 echo "URL after login: $($AB get url 2>/dev/null)"

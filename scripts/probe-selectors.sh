@@ -1,4 +1,8 @@
 #!/bin/bash
+# Test credentials come from the environment (chosen when seeding — see
+# docs/SEEDING.md). Never hardcode passwords in this repo.
+if [ -z "${SEED_ADMIN_PASSWORD:-}" ]; then echo "Set SEED_ADMIN_PASSWORD before running this script." >&2; exit 1; fi
+if [ -z "${SEED_CUSTOMER_PASSWORD:-}" ]; then echo "Set SEED_CUSTOMER_PASSWORD before running this script." >&2; exit 1; fi
 cd /home/z/my-project
 setsid nohup npm run dev > dev.log 2>&1 < /dev/null & disown
 for i in $(seq 1 30); do
@@ -12,7 +16,7 @@ agent-browser set viewport 1280 900 >/dev/null
 echo "=== customer login ==="
 agent-browser open "http://localhost:3000/login" >/dev/null 2>&1
 agent-browser wait 1500 >/dev/null 2>&1
-agent-browser eval "(() => { const i=[...document.querySelectorAll('input')]; const em=i.find(x=>x.type==='email'||/email/i.test(x.id)); const pw=i.find(x=>x.type==='password'); const set=(el,v)=>{const p=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set; p.call(el,v); el.dispatchEvent(new Event('input',{bubbles:true}))}; set(em,'ali.hassan@example.com'); set(pw,'Customer@123'); return 'ok'; })()" >/dev/null 2>&1
+agent-browser eval "(() => { const i=[...document.querySelectorAll('input')]; const em=i.find(x=>x.type==='email'||/email/i.test(x.id)); const pw=i.find(x=>x.type==='password'); const set=(el,v)=>{const p=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set; p.call(el,v); el.dispatchEvent(new Event('input',{bubbles:true}))}; set(em,'ali.hassan@example.com'); set(pw,'$SEED_CUSTOMER_PASSWORD'); return 'ok'; })()" >/dev/null 2>&1
 agent-browser eval "document.querySelector('form')?.requestSubmit()" >/dev/null 2>&1
 agent-browser wait 3500 >/dev/null 2>&1
 echo "after login: $(agent-browser eval "location.pathname")"
@@ -35,7 +39,7 @@ agent-browser eval "JSON.stringify({labels: [...document.querySelectorAll('label
 echo "=== /admin/orders row structure ==="
 agent-browser open "http://localhost:3000/admin/login" >/dev/null 2>&1
 agent-browser wait 1200 >/dev/null 2>&1
-agent-browser eval "(() => { const i=[...document.querySelectorAll('input')]; const em=i.find(x=>x.type==='email'); const pw=i.find(x=>x.type==='password'); const set=(el,v)=>{const p=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set; p.call(el,v); el.dispatchEvent(new Event('input',{bubbles:true}))}; set(em,'admin@khareedo.pk'); set(pw,'Admin@123'); return 'ok'; })()" >/dev/null 2>&1
+agent-browser eval "(() => { const i=[...document.querySelectorAll('input')]; const em=i.find(x=>x.type==='email'); const pw=i.find(x=>x.type==='password'); const set=(el,v)=>{const p=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set; p.call(el,v); el.dispatchEvent(new Event('input',{bubbles:true}))}; set(em,'admin@khareedo.pk'); set(pw,'$SEED_ADMIN_PASSWORD'); return 'ok'; })()" >/dev/null 2>&1
 agent-browser eval "document.querySelector('form')?.requestSubmit()" >/dev/null 2>&1
 agent-browser wait 3500 >/dev/null 2>&1
 agent-browser open "http://localhost:3000/admin/orders" >/dev/null 2>&1

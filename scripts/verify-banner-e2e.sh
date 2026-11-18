@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Test credentials come from the environment (chosen when seeding — see
+# docs/SEEDING.md). Never hardcode passwords in this repo.
+if [ -z "${SEED_ADMIN_PASSWORD:-}" ]; then echo "Set SEED_ADMIN_PASSWORD before running this script." >&2; exit 1; fi
 # End-to-end banner API verification (Task 3 evidence).
 set -u
 BASE=http://localhost:3000
@@ -10,7 +13,7 @@ LOGIN=$(curl -s -b "$JAR" -c "$JAR" -o /dev/null -w "%{http_code}" -X POST "$BAS
   -H "Content-Type: application/x-www-form-urlencoded" \
   --data-urlencode "csrfToken=$CSRF" \
   --data-urlencode "email=admin@khareedo.pk" \
-  --data-urlencode "password=Admin@123" \
+  --data-urlencode "password=$SEED_ADMIN_PASSWORD" \
   --data-urlencode "callbackUrl=$BASE/admin")
 echo "1. admin login: $LOGIN"
 

@@ -23,7 +23,7 @@ Work Log:
 
 Stage Summary:
 - Fully functional e-commerce platform delivered at /home/z/my-project (storefront + admin + API + services + tests + Supabase SQL + docs)
-- Demo credentials: admin@khareedo.pk / Admin@123 — ali.hassan@example.com / Customer@123
+- Demo credentials: removed from the repository (PR-06). Seeded accounts now require operator-chosen passwords; see docs/SEEDING.md.
 - Verified golden paths in real browser; 33/33 automated tests green; lint clean
 - Pending client input: payment provider choice, Google OAuth keys, real WhatsApp number, Supabase project for production cutover (docs/SUPABASE-SETUP.md)
 

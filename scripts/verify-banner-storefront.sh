@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Test credentials come from the environment (chosen when seeding — see
+# docs/SEEDING.md). Never hardcode passwords in this repo.
+if [ -z "${SEED_ADMIN_PASSWORD:-}" ]; then echo "Set SEED_ADMIN_PASSWORD before running this script." >&2; exit 1; fi
 # Focused: SIDE banner appears on storefront; PUT update works.
 # NOTE: the storefront renders the top-N SIDE banners (getActiveBanners limit),
 # so this script creates the probe banner with sortOrder 0 to win the rank cut.
@@ -10,7 +13,7 @@ curl -s -b "$JAR" -c "$JAR" -o /dev/null -X POST "$BASE/api/auth/callback/creden
   -H "Content-Type: application/x-www-form-urlencoded" \
   --data-urlencode "csrfToken=$CSRF" \
   --data-urlencode "email=admin@khareedo.pk" \
-  --data-urlencode "password=Admin@123" \
+  --data-urlencode "password=$SEED_ADMIN_PASSWORD" \
   --data-urlencode "callbackUrl=$BASE/admin"
 
 UP=$(curl -s -b "$JAR" -X POST "$BASE/api/admin/upload" -F "file=@/tmp/test-banner.png;type=image/png" -F "target=banner")
