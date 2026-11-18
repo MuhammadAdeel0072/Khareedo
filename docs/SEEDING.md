@@ -1,7 +1,7 @@
 # Database seeding (PR-06)
 
 Khareedo has one seed script, `scripts/seed.ts`, and one SQL seed file,
-`supabase/migrations/seed.sql`. Both follow the same rule: **a seed never
+`docs/legacy/supabase-migrations/seed.sql`. Both follow the same rule: **a seed never
 provisions a login account with a known password, and never destroys data.**
 
 ## The seed script (`scripts/seed.ts`)
@@ -77,12 +77,13 @@ SEED_ADMIN_PASSWORD=<...> SEED_CUSTOMER_PASSWORD=<...> npx playwright test
 The spec reads both from the environment and fails fast with a clear message
 if either is unset. No password is stored in the spec file.
 
-## The SQL seed (`supabase/migrations/seed.sql`)
+## The SQL seed (`docs/legacy/supabase-migrations/seed.sql`)
 
-The committed `seed.sql` is legacy demo data (it targets the old snake_case
-Supabase Auth profile schema and is **not** compatible with the current
-Prisma/NextAuth models — see `docs/SUPABASE-SETUP.md` and
-`docs/DATABASE-MIGRATION.md`; do not apply it to the application database).
+The committed `seed.sql` is legacy demo data, quarantined under `docs/legacy/`
+in PR-07 (it targets the old snake_case Supabase Auth profile schema and is
+**not** compatible with the current Prisma/NextAuth models — see
+`docs/SUPABASE-SETUP.md` and `docs/DATABASE-MIGRATION.md`; do not apply it to
+the application database).
 
 It provisions catalog and settings only. It never creates accounts and
 carries no password hashes. Re-applying it never overwrites existing rows:

@@ -20,4 +20,4 @@ See `docs/REQUIREMENTS-TRACEABILITY.md` §1 (D-01 … D-12).
 4. **Tax policy** — not confirmed; fields reserved, zero-rated.
 5. **Third-party advertising** — deferred per defaults.
 6. **Product variants** — deferred ("when needed"); schema extension point documented.
-7. **Supabase project** — create project → run `supabase/migrations/*.sql` → set env vars (see `docs/SUPABASE-SETUP.md`).
+7. **Supabase project** — create project → apply the reviewed Prisma migrations under `prisma/migrations/` (`npm run db:postgres:deploy`) → set env vars (see `docs/SUPABASE-SETUP.md`). The legacy SQL files formerly under `supabase/migrations/` were quarantined to `docs/legacy/supabase-migrations/` in PR-07 and must never be applied.

@@ -11,9 +11,34 @@
  * Cleanup: cancels + deletes created orders, restores inventory.
  */
 import { execSync } from "node:child_process";
+import {
+  checkLocalBaseUrl,
+  checkLocalSqliteTarget,
+} from "./db-target-guards.mjs";
 
 const BASE = process.env.BASE || "http://localhost:3000";
 const N_CUSTOMERS = 6;
+
+// Safety (PR-07): this audit creates and then deletes real orders against a
+// running app. It only ever targets a local development app on localhost,
+// and the database behind it must be a local SQLite file — never
+// production, never PostgreSQL. Refuse instead of guessing.
+if (process.env.NODE_ENV === "production") {
+  console.error("audit-concurrency: refused: NODE_ENV is production.");
+  process.exit(1);
+}
+const baseCheck = checkLocalBaseUrl(BASE);
+if (baseCheck.status !== "ok") {
+  console.error(`audit-concurrency: refused: ${baseCheck.reason}`);
+  process.exit(1);
+}
+if (process.env.DATABASE_URL) {
+  const targetCheck = checkLocalSqliteTarget(process.env);
+  if (targetCheck.status !== "ok") {
+    console.error(`audit-concurrency: refused: ${targetCheck.reason}`);
+    process.exit(1);
+  }
+}
 
 function tsx(script) {
   return execSync(`npx tsx -e '${script}'`, {

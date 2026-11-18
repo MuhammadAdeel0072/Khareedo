@@ -17,7 +17,7 @@
 | D-07 | Currency / locale | **PKR (Rs), English UI** |
 | D-08 | Ratings & reviews | **Display-only** ratings (admin-editable product fields); customer review submission deferred |
 | D-09 | WhatsApp number | Placeholder, admin-configurable via Store Settings |
-| D-10 | Database for sandbox build | Fully functional build on Prisma/SQLite + equivalent **Supabase Postgres migration SQL incl. RLS** shipped in `supabase/migrations/` with setup guide |
+| D-10 | Database for sandbox build | Fully functional build on Prisma/SQLite + reviewed **Prisma migrations under `prisma/migrations/`** for Supabase Postgres with setup guide (legacy Supabase SQL quarantined to `docs/legacy/supabase-migrations/` in PR-07) |
 | D-11 | Authentication | Working email/password (accounts created via the guarded seed with operator-chosen passwords, or self-registration — no demo accounts with known passwords) + **Google-ready** OAuth provider that activates when `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` are configured |
 | D-12 | Product variants | Deferred ("when needed" per doc §7.2); inventory attaches to products |
 
@@ -152,7 +152,7 @@ Legend: **Impl** = primary implementing file(s); **Verify** = how it is verified
 | NFR-29 | Major browsers | standard Next.js/React output |
 | NFR-30 | Consistent pricing through checkout | quote → place re-uses same `pricing.ts` |
 | NFR-31 | Price/inventory changes don't corrupt orders | order line snapshots (unit price, name, image) |
-| NFR-32 | Controlled schema changes | Prisma migrations + `supabase/migrations` versioned SQL |
+| NFR-32 | Controlled schema changes | Prisma migrations under `prisma/migrations/` only (legacy SQL quarantined to `docs/legacy/` in PR-07) |
 
 ## 5. Business Rules Traceability
 
@@ -184,7 +184,7 @@ Payment status: COD → PENDING until DELIVERED (then PAID) or CANCELLED. Online
 
 ## 7. Deviations & Proposals (flagged, not silently substituted)
 
-1. **SQLite in sandbox** — client doc mandates Supabase/Postgres. Sandbox has no Supabase credentials, so the build runs on Prisma/SQLite with an identical relational model; **full Postgres migration SQL + RLS policies ship in `supabase/migrations/`** (D-10). Data layer isolated in services so switching is configuration, not rewrite.
+1. **SQLite in sandbox** — client doc mandates Supabase/Postgres. Sandbox has no Supabase credentials, so the build runs on Prisma/SQLite with an identical relational model; **the reviewed Prisma migrations under `prisma/migrations/`** are the Supabase schema (D-10). The legacy Supabase SQL was quarantined to `docs/legacy/supabase-migrations/` in PR-07 and must never be applied. Data layer isolated in services so switching is configuration, not rewrite.
 2. **Supabase Auth vs NextAuth** — production auth per doc is Supabase Auth; sandbox demo uses NextAuth v4 credentials + Google-ready provider behind `lib/auth` so the interface matches (D-11).
 3. **Storage** — production: Supabase Storage. Sandbox: local `public/uploads` via admin upload API with identical service interface.
 4. **user_roles table** — implemented as `role` column on `users` (single-role model) for simplicity; Supabase SQL includes `user_roles` table form for multi-role growth.

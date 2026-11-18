@@ -1,5 +1,5 @@
 /**
- * Export live catalog data → supabase/migrations/seed.sql (Postgres demo seed).
+ * Export live catalog data → docs/legacy/supabase-migrations/seed.sql (Postgres demo seed).
  * Reads via Prisma, emits idempotent SQL keyed on natural keys (slug/key/code).
  * Re-applying the generated SQL never overwrites existing rows: store
  * settings and inventory quantities use ON CONFLICT DO NOTHING, so an
@@ -126,7 +126,7 @@ async function main() {
 
   // No accounts are exported here on purpose: a SQL seed must never
   // provision login accounts or carry password hashes (see docs/SEEDING.md).
-  const outPath = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'supabase', 'migrations', 'seed.sql');
+  const outPath = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'docs', 'legacy', 'supabase-migrations', 'seed.sql');
   writeFileSync(outPath, lines.join('\n') + '\n');
   console.log('seed.sql written:', lines.length, 'lines');
 }

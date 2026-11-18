@@ -91,7 +91,7 @@ created2=$(echo "$resp2" | sed -n 's/.*"created":\([0-9]*\).*/\1/p')
 [ "$created2" = "0" ] && ck ok "second import created=0" || ck no "second import created=0" "$created2"
 
 echo "== 9. verify DB rows + auto SKU/slug/stock, then clean up =="
-node scripts/cleanup-import-test.mjs | tee /tmp/cleanup-out.txt
+node scripts/cleanup-import-test.mjs --apply | tee /tmp/cleanup-out.txt
 grep -q 'cleaned=2' /tmp/cleanup-out.txt && ck ok "2 smoke products verified + removed" || ck no "cleanup removed 2" "see above"
 grep -q '"sku":"KH-' /tmp/cleanup-out.txt && ck ok "auto-SKU generated (KH-…)" || ck no "auto-SKU" "missing"
 
