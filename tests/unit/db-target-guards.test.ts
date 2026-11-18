@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import {
   checkDestructiveOptIn,
   checkLocalBaseUrl,
+  checkLocalPostgresTarget,
   checkLocalSqliteTarget,
   resolveFileUrlPath,
   resolveRunMode,
@@ -119,6 +120,102 @@ describe("checkLocalSqliteTarget", () => {
       status: "ok",
       databasePath: "/tmp/khareedo-sqlite-test-abc123/khareedo-test.sqlite",
     });
+  });
+});
+
+describe("checkLocalPostgresTarget", () => {
+  it("refuses production even for a loopback database", () => {
+    expect(
+      checkLocalPostgresTarget(
+        env({
+          NODE_ENV: "production",
+          SUPABASE_POSTGRES_URL: "postgresql://postgres:secret@localhost:5432/postgres",
+        }),
+      ),
+    ).toEqual({
+      status: "refused",
+      reason: expect.stringContaining("production"),
+    });
+  });
+
+  it("refuses a missing SUPABASE_POSTGRES_URL instead of guessing a target", () => {
+    expect(checkLocalPostgresTarget(env())).toEqual({
+      status: "refused",
+      reason: expect.stringContaining("SUPABASE_POSTGRES_URL is not set"),
+    });
+  });
+
+  it("accepts loopback PostgreSQL URLs", () => {
+    for (const url of [
+      "postgresql://postgres:secret@localhost:5432/postgres",
+      "postgres://postgres:secret@127.0.0.1:5432/postgres",
+      "postgresql://postgres:secret@[::1]:5432/postgres",
+      "postgresql://postgres:secret@localhost/postgres",
+    ]) {
+      const result = checkLocalPostgresTarget(env({ SUPABASE_POSTGRES_URL: url }));
+      expect(result.status).toBe("ok");
+    }
+  });
+
+  it("rejects remote hosts, including Supabase project and pooler hosts", () => {
+    for (const url of [
+      "postgresql://postgres:secret@db.abcdefghijklmnopqrst.supabase.co:5432/postgres",
+      "postgresql://postgres:secret@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
+      "postgresql://postgres:secret@db.example.com:5432/postgres",
+      "postgresql://postgres:secret@192.168.1.10:5432/postgres",
+    ]) {
+      const result = checkLocalPostgresTarget(env({ SUPABASE_POSTGRES_URL: url }));
+      expect(result.status).toBe("refused");
+      if (result.status === "refused") {
+        expect(result.reason).toContain("loopback");
+      }
+    }
+  });
+
+  it("rejects non-PostgreSQL schemes", () => {
+    for (const url of ["file:/tmp/x.db", "mysql://root@localhost/db"]) {
+      expect(
+        checkLocalPostgresTarget(env({ SUPABASE_POSTGRES_URL: url })).status,
+      ).toBe("refused");
+    }
+  });
+
+  it("rejects a query string or fragment (parameters could override the host)", () => {
+    expect(
+      checkLocalPostgresTarget(
+        env({
+          SUPABASE_POSTGRES_URL:
+            "postgresql://postgres:secret@localhost:5432/postgres?host=db.example.supabase.co",
+        }),
+      ),
+    ).toEqual({
+      status: "refused",
+      reason: expect.stringContaining("query string"),
+    });
+    expect(
+      checkLocalPostgresTarget(
+        env({
+          SUPABASE_POSTGRES_URL: "postgresql://postgres:secret@localhost:5432/postgres#frag",
+        }),
+      ).status,
+    ).toBe("refused");
+  });
+
+  it("refuses a malformed URL and a URL with no host, without echoing credentials", () => {
+    const remote =
+      "postgresql://postgres:secret@db.abcdefghijklmnopqrst.supabase.co:5432/postgres";
+    const result = checkLocalPostgresTarget(env({ SUPABASE_POSTGRES_URL: remote }));
+    expect(result.status).toBe("refused");
+    if (result.status === "refused") {
+      expect(result.reason).not.toContain("secret");
+      expect(result.reason).not.toContain("postgres://");
+    }
+    expect(
+      checkLocalPostgresTarget(env({ SUPABASE_POSTGRES_URL: "postgresql://[::1" })).status,
+    ).toBe("refused");
+    expect(
+      checkLocalPostgresTarget(env({ SUPABASE_POSTGRES_URL: "postgresql:///mydb" })).status,
+    ).toBe("refused");
   });
 });
 

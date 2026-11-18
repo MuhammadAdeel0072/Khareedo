@@ -89,7 +89,7 @@ pending migrations and never resets or pushes the schema.
 | --- | --- | --- |
 | `scripts/clean-e2e-artifacts.mjs` | E2E/audit junk orders and products (by name) | Local `file:` target only; dry-run by default, `--apply` to delete |
 | `scripts/cleanup-import-test.mjs` | `Import Smoke*` products (with images/inventory) | Local `file:` target only; dry-run by default, `--apply` to delete |
-| `scripts/audit-concurrency.mjs` | Only the orders/products it created (tracked IDs) | Base URL must be `http://localhost:*`; `DATABASE_URL` must be explicitly set to a validated local `file:` URL (a localhost base alone does not establish the database target); never production |
+| `scripts/audit-concurrency.mjs` | Only the orders/products it created (tracked IDs) | Base URL must be `http://localhost:*`; `SUPABASE_POSTGRES_URL` must be explicitly set to a loopback PostgreSQL URL (localhost / 127.0.0.1 / ::1 — no Supabase or pooler host, no query string); the app at BASE must confirm server-side via `GET /api/db-target` that its own database is loopback (a localhost base alone does not establish the app's database target); never production. `DATABASE_URL` is not used by this script and is not guarded here — its operations go through `src/lib/db` (PostgreSQL). |
 
 Without `--apply`, a cleanup script lists exactly what it would delete and
 deletes nothing. `scripts/verify-import-export.sh` passes `--apply` because
@@ -121,6 +121,26 @@ is unchanged:
   creates marked disposable SQLite databases under the OS temp directory and
   refuses any other target. See its safety checks and
   `tests/helpers/disposable-sqlite.mjs`.
+
+## Verifying the app's own database (`GET /api/db-target`)
+
+The concurrency audit talks to a running app, and that app has its own
+`SUPABASE_POSTGRES_URL` — the one it was started with. A localhost base URL
+says nothing about which database the app uses: the dev server may have
+been started against production Supabase, and the audit would then create
+real orders there.
+
+Before any database operation or API mutation, the audit therefore asks the
+app itself: `GET /api/db-target` returns `{ databaseIsLoopback: true }`
+only when the app's `SUPABASE_POSTGRES_URL` is a loopback PostgreSQL URL.
+The response carries only that boolean — no credentials, no hostname, no
+connection string — and the endpoint does not connect to the database, it
+only parses the URL. If the app is unreachable, does not answer, or reports
+a remote database, the audit refuses. The same loopback rule (localhost,
+127.0.0.1, `::1`) is enforced in three places, which must stay in sync:
+`src/lib/db-target.ts` (app side), `scripts/db-target-guards.mjs`
+(script side), and `src/lib/db.ts` (which uses the same host set for its
+TLS decision).
 
 ## If you are unsure
 
