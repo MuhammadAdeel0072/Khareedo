@@ -16,7 +16,7 @@ package-lock.json
 playwright.config.ts
 postcss.config.mjs
 prisma\
-prisma\schema.prisma
+prisma\schema.sqlite.prisma
 project-structure.txt
 public\
 public\favicon.svg

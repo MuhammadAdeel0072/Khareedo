@@ -10,7 +10,7 @@
     "test:db": "node scripts/run-isolated-sqlite-tests.mjs",
     "test:db:check": "node scripts/run-isolated-sqlite-tests.mjs --check",
     "db:push": "node scripts/guard-destructive-db.mjs push",
-    "db:generate": "prisma generate --schema prisma/schema.prisma",
+    "db:generate": "prisma generate --schema prisma/schema.sqlite.prisma",
     "db:generate:postgres": "prisma generate --schema prisma/schema.postgres.prisma",
     "db:migrate": "node scripts/guard-destructive-db.mjs migrate",
     "db:reset": "node scripts/guard-destructive-db.mjs reset",

@@ -39,7 +39,7 @@ import { resolve } from "node:path";
 export const DESTRUCTIVE_ALLOW_ENV = "DB_DESTRUCTIVE_ALLOW";
 export const DESTRUCTIVE_ALLOW_VALUE = "1";
 
-// Directory of the Prisma schema (prisma/schema.prisma), anchored to this
+// Directory of the Prisma schema (prisma/schema.sqlite.prisma), anchored to this
 // module (scripts/) so relative paths resolve correctly no matter where the
 // caller runs from.
 const PRISMA_SCHEMA_DIR = fileURLToPath(new URL("../prisma", import.meta.url));

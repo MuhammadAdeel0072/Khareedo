@@ -1,6 +1,6 @@
 -- Safepay Phase 3: TEST-ONLY constraint overlay. NOT EXECUTED.
 -- Preconditions: a freshly initialized, marked disposable SQLite database built from
--- prisma/schema.prisma. That schema supplies all columns, foreign keys and indexes.
+-- prisma/schema.sqlite.prisma. That schema supplies all columns, foreign keys and indexes.
 -- This is NOT an upgrade script for an existing SQLite application database.
 -- The guarded test harness installs it after initialization. Do not execute standalone.
 -- SQLite INSERT/UPDATE abort triggers mirror PostgreSQL row CHECK predicates without

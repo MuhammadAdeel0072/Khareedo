@@ -41,7 +41,7 @@ before enabling email/password registrations.
 
 ## Database update
 
-`prisma/schema.prisma` adds `OAuthAccount` and `VerificationToken` tables.
+`prisma/schema.sqlite.prisma` adds `OAuthAccount` and `VerificationToken` tables.
 `prisma/sqlite-auth-additions.sql` is a non-destructive, CREATE TABLE-only
 proposal for the existing SQLite database. It has not been applied. Back up the
 database and review the SQL before applying it during an approved maintenance

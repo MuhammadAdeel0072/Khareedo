@@ -26,8 +26,10 @@ A refusal prints the reason and exits non-zero. Nothing is written.
   order's status all survive a re-run.
 - **Safe to rerun.** A second run only fills in missing seed data; counts do
   not change and no duplicates are created.
-- **For a clean slate**, delete the SQLite file and re-run `prisma db push`
-  + the seed — do not add a wipe mode to the seed.
+- **For a clean slate**, delete the SQLite file and re-run the guarded
+  `DB_DESTRUCTIVE_ALLOW=1 npm run db:push` + the seed — do not add a wipe
+  mode to the seed, and do not run a bare `prisma db push` (it bypasses the
+  target guards in `docs/SQL-SAFETY.md`).
 
 ### Accounts
 

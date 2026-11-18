@@ -12,7 +12,7 @@ what (if anything) must be configured on the deployment, and the security model.
 | Replace image | Edit dialog → Replace image | Old object is deleted automatically **only if no other banner references it** |
 | Delete banner | List → trash icon → confirm | DB row removed; image object cleaned up under the same orphan rule |
 
-Banner records live in the existing `Banner` table (`prisma/schema.prisma`,
+Banner records live in the existing `Banner` table (`prisma/schema.sqlite.prisma`,
 `prisma/schema.postgres.prisma`) — **no schema migration is required**. The
 storefront reads banners from the database via `getActiveBanners()` and admin
 writes call `revalidateTag("storefront-banners")`, so changes appear without

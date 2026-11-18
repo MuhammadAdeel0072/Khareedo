@@ -1,6 +1,11 @@
 // Khareedo — Smart E-Commerce Platform
-// SQLite development schema. The matching PostgreSQL schema and deployment
-// migrations are maintained in schema.postgres.prisma and migrations/.
+// SQLite schema for isolated tests and local-only SQLite workflows
+// (prisma/schema.sqlite.prisma). The application database is PostgreSQL:
+// the matching PostgreSQL schema and deployment migrations are maintained
+// in schema.postgres.prisma and migrations/. The two schemas describe the
+// same models and must stay in sync — see docs/PRISMA.md and
+// tests/unit/prisma-lockfile.test.ts. Only the datasource provider, the
+// generator output, and this header differ.
 
 generator client {
   provider = "prisma-client-js"
@@ -140,6 +145,10 @@ model Product {
   @@index([status])
   @@index([isFeatured])
   @@index([price])
+  // Storefront hot-path composites (mirrors schema.postgres.prisma).
+  @@index([status, deletedAt, categoryId])
+  @@index([isFeatured, createdAt])
+  @@index([rating])
 }
 
 model ProductImage {
@@ -262,6 +271,8 @@ model Order {
   @@index([status])
   @@index([status, createdAt])
   @@index([createdAt])
+  // Order history index (mirrors schema.postgres.prisma).
+  @@index([userId, createdAt])
 
   // Managed hosted-checkout metadata is NULL on historical/offline orders.
   // Existing PKR snapshots and order/payment statuses retain their meaning.
