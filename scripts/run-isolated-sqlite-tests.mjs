@@ -245,15 +245,21 @@ function safetyCheck() {
   }
 }
 
-function main() {
-  safetyCheck();
-  if (process.argv.includes("--check")) {
-    console.log("DRY_RUN=PASS (no Prisma initialization or tests run)");
-    return 0;
-  }
+// Test files that must run against their own genuinely isolated disposable
+// SQLite database — one fresh database per file, never shared with any other
+// file. Vitest does not run test files in the order they are passed on the
+// command line (locally integration.seed.test.ts happened to run first and
+// passed; in CI it ran after the other suites and failed), and the shared
+// database is only empty for a later file if every earlier file's afterAll
+// cleanup removed exactly its own rows. A suite in this set must therefore
+// never depend on execution order or on another suite's cleanup. Add a file
+// here only when it asserts on absolute table counts against an empty
+// database; every other file keeps sharing the single database below.
+const ISOLATED_TEST_FILES = new Set([
+  "tests/unit/integration.seed.test.ts",
+]);
 
-  const testFiles = selectTestFiles(process.argv.slice(2));
-  const appUrl = applicationDatabaseUrl();
+function runTestFilesAgainstFreshDatabase(testFiles, appUrl) {
   const { root, token } = makeMarkedRoot();
   let testEnvironment;
   try {
@@ -294,11 +300,35 @@ function main() {
     );
     if (testStatus.error) throw testStatus.error;
     if (testStatus.status !== 0) throw new Error(`Integration tests failed with exit code ${testStatus.status ?? 1}.`);
-    return 0;
   } finally {
     removeOwnTemporaryRoot(root, token);
     console.log("DISPOSABLE_DATABASE_CLEANUP=VERIFIED_OWN_TEMP_DIRECTORY_ONLY");
   }
+}
+
+function main() {
+  safetyCheck();
+  if (process.argv.includes("--check")) {
+    console.log("DRY_RUN=PASS (no Prisma initialization or tests run)");
+    return 0;
+  }
+
+  const testFiles = selectTestFiles(process.argv.slice(2));
+  const appUrl = applicationDatabaseUrl();
+  const isolatedFiles = testFiles.filter((file) => ISOLATED_TEST_FILES.has(file));
+  const sharedFiles = testFiles.filter((file) => !ISOLATED_TEST_FILES.has(file));
+
+  // The shared suites keep exactly their previous behaviour: one disposable
+  // database for all of them, each suite cleaning up its own rows.
+  if (sharedFiles.length > 0) {
+    runTestFilesAgainstFreshDatabase(sharedFiles, appUrl);
+  }
+  // Each isolated suite gets its own fresh disposable database, so it can
+  // never see rows created by another suite, in any execution order.
+  for (const file of isolatedFiles) {
+    runTestFilesAgainstFreshDatabase([file], appUrl);
+  }
+  return 0;
 }
 
 try {

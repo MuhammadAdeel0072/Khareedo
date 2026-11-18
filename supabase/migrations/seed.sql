@@ -3,7 +3,10 @@
 -- ============================================================
 -- Khareedo — Supabase demo seed (OPTIONAL)
 -- Run AFTER 0001_schema.sql and 0002_rls.sql (Supabase SQL Editor).
--- Idempotent: uses ON CONFLICT on natural keys (slug / email / key).
+-- Idempotent: uses ON CONFLICT on natural keys (slug / key / code /
+-- product_id). Re-applying never overwrites existing rows: store settings
+-- and inventory quantities keep the values already in the database, so a
+-- re-applied seed cannot reset an operator's settings or live stock levels.
 -- Catalog and settings only: this file never creates accounts. SQL seeds
 -- must never provision login accounts or carry password hashes — create
 -- accounts through registration or the guarded scripts/seed.ts with
@@ -11,24 +14,24 @@
 -- ============================================================
 
 -- ── Store settings ──
-insert into public.store_settings (key, value, updated_at) values ('announcement_text', 'Free Delivery on Orders Above Rs 3,000', now()) on conflict (key) do update set value = excluded.value;
-insert into public.store_settings (key, value, updated_at) values ('bank_transfer_enabled', 'false', now()) on conflict (key) do update set value = excluded.value;
-insert into public.store_settings (key, value, updated_at) values ('cod_enabled', 'true', now()) on conflict (key) do update set value = excluded.value;
-insert into public.store_settings (key, value, updated_at) values ('delivery_fee_express', '400', now()) on conflict (key) do update set value = excluded.value;
-insert into public.store_settings (key, value, updated_at) values ('delivery_fee_standard', '200', now()) on conflict (key) do update set value = excluded.value;
-insert into public.store_settings (key, value, updated_at) values ('facebook_url', 'https://facebook.com/khareedo', now()) on conflict (key) do update set value = excluded.value;
-insert into public.store_settings (key, value, updated_at) values ('free_delivery_threshold', '3000', now()) on conflict (key) do update set value = excluded.value;
-insert into public.store_settings (key, value, updated_at) values ('gift_wrap_charge', '150', now()) on conflict (key) do update set value = excluded.value;
-insert into public.store_settings (key, value, updated_at) values ('gift_wrap_description', 'Premium gift wrapping with ribbon and a personalized note', now()) on conflict (key) do update set value = excluded.value;
-insert into public.store_settings (key, value, updated_at) values ('gift_wrap_enabled', 'true', now()) on conflict (key) do update set value = excluded.value;
-insert into public.store_settings (key, value, updated_at) values ('instagram_url', 'https://instagram.com/khareedo', now()) on conflict (key) do update set value = excluded.value;
-insert into public.store_settings (key, value, updated_at) values ('online_payment_enabled', 'false', now()) on conflict (key) do update set value = excluded.value;
-insert into public.store_settings (key, value, updated_at) values ('store_address', 'Gulberg III, Lahore, Pakistan', now()) on conflict (key) do update set value = excluded.value;
-insert into public.store_settings (key, value, updated_at) values ('store_email', 'support@khareedo.pk', now()) on conflict (key) do update set value = excluded.value;
-insert into public.store_settings (key, value, updated_at) values ('store_name', 'Khareedo', now()) on conflict (key) do update set value = excluded.value;
-insert into public.store_settings (key, value, updated_at) values ('store_phone', '+92 300 1234567', now()) on conflict (key) do update set value = excluded.value;
-insert into public.store_settings (key, value, updated_at) values ('store_tagline', 'Everyday essentials. Better choices.', now()) on conflict (key) do update set value = excluded.value;
-insert into public.store_settings (key, value, updated_at) values ('whatsapp_number', '923001234567', now()) on conflict (key) do update set value = excluded.value;
+insert into public.store_settings (key, value, updated_at) values ('announcement_text', 'Free Delivery on Orders Above Rs 3,000', now()) on conflict (key) do nothing;
+insert into public.store_settings (key, value, updated_at) values ('bank_transfer_enabled', 'false', now()) on conflict (key) do nothing;
+insert into public.store_settings (key, value, updated_at) values ('cod_enabled', 'true', now()) on conflict (key) do nothing;
+insert into public.store_settings (key, value, updated_at) values ('delivery_fee_express', '400', now()) on conflict (key) do nothing;
+insert into public.store_settings (key, value, updated_at) values ('delivery_fee_standard', '200', now()) on conflict (key) do nothing;
+insert into public.store_settings (key, value, updated_at) values ('facebook_url', 'https://facebook.com/khareedo', now()) on conflict (key) do nothing;
+insert into public.store_settings (key, value, updated_at) values ('free_delivery_threshold', '3000', now()) on conflict (key) do nothing;
+insert into public.store_settings (key, value, updated_at) values ('gift_wrap_charge', '150', now()) on conflict (key) do nothing;
+insert into public.store_settings (key, value, updated_at) values ('gift_wrap_description', 'Premium gift wrapping with ribbon and a personalized note', now()) on conflict (key) do nothing;
+insert into public.store_settings (key, value, updated_at) values ('gift_wrap_enabled', 'true', now()) on conflict (key) do nothing;
+insert into public.store_settings (key, value, updated_at) values ('instagram_url', 'https://instagram.com/khareedo', now()) on conflict (key) do nothing;
+insert into public.store_settings (key, value, updated_at) values ('online_payment_enabled', 'false', now()) on conflict (key) do nothing;
+insert into public.store_settings (key, value, updated_at) values ('store_address', 'Gulberg III, Lahore, Pakistan', now()) on conflict (key) do nothing;
+insert into public.store_settings (key, value, updated_at) values ('store_email', 'support@khareedo.pk', now()) on conflict (key) do nothing;
+insert into public.store_settings (key, value, updated_at) values ('store_name', 'Khareedo', now()) on conflict (key) do nothing;
+insert into public.store_settings (key, value, updated_at) values ('store_phone', '+92 300 1234567', now()) on conflict (key) do nothing;
+insert into public.store_settings (key, value, updated_at) values ('store_tagline', 'Everyday essentials. Better choices.', now()) on conflict (key) do nothing;
+insert into public.store_settings (key, value, updated_at) values ('whatsapp_number', '923001234567', now()) on conflict (key) do nothing;
 
 -- ── Categories (2-level) ──
 insert into public.categories (name, slug, description, image_url, parent_id, is_active, sort_order) values ('Watches', 'watches', 'Analog, digital and smart watches for everyone', null, null, true, 1) on conflict (slug) do nothing;
@@ -154,57 +157,57 @@ insert into public.product_images (product_id, url, alt, sort_order) values ((se
 insert into public.product_images (product_id, url, alt, sort_order) values ((select id from public.products where slug = 'zip-around-long-wallet'), '/images/products/zip-around-long-wallet.png', 'Zip Around Long Wallet', 0) on conflict do nothing;
 
 -- ── Inventory (one row per product) ──
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = '20w-pd-fast-charger'), 52, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'amoled-smart-watch-ultra'), 21, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'anker-soundcore-r50i'), 29, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'anne-klein-bracelet-watch'), 10, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'apple-airpods-2nd-generation'), 8, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'bella-vita-luxury-perfume'), 27, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'bluetooth-calling-watch-t900'), 80, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'boat-airdopes-141'), 42, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'braided-usb-c-cable'), 90, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'casio-mens-analog-watch'), 23, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'charm-chain-bracelet'), 58, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'classic-bifold-wallet'), 47, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'classic-black-duo-set'), 19, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'classic-leather-handbag'), 22, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'clover-necklace-set'), 44, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'curren-stainless-steel-watch'), 40, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'designer-shoulder-bag'), 11, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'embroidered-evening-clutch'), 17, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'fitbit-inspire-3'), 9, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'fossil-townsman-chronograph'), 7, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'fresh-aqua-cologne'), 35, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'genuine-leather-wallet'), 32, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'gold-plated-bangles-set'), 50, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'his-hers-couple-watch-set'), 14, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'ht66-fitness-tracker'), 60, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'infinix-xe27-pro'), 37, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'jbl-wave-buds'), 23, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'kundan-bridal-set'), 13, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'leather-strap-ladies-watch'), 18, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'magnetic-car-mount'), 38, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'mini-crossbody-bag'), 30, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'minicity-elegant-slim-watch'), 35, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'naviforce-luxury-chronograph'), 31, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'noir-intense-eau-de-parfum'), 18, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'oud-royal-attar'), 22, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'pearl-drop-earrings'), 65, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'power-bank-20000mah'), 24, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'premium-tote-bag'), 25, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'realme-buds-t300'), 19, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'rfid-slim-wallet'), 41, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'rose-gold-matching-pair'), 17, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'rose-gold-mesh-ladies-watch'), 28, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'rose-musk-body-mist'), 48, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'skmei-sport-digital-watch'), 55, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'smart-watch-pro-series-8'), 45, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'soundpeats-q3-pro-anc'), 26, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'timex-classic-leather-watch'), 12, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'wireless-charging-pad-15w'), 29, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'xiaomi-redmi-buds-5'), 16, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'xiaomi-smart-band-8'), 33, 5) on conflict (product_id) do update set quantity = excluded.quantity;
-insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'zip-around-long-wallet'), 26, 5) on conflict (product_id) do update set quantity = excluded.quantity;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = '20w-pd-fast-charger'), 52, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'amoled-smart-watch-ultra'), 21, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'anker-soundcore-r50i'), 29, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'anne-klein-bracelet-watch'), 10, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'apple-airpods-2nd-generation'), 8, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'bella-vita-luxury-perfume'), 27, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'bluetooth-calling-watch-t900'), 80, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'boat-airdopes-141'), 42, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'braided-usb-c-cable'), 90, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'casio-mens-analog-watch'), 23, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'charm-chain-bracelet'), 58, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'classic-bifold-wallet'), 47, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'classic-black-duo-set'), 19, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'classic-leather-handbag'), 22, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'clover-necklace-set'), 44, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'curren-stainless-steel-watch'), 40, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'designer-shoulder-bag'), 11, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'embroidered-evening-clutch'), 17, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'fitbit-inspire-3'), 9, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'fossil-townsman-chronograph'), 7, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'fresh-aqua-cologne'), 35, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'genuine-leather-wallet'), 32, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'gold-plated-bangles-set'), 50, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'his-hers-couple-watch-set'), 14, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'ht66-fitness-tracker'), 60, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'infinix-xe27-pro'), 37, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'jbl-wave-buds'), 23, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'kundan-bridal-set'), 13, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'leather-strap-ladies-watch'), 18, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'magnetic-car-mount'), 38, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'mini-crossbody-bag'), 30, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'minicity-elegant-slim-watch'), 35, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'naviforce-luxury-chronograph'), 31, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'noir-intense-eau-de-parfum'), 18, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'oud-royal-attar'), 22, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'pearl-drop-earrings'), 65, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'power-bank-20000mah'), 24, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'premium-tote-bag'), 25, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'realme-buds-t300'), 19, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'rfid-slim-wallet'), 41, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'rose-gold-matching-pair'), 17, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'rose-gold-mesh-ladies-watch'), 28, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'rose-musk-body-mist'), 48, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'skmei-sport-digital-watch'), 55, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'smart-watch-pro-series-8'), 45, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'soundpeats-q3-pro-anc'), 26, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'timex-classic-leather-watch'), 12, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'wireless-charging-pad-15w'), 29, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'xiaomi-redmi-buds-5'), 16, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'xiaomi-smart-band-8'), 33, 5) on conflict (product_id) do nothing;
+insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = 'zip-around-long-wallet'), 26, 5) on conflict (product_id) do nothing;
 
 -- ── Banners ──
 insert into public.banners (title, subtitle, image_url, link_url, placement, is_active, sort_order) values ('Everyday essentials. Better choices.', 'Discover watches, accessories, and everyday favourites — all in one place at Khareedo.', '/images/banners/hero-main.png', '/products', 'HERO', true, 1);

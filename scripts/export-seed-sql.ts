@@ -1,6 +1,9 @@
 /**
  * Export live catalog data → supabase/migrations/seed.sql (Postgres demo seed).
- * Reads via Prisma, emits idempotent SQL keyed on natural keys (slug/email/sku).
+ * Reads via Prisma, emits idempotent SQL keyed on natural keys (slug/key/code).
+ * Re-applying the generated SQL never overwrites existing rows: store
+ * settings and inventory quantities use ON CONFLICT DO NOTHING, so an
+ * operator's settings and live stock levels survive a re-applied seed.
  *
  * Catalog and settings ONLY. This exporter never exports accounts, password
  * hashes, or addresses: SQL seeds must never provision login accounts (see
@@ -38,7 +41,7 @@ async function main() {
   lines.push(`-- ── Store settings ──`);
   for (const s of settings) {
     lines.push(
-      `insert into public.store_settings (key, value, updated_at) values (${q(s.key)}, ${q(s.value)}, now()) on conflict (key) do update set value = excluded.value;`
+      `insert into public.store_settings (key, value, updated_at) values (${q(s.key)}, ${q(s.value)}, now()) on conflict (key) do nothing;`
     );
   }
   lines.push(``);
@@ -88,7 +91,7 @@ async function main() {
   for (const p of products) {
     if (!p.inventory) continue;
     lines.push(
-      `insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = ${q(p.slug)}), ${p.inventory.quantity}, ${p.inventory.lowStockThreshold}) on conflict (product_id) do update set quantity = excluded.quantity;`
+      `insert into public.inventory (product_id, quantity, low_stock_threshold) values ((select id from public.products where slug = ${q(p.slug)}), ${p.inventory.quantity}, ${p.inventory.lowStockThreshold}) on conflict (product_id) do nothing;`
     );
   }
   lines.push(``);

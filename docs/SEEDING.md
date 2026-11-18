@@ -85,7 +85,10 @@ Prisma/NextAuth models — see `docs/SUPABASE-SETUP.md` and
 `docs/DATABASE-MIGRATION.md`; do not apply it to the application database).
 
 It provisions catalog and settings only. It never creates accounts and
-carries no password hashes. The exporter that regenerates it,
+carries no password hashes. Re-applying it never overwrites existing rows:
+store settings and inventory quantities use `ON CONFLICT DO NOTHING`, so
+an operator's settings and live stock levels survive a re-applied seed.
+The exporter that regenerates it,
 `scripts/export-seed-sql.ts`, exports catalog/settings only for the same
 reason — it reads the database configured by `SUPABASE_POSTGRES_URL` but
 never writes to it, and it never exports accounts.
@@ -103,4 +106,8 @@ never writes to it, and it never exports accounts.
   for local verification. They read the passwords from `SEED_ADMIN_PASSWORD`
   / `SEED_CUSTOMER_PASSWORD` and refuse to run when they are unset.
 - The isolated CI database tests (`npm run test:db`) build their own
-  disposable SQLite databases and never use the seed script.
+  disposable SQLite databases and never use the seed script. The seed
+  suite (`tests/unit/integration.seed.test.ts`) runs against its own fresh
+  disposable database, separate from the shared database the other suites
+  use, so it cannot see rows created by another suite in any execution
+  order (see `scripts/run-isolated-sqlite-tests.mjs`).
