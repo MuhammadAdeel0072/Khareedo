@@ -2,7 +2,7 @@
 
 A complete, production-ready e-commerce platform: customer storefront + admin dashboard,
 built with **Next.js 16 (App Router) · TypeScript · Tailwind CSS 4 · shadcn/ui · Prisma**.
-Database migrations for **Supabase PostgreSQL (with RLS)** ship in `supabase/migrations/`.
+Database migrations for **Supabase PostgreSQL** ship in `prisma/migrations/` (applied with `npm run db:postgres:deploy`).
 
 > Full requirement traceability: [`docs/REQUIREMENTS-TRACEABILITY.md`](docs/REQUIREMENTS-TRACEABILITY.md)
 > Business decisions & open items: [`docs/DECISIONS.md`](docs/DECISIONS.md)
@@ -139,7 +139,8 @@ src/
 │                           # settings, reports, users  (all business logic)
 ├── types/
 └── proxy.ts                # Next.js 16 route guard (/admin, /account)
-supabase/migrations/        # production Postgres schema + RLS policies
+prisma/migrations/          # reviewed Postgres migrations (deploy: npm run db:postgres:deploy)
+docs/legacy/                # quarantined legacy Supabase SQL (never apply)
 scripts/                    # seed + image generation
 tests/                      # vitest unit/integration + playwright e2e
 ```

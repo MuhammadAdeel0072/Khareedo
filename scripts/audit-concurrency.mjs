@@ -11,9 +11,53 @@
  * Cleanup: cancels + deletes created orders, restores inventory.
  */
 import { execSync } from "node:child_process";
+import {
+  checkLocalBaseUrl,
+  checkLocalPostgresTarget,
+  verifyAppDatabaseTarget,
+} from "./db-target-guards.mjs";
 
 const BASE = process.env.BASE || "http://localhost:3000";
 const N_CUSTOMERS = 6;
+
+// Safety (PR-07): this audit creates and then deletes real orders against a
+// running app, and its setup/verify/cleanup snippets write to the database
+// directly — both paths go through src/lib/db, the PostgreSQL client driven
+// by SUPABASE_POSTGRES_URL. DATABASE_URL (SQLite) is not used by this
+// script at all, so it is not guarded here.
+//
+// Two database targets must both be loopback, in order, before anything
+// runs:
+//   1. This script's own SUPABASE_POSTGRES_URL (the tsx snippets' target).
+//   2. The app at BASE's own database target, verified server-side via
+//      GET /api/db-target — a localhost base URL says nothing about which
+//      database the app itself uses (it may have been started against
+//      production Supabase). The endpoint reports only a boolean, never
+//      credentials or connection details; an unreachable or non-loopback
+//      app refuses the audit.
+if (process.env.NODE_ENV === "production") {
+  console.error("audit-concurrency: refused: NODE_ENV is production.");
+  process.exit(1);
+}
+const baseCheck = checkLocalBaseUrl(BASE);
+if (baseCheck.status !== "ok") {
+  console.error(`audit-concurrency: refused: ${baseCheck.reason}`);
+  process.exit(1);
+}
+const targetCheck = checkLocalPostgresTarget(process.env);
+if (targetCheck.status !== "ok") {
+  console.error(`audit-concurrency: refused: ${targetCheck.reason}`);
+  process.exit(1);
+}
+console.log(
+  `audit-concurrency: script database target: loopback PostgreSQL (${targetCheck.host})`,
+);
+const appCheck = await verifyAppDatabaseTarget(BASE);
+if (appCheck.status !== "ok") {
+  console.error(`audit-concurrency: refused: ${appCheck.reason}`);
+  process.exit(1);
+}
+console.log("audit-concurrency: app database target: loopback (verified server-side)");
 
 function tsx(script) {
   return execSync(`npx tsx -e '${script}'`, {

@@ -14,10 +14,11 @@
 
 ## Do not use the legacy SQL files
 
-`supabase/migrations/0001_schema.sql`, `0002_rls.sql`, and `seed.sql` describe a
-different snake_case schema based on Supabase Auth profiles. They do not match
-the current Prisma/NextAuth models. Do not run these files for this migration.
-Use the reviewed Prisma migrations under `prisma/migrations/`.
+`docs/legacy/supabase-migrations/0001_schema.sql`, `0002_rls.sql`, and
+`seed.sql` (quarantined there in PR-07) describe a different snake_case schema
+based on Supabase Auth profiles. They do not match the current Prisma/NextAuth
+models. Do not run these files for this migration. Use the reviewed Prisma
+migrations under `prisma/migrations/`.
 
 The application accesses the database only from server-side Prisma code and
 continues to use NextAuth. The access migration revokes table access from

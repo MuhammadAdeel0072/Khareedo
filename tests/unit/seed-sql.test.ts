@@ -1,6 +1,6 @@
 // Static guards for the Postgres demo seed (PR-06 fix).
 //
-// supabase/migrations/seed.sql is a legacy, hand-maintained SQL file, and
+// docs/legacy/supabase-migrations/seed.sql is a legacy, hand-maintained SQL file, and
 // scripts/export-seed-sql.ts regenerates it from the live database. Both
 // must agree: re-applying the seed must never overwrite existing rows, and
 // the SQL seed must never provision accounts or carry password hashes.
@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const seedSql = readFileSync(
-  fileURLToPath(new URL("../../supabase/migrations/seed.sql", import.meta.url)),
+  fileURLToPath(new URL("../../docs/legacy/supabase-migrations/seed.sql", import.meta.url)),
   "utf8",
 );
 const exporter = readFileSync(
