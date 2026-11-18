@@ -64,7 +64,9 @@ The regular application runtime now uses the PostgreSQL Prisma client and
 when launched through the marked disposable-database harness. Keep
 `DATABASE_URL` pointed at SQLite and keep `db/custom.db` and its backup.
 
-To roll back application traffic, deploy the previous SQLite application
-version and its matching generated client after stopping writes. Do not delete
+To roll back application traffic, redeploy the previous release against the
+same PostgreSQL database. Do not switch back to SQLite: the cutover is
+complete, production data lives in PostgreSQL, and the SQLite file is now
+test-only (disposable isolated databases + local development). Do not delete
 PostgreSQL data or the SQLite backup; reconcile writes made after cutover before
 attempting another switch.
