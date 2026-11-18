@@ -152,19 +152,12 @@ async function readBoundedText(request: Request): Promise<string | null> {
 }
 
 export async function POST(request: Request) {
-  // Per-IP bucket first (fairness between honest clients), then the global
-  // bucket (the spoof-proof bound). Either one tripped answers 429.
-  const perIp = rateLimit(
-    `csp-report:${clientIp(request.headers)}`,
-    CSP_REPORT_PER_IP_LIMIT,
-    60_000,
-  );
-  if (!perIp.ok) {
-    return new Response(null, {
-      status: 429,
-      headers: { "Retry-After": String(perIp.retryAfterSec) },
-    });
-  }
+  // Global bucket FIRST (the spoof-proof bound), then the per-IP bucket.
+  // The order matters: after the global cap is reached, a request must be
+  // rejected here without ever calling clientIp() or touching a per-IP
+  // bucket — otherwise a flood of rotating spoofed IPs would keep creating
+  // new per-IP entries in the in-memory Map even though every request is
+  // rejected. Either bucket tripped answers 429.
   const global = rateLimit(
     "csp-report:global",
     CSP_REPORT_GLOBAL_LIMIT,
@@ -174,6 +167,17 @@ export async function POST(request: Request) {
     return new Response(null, {
       status: 429,
       headers: { "Retry-After": String(global.retryAfterSec) },
+    });
+  }
+  const perIp = rateLimit(
+    `csp-report:${clientIp(request.headers)}`,
+    CSP_REPORT_PER_IP_LIMIT,
+    60_000,
+  );
+  if (!perIp.ok) {
+    return new Response(null, {
+      status: 429,
+      headers: { "Retry-After": String(perIp.retryAfterSec) },
     });
   }
 
