@@ -66,10 +66,21 @@ Browsers POST violation reports to this endpoint (see
 `src/app/api/csp-report/route.ts`). It is public by design: browsers send
 reports without credentials.
 
-Safety rules, all tested (`tests/unit/csp-report-route.test.ts`):
+Safety rules, all tested (`tests/unit/csp-report-route.test.ts`,
+`tests/unit/csp-report-spoof.test.ts`):
 
-- **Rate-limited:** 30 reports/minute per IP via the existing in-memory
-  limiter (`src/lib/rate-limit.ts`); excess answers 429 with `Retry-After`.
+- **Two-tier rate limiting** via the existing in-memory limiter
+  (`src/lib/rate-limit.ts`); either tier tripped answers 429 with
+  `Retry-After`:
+  - *Per-IP bucket (30/min, best effort):* fairness between honest
+    clients. It is **not** robust per-IP protection — see the trust model
+    below.
+  - *Global bucket (300/min, the real bound):* keyed on nothing
+    attacker-controlled, so no spoofed header can bypass it. At most 300
+    reports per minute per process reach the logs, whatever the headers
+    say — generous for a tuning channel (a well-tuned policy should
+    produce near-zero reports), small enough to bound log volume under
+    attack.
 - **Body capped at 8 KiB:** oversized bodies are dropped silently (204).
 - **Only allowlisted fields are logged:** `document-uri` and `blocked-uri`
   are reduced to their origin; `violated-directive` must match a strict
@@ -84,6 +95,44 @@ Safety rules, all tested (`tests/unit/csp-report-route.test.ts`):
 To review reports, search server logs for `"type":"csp-report"`. A report
 means a resource *would have been blocked* under an enforcing policy —
 during the report-only window, nothing is actually blocked.
+
+### Trust model for forwarded IPs (reviewed 2026-11-18)
+
+The per-IP bucket keys on `clientIp()` (`src/lib/rate-limit.ts`), which
+trusts the first `X-Forwarded-For` entry. That header is client-controlled
+unless a trusted proxy overwrites it — so forwarded-IP trust cannot be
+established from the repository alone:
+
+- **What the proxy does:** the repo's `Caddyfile` sets
+  `header_up X-Forwarded-For {remote_host}` on both handlers. In Caddy,
+  that *replaces* the incoming header with the connecting client's IP
+  (Caddy's default is to append, which would pass a spoofed value
+  through); a client-supplied value cannot survive this Caddyfile.
+- **Why that is not enough to trust it:** the `Caddyfile` dates from the
+  initial project checkpoint, listens on plain HTTP `:81`, and nothing in
+  the repo says it is the production proxy — there is no Dockerfile,
+  compose file, or deployment guide naming it, and no firewall rule
+  showing port 3000 is not directly reachable. The production start
+  command (`bun .next/standalone/server.js`) binds the Next.js server to
+  all interfaces by default, so on an unprotected host an attacker could
+  bypass Caddy entirely and send any `X-Forwarded-For` they like straight
+  to the app.
+- **Consequence:** do not claim robust per-IP protection for this
+  endpoint. The per-IP bucket is a fairness mechanism for honest clients;
+  the global bucket is the protection, and the spoof tests prove it:
+  rotating the claimed IP on every request still stops at 300 reports/min
+  (`tests/unit/csp-report-spoof.test.ts`).
+- **Same caveat, wider scope:** `clientIp()` is shared by the register,
+  checkout, Safepay session, resend-verification and admin image-import
+  routes — their per-IP limits are equally spoofable if the app is reached
+  directly. Fixing the shared helper (or pinning the deployment so :3000
+  is localhost-only behind the overwriting proxy) is a follow-up, not
+  part of this PR.
+- **Per-process limits:** both buckets live in a module-level `Map` in
+  the server process. That matches the current single-instance deployment
+  assumption. Under a multi-instance deployment each instance enforces its
+  own cap, so the effective global cap is N x the configured value. No
+  Redis or other shared store is introduced by this PR.
 
 ## Development vs production
 
@@ -103,6 +152,10 @@ during the report-only window, nothing is actually blocked.
 - `tests/unit/csp-report-route.test.ts` — report parsing (origins only,
   `inline`/`eval` preserved, malformed input rejected), 204 behaviour,
   oversized-body drop, per-IP rate limiting, no query-string leakage.
+- `tests/unit/csp-report-spoof.test.ts` — spoofed `X-Forwarded-For`
+  headers: a single spoofed IP still hits the per-IP cap, rotating
+  spoofed IPs stop at the global cap (300/min), and a multi-value
+  `X-Forwarded-For` is keyed on its first entry.
 - `tests/e2e/security-headers.spec.ts` — live header assertions on the
   storefront, `/api/health`, a static asset, the Safepay session route's
   preserved `no-referrer`, and a 204 from the report endpoint. Needs a
@@ -122,7 +175,13 @@ during the report-only window, nothing is actually blocked.
   Safepay redirect return flow); deferred, not forgotten.
 - **Caddy is untouched.** The deployment proxy (`Caddyfile`) must preserve
   these headers rather than stripping or overriding them; verify on the
-  deployment path, not just in `next start`.
+  deployment path, not just in `next start`. The same proxy question
+  decides whether `X-Forwarded-For` can be trusted at all — see the trust
+  model in the reporting section above.
+- **Per-IP rate limiting is best effort, per process.** Both buckets of
+  the CSP report endpoint (and every other `clientIp()`-based limit in
+  the app) are spoofable if the app is reached directly, and are enforced
+  separately by each server process under multi-instance deployment.
 - **Report volume is only visible in server logs.** There is no dashboard
   or alerting for CSP reports by design — alerting on violations would
   spam operators during the observation window.
