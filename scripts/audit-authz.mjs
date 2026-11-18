@@ -13,6 +13,19 @@
  *  H. Checkout rate-limit present (11 rapid calls → expect at least one 429 only if configured > 10; informational)
  */
 const BASE = process.env.BASE || "http://localhost:3000";
+// Test credentials come from the environment (chosen when seeding — see
+// docs/SEEDING.md). Never hardcode passwords in this repo.
+const SEED_ADMIN_PASSWORD = process.env.SEED_ADMIN_PASSWORD;
+if (!SEED_ADMIN_PASSWORD) {
+  console.error("Set SEED_ADMIN_PASSWORD before running this script.");
+  process.exit(1);
+}
+const SEED_CUSTOMER_PASSWORD = process.env.SEED_CUSTOMER_PASSWORD;
+if (!SEED_CUSTOMER_PASSWORD) {
+  console.error("Set SEED_CUSTOMER_PASSWORD before running this script.");
+  process.exit(1);
+}
+
 
 let jar = {}; // cookie store per persona
 function setCookies(name, res) {
@@ -105,7 +118,7 @@ async function probeUnauth() {
 }
 
 async function probeCustomerVsAdmin() {
-  const user = await login("customer", "ali.hassan@example.com", "Customer@123");
+  const user = await login("customer", "ali.hassan@example.com", SEED_CUSTOMER_PASSWORD);
   record("B-0", "customer login resolves", "user.role=CUSTOMER", JSON.stringify(user && user.role), user && user.role === "CUSTOMER");
   let i = 0;
   for (const [url, method] of ADMIN_GETS) {
@@ -123,9 +136,9 @@ async function probeCustomerVsAdmin() {
 }
 
 async function probeIDOR() {
-  const user = await login("customer", "ali.hassan@example.com", "Customer@123");
+  const user = await login("customer", "ali.hassan@example.com", SEED_CUSTOMER_PASSWORD);
   record("C-0", "customer login resolves", "CUSTOMER", String(user?.role), user?.role === "CUSTOMER");
-  await login("admin", "admin@khareedo.pk", "Admin@123");
+  await login("admin", "admin@khareedo.pk", SEED_ADMIN_PASSWORD);
   const { execSync } = await import("node:child_process");
   let rows = [];
   try {

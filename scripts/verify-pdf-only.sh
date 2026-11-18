@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Test credentials come from the environment (chosen when seeding — see
+# docs/SEEDING.md). Never hardcode passwords in this repo.
+if [ -z "${SEED_ADMIN_PASSWORD:-}" ]; then echo "Set SEED_ADMIN_PASSWORD before running this script." >&2; exit 1; fi
 set -u
 cd /home/z/my-project
 set -a; source .env; set +a
@@ -7,7 +10,7 @@ SRV=$!
 for i in $(seq 1 30); do curl -s -o /dev/null http://localhost:3000/ && break; sleep 1; done
 JAR=/tmp/kh-jar.txt; rm -f "$JAR"
 CSRF=$(curl -s -c "$JAR" http://localhost:3000/api/auth/csrf | sed 's/.*"csrfToken":"\([^"]*\)".*/\1/')
-curl -s -b "$JAR" -c "$JAR" -X POST http://localhost:3000/api/auth/callback/credentials -H "Content-Type: application/x-www-form-urlencoded" --data-urlencode "csrfToken=$CSRF" --data-urlencode "email=admin@khareedo.pk" --data-urlencode "password=Admin@123" --data-urlencode "json=true" -o /dev/null
+curl -s -b "$JAR" -c "$JAR" -X POST http://localhost:3000/api/auth/callback/credentials -H "Content-Type: application/x-www-form-urlencoded" --data-urlencode "csrfToken=$CSRF" --data-urlencode "email=admin@khareedo.pk" --data-urlencode "password=$SEED_ADMIN_PASSWORD" --data-urlencode "json=true" -o /dev/null
 for t in reports products orders customers; do
   out="scripts/tmp-$t.pdf"
   code=$(curl -s -b "$JAR" "http://localhost:3000/api/admin/export?type=$t&format=pdf" -o "$out" -w "%{http_code}")

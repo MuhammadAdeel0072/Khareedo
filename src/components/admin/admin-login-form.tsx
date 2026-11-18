@@ -64,7 +64,7 @@ export function AdminLoginForm() {
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              placeholder="admin@khareedo.pk"
+              placeholder="you@example.com"
               autoComplete="email"
               required
               className="mt-1.5 h-11"

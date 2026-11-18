@@ -26,9 +26,24 @@ test.afterAll(async () => {
   await db.$disconnect();
 });
 
-const CUSTOMER = { email: "ali.hassan@example.com", password: "Customer@123" };
-const SARA = { email: "sara.khan@example.com", password: "Customer@123" };
-const ADMIN = { email: "admin@khareedo.pk", password: "Admin@123" };
+// Test accounts are the seeded accounts (see docs/SEEDING.md). Passwords
+// come from the environment — the same values the seed ran with — and are
+// never stored in this file. Seed first, then run the suite with both set:
+//   SEED_ALLOW=1 SEED_ADMIN_PASSWORD=<...> SEED_CUSTOMER_PASSWORD=<...> bun scripts/seed.ts
+//   SEED_ADMIN_PASSWORD=<...> SEED_CUSTOMER_PASSWORD=<...> npx playwright test
+function requiredEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(
+      `E2E requires ${name} to be set (seed with SEED_ADMIN_PASSWORD / SEED_CUSTOMER_PASSWORD first — see docs/SEEDING.md).`,
+    );
+  }
+  return value;
+}
+
+const CUSTOMER = { email: "ali.hassan@example.com", password: requiredEnv("SEED_CUSTOMER_PASSWORD") };
+const SARA = { email: "sara.khan@example.com", password: requiredEnv("SEED_CUSTOMER_PASSWORD") };
+const ADMIN = { email: "admin@khareedo.pk", password: requiredEnv("SEED_ADMIN_PASSWORD") };
 
 /** Customer sign-in with a post-login wait (session cookie must settle before navigation). */
 async function customerLogin(page: Page, creds = CUSTOMER) {

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Test credentials come from the environment (chosen when seeding — see
+# docs/SEEDING.md). Never hardcode passwords in this repo.
+if [ -z "${SEED_ADMIN_PASSWORD:-}" ]; then echo "Set SEED_ADMIN_PASSWORD before running this script." >&2; exit 1; fi
+if [ -z "${SEED_CUSTOMER_PASSWORD:-}" ]; then echo "Set SEED_CUSTOMER_PASSWORD before running this script." >&2; exit 1; fi
 # End-to-end verification of admin Excel/PDF export + import (single server session).
 set -u
 cd /home/z/my-project
@@ -26,7 +30,7 @@ login=$(curl -s -b "$JAR" -c "$JAR" -X POST http://localhost:3000/api/auth/callb
   -H "Content-Type: application/x-www-form-urlencoded" \
   --data-urlencode "csrfToken=$CSRF" \
   --data-urlencode "email=admin@khareedo.pk" \
-  --data-urlencode "password=Admin@123" --data-urlencode "json=true" \
+  --data-urlencode "password=$SEED_ADMIN_PASSWORD" --data-urlencode "json=true" \
   -o /dev/null -w "%{http_code}")
 [ "$login" = "200" ] && ck ok "login 200" || ck no "login 200" "$login"
 
@@ -43,7 +47,7 @@ ccode=$(curl -s -b "$CJAR" -c "$CJAR" -X POST http://localhost:3000/api/auth/cal
   -H "Content-Type: application/x-www-form-urlencoded" \
   --data-urlencode "csrfToken=$CCSRF" \
   --data-urlencode "email=ali.hassan@example.com" \
-  --data-urlencode "password=Customer@123" --data-urlencode "json=true" -o /dev/null -w "%{http_code}")
+  --data-urlencode "password=$SEED_CUSTOMER_PASSWORD" --data-urlencode "json=true" -o /dev/null -w "%{http_code}")
 code=$(curl -s -b "$CJAR" "http://localhost:3000/api/admin/export?type=orders&format=xlsx" -o /dev/null -w "%{http_code}")
 [ "$code" = "403" ] && ck ok "customer export -> 403" || ck no "customer export -> 403" "$code (login=$ccode)"
 

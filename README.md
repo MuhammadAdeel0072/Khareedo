@@ -27,22 +27,29 @@ Database migrations for **Supabase PostgreSQL (with RLS)** ship in `supabase/mig
 npm install            # or: bun install
 cp .env.example .env   # defaults work for local SQLite
 npx prisma db push     # create schema
-npx tsx scripts/seed.ts   # or: bun scripts/seed.ts  (demo catalog + users)
+SEED_ALLOW=1 bun scripts/seed.ts   # demo catalog + settings (no accounts by default)
 npm run dev            # http://localhost:3000
 ```
 
 For detailed Prisma and performance diagnostics, set `LOG_LEVEL=debug` before starting the development server.
 
-### Demo accounts (seeded)
+### Seeding
 
-| Role | Email | Password |
-|------|-------|----------|
-| Administrator | `admin@khareedo.pk` | `Admin@123` |
-| Customer | `ali.hassan@example.com` | `Customer@123` |
-| Customer | `sara.khan@example.com` | `Customer@123` |
+The seed is opt-in, non-destructive, and local-only: it refuses unless
+`SEED_ALLOW=1`, never runs in production, and only touches a local SQLite
+`file:` database. Re-running it only fills in missing demo data — it never
+deletes or overwrites existing rows.
 
-> ⚠️ Change these before any real deployment. Demo orders/coupons are seed data —
-> `npx prisma migrate reset` wipes everything.
+**No demo accounts exist by default.** The seed creates the admin/customer
+accounts only when their passwords are supplied through the environment:
+
+```bash
+SEED_ALLOW=1 SEED_ADMIN_PASSWORD=<strong-password> SEED_CUSTOMER_PASSWORD=<strong-password> bun scripts/seed.ts
+```
+
+Passwords must be 12–72 characters and must never be a published demo
+password or another common default. An account that already exists is left
+untouched. See [docs/SEEDING.md](docs/SEEDING.md) for the full contract.
 
 ## Scripts
 
@@ -52,7 +59,7 @@ npm run lint         # ESLint
 npm run build        # production build
 bunx vitest run      # unit + integration tests
 npx playwright test  # e2e (needs: npx playwright install chromium)
-bun scripts/seed.ts  # re-seed demo data
+bun scripts/seed.ts  # re-seed demo data (requires SEED_ALLOW=1; see docs/SEEDING.md)
 bun scripts/generate-images.ts --max-seconds=300 --concurrency=2
                      # regenerate product/banner images (resumable, skips existing)
 ```
