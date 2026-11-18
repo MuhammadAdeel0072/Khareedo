@@ -20,9 +20,11 @@ const BASE = process.env.BASE || "http://localhost:3000";
 const N_CUSTOMERS = 6;
 
 // Safety (PR-07): this audit creates and then deletes real orders against a
-// running app. It only ever targets a local development app on localhost,
-// and the database behind it must be a local SQLite file — never
-// production, never PostgreSQL. Refuse instead of guessing.
+// running app. It only ever targets a local development app on localhost.
+// The database target must be explicitly supplied and validated — a
+// localhost base URL says nothing about which database the app (and the tsx
+// snippets below) actually use. Refuse when DATABASE_URL is missing,
+// PostgreSQL, production, or otherwise invalid.
 if (process.env.NODE_ENV === "production") {
   console.error("audit-concurrency: refused: NODE_ENV is production.");
   process.exit(1);
@@ -32,13 +34,12 @@ if (baseCheck.status !== "ok") {
   console.error(`audit-concurrency: refused: ${baseCheck.reason}`);
   process.exit(1);
 }
-if (process.env.DATABASE_URL) {
-  const targetCheck = checkLocalSqliteTarget(process.env);
-  if (targetCheck.status !== "ok") {
-    console.error(`audit-concurrency: refused: ${targetCheck.reason}`);
-    process.exit(1);
-  }
+const targetCheck = checkLocalSqliteTarget(process.env);
+if (targetCheck.status !== "ok") {
+  console.error(`audit-concurrency: refused: ${targetCheck.reason}`);
+  process.exit(1);
 }
+console.log(`audit-concurrency: database target: ${targetCheck.databasePath}`);
 
 function tsx(script) {
   return execSync(`npx tsx -e '${script}'`, {

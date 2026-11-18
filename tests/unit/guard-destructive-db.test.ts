@@ -78,6 +78,18 @@ describe("guard-destructive-db wrapper", () => {
     expect(existsSync(target)).toBe(false);
   });
 
+  it("dry-run resolves a relative URL to the Prisma schema directory", () => {
+    const result = run(["push", "--dry-run"], {
+      DATABASE_URL: "file:./dry-run.db",
+      DB_DESTRUCTIVE_ALLOW: "1",
+    });
+    expect(result.status).toBe(0);
+    // Prisma puts a relative file: URL under prisma/, so the displayed
+    // target must be prisma/dry-run.db — never /dry-run.db.
+    expect(result.stdout).toContain(join(repoRoot, "prisma", "dry-run.db"));
+    expect(result.stdout).not.toContain("(target: /dry-run.db)");
+  });
+
   it("dry-run works for reset and migrate", () => {
     for (const [command, expected] of [
       ["reset", "prisma migrate reset"],

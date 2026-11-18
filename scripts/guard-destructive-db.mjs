@@ -21,7 +21,6 @@
 // db:postgres:deploy` (prisma migrate deploy, non-destructive, with its own
 // project-target check) is the only way schema changes reach Supabase.
 import { spawnSync } from "node:child_process";
-import { resolve } from "node:path";
 import {
   checkDestructiveOptIn,
   checkLocalSqliteTarget,
@@ -51,9 +50,11 @@ const optIn = checkDestructiveOptIn(process.env);
 if (optIn.status !== "ok") fail(optIn.reason);
 
 const prismaArgs = COMMANDS[command];
-const displayTarget = resolve(target.databasePath);
+// databasePath is already the absolute path Prisma will actually use
+// (relative file: URLs resolve against the Prisma schema directory), so the
+// displayed target is the real target.
 console.log(
-  `guard-destructive-db: ${command} -> prisma ${prismaArgs.join(" ")} (target: ${displayTarget})`,
+  `guard-destructive-db: ${command} -> prisma ${prismaArgs.join(" ")} (target: ${target.databasePath})`,
 );
 
 if (rest.includes("--dry-run")) {

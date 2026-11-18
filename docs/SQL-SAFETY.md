@@ -53,9 +53,15 @@ The npm scripts no longer call Prisma directly:
 
 The wrapper refuses unless **all** of these hold, in order:
 
-1. `DATABASE_URL` is set and is a local `file:` URL. Any PostgreSQL URL
-   refuses — these commands never target Supabase. A missing `DATABASE_URL`
-   refuses instead of falling back to a default.
+1. `DATABASE_URL` is set and is a genuine local `file:` URL: no
+   hostname/authority (`file://server/...`, `file://localhost/...`), no
+   query string, no fragment, no network (UNC-style) path, and no malformed
+   URL. Any PostgreSQL URL refuses — these commands never target Supabase.
+   A missing `DATABASE_URL` refuses instead of falling back to a default.
+   A relative `file:` URL (`file:./dev.db`) resolves against the Prisma
+   schema directory (`prisma/`), because that is where Prisma itself puts
+   the file — so the target the wrapper prints is the target Prisma
+   actually uses.
 2. `NODE_ENV` is not `production`.
 3. `DB_DESTRUCTIVE_ALLOW=1` is set exactly (the explicit opt-in; `"true"`,
    `"yes"`, and `"0"` all refuse).
@@ -83,7 +89,7 @@ pending migrations and never resets or pushes the schema.
 | --- | --- | --- |
 | `scripts/clean-e2e-artifacts.mjs` | E2E/audit junk orders and products (by name) | Local `file:` target only; dry-run by default, `--apply` to delete |
 | `scripts/cleanup-import-test.mjs` | `Import Smoke*` products (with images/inventory) | Local `file:` target only; dry-run by default, `--apply` to delete |
-| `scripts/audit-concurrency.mjs` | Only the orders/products it created (tracked IDs) | Base URL must be `http://localhost:*`; `DATABASE_URL`, if set, must be a local `file:` URL; never production |
+| `scripts/audit-concurrency.mjs` | Only the orders/products it created (tracked IDs) | Base URL must be `http://localhost:*`; `DATABASE_URL` must be explicitly set to a validated local `file:` URL (a localhost base alone does not establish the database target); never production |
 
 Without `--apply`, a cleanup script lists exactly what it would delete and
 deletes nothing. `scripts/verify-import-export.sh` passes `--apply` because

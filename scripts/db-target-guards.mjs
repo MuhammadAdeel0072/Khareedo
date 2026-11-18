@@ -13,35 +13,126 @@
 //   - Destructive operations (db:push, db:reset, db:migrate, dev cleanup
 //     scripts) only ever target a LOCAL SQLite file. Supabase PostgreSQL
 //     is the application database and is never a valid target for them.
+//   - Only genuine local `file:` URLs are accepted: no hostname/authority,
+//     no query string, no fragment, no network (UNC-style) path, and no
+//     malformed URL. Anything else refuses.
+//   - A relative `file:` URL resolves against the Prisma schema directory
+//     (prisma/), because that is where Prisma itself puts the file —
+//     verified 2026-11-19: `file:./x.db` lands in prisma/ for both
+//     `prisma db push` and the generated Prisma Client, from any working
+//     directory. The displayed target is therefore the actual Prisma
+//     target. (The WHATWG parser normalizes `file:./x.db` to `/x.db`, so
+//     the relative path is recovered from the raw string, not from the
+//     parsed pathname.)
 //   - Production is always refused, even for a local file.
 //   - An explicit opt-in is required for the Prisma commands.
 //   - Cleanup scripts are dry-run by default and only delete with --apply.
+import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
+
 export const DESTRUCTIVE_ALLOW_ENV = "DB_DESTRUCTIVE_ALLOW";
 export const DESTRUCTIVE_ALLOW_VALUE = "1";
 
-/** Resolve a `file:` URL (absolute or repo-relative, e.g. `file:./dev.db`) to an absolute path. */
+// Directory of the Prisma schema (prisma/schema.prisma), anchored to this
+// module (scripts/) so relative paths resolve correctly no matter where the
+// caller runs from.
+const PRISMA_SCHEMA_DIR = fileURLToPath(new URL("../prisma", import.meta.url));
+
+/**
+ * Resolve a `file:` URL to the absolute local path Prisma will actually
+ * use, or refuse it. Accepts only genuine local SQLite file URLs:
+ * absolute (`file:/tmp/x.db`, `file:///tmp/x.db`) or relative to the
+ * Prisma schema directory (`file:./dev.db`, `file:dev.db`). Refuses a
+ * hostname/authority (`file://server/...`, `file://localhost/...`),
+ * network paths, query strings, fragments, malformed URLs, and paths
+ * that do not name a file. Never echoes the URL value in a refusal reason
+ * (it could carry credentials in the non-file case).
+ */
 export function resolveFileUrlPath(raw) {
-  const withoutScheme = raw.slice("file:".length);
-  let pathname = withoutScheme;
+  let url;
   try {
-    const parsed = new URL(raw);
-    if (parsed.pathname && parsed.pathname !== "/") pathname = parsed.pathname;
+    url = new URL(raw);
   } catch {
-    // Not a parseable URL; fall through with the raw remainder.
+    return { status: "refused", reason: "DATABASE_URL is not a valid URL." };
   }
-  let decoded = pathname;
+  if (url.protocol !== "file:") {
+    const scheme = raw.split(":")[0] || "(none)";
+    return {
+      status: "refused",
+      reason: `DATABASE_URL must be a local file: URL; got scheme "${scheme}". Destructive operations never target PostgreSQL or any network database.`,
+    };
+  }
+  // Reject any authority component. The URL parser normalizes
+  // file://localhost/ to an empty hostname, so check the raw string: after
+  // "file:", "//" followed by a non-"/" character is an authority
+  // (a server name or localhost), while "///" is the empty authority of an
+  // absolute path.
+  const afterScheme = raw.slice("file:".length);
+  if (/^\/\/[^/]/.test(afterScheme) || url.hostname !== "") {
+    return {
+      status: "refused",
+      reason: "DATABASE_URL must not have a hostname/authority (file://server/... and file://localhost/... are not local SQLite targets).",
+    };
+  }
+  if (url.search !== "") {
+    return {
+      status: "refused",
+      reason: "DATABASE_URL must not have a query string.",
+    };
+  }
+  if (url.hash !== "") {
+    return {
+      status: "refused",
+      reason: "DATABASE_URL must not have a fragment.",
+    };
+  }
+  // Strip an empty authority ("file:///path" -> "/path"). The path is
+  // recovered from the raw string, not url.pathname: the parser normalizes
+  // file:./x.db and file:x.db to /x.db, losing the relative form.
+  let remainder = afterScheme;
+  if (remainder.startsWith("//")) {
+    const slash = remainder.indexOf("/", 2);
+    remainder = slash === -1 ? "" : remainder.slice(slash);
+  }
+  let decoded;
   try {
-    decoded = decodeURIComponent(pathname);
+    decoded = decodeURIComponent(remainder);
   } catch {
-    // Keep the raw remainder if it is not valid percent-encoding.
+    return {
+      status: "refused",
+      reason: "DATABASE_URL has malformed percent-encoding.",
+    };
   }
-  return decoded;
+  if (!decoded || decoded === "/" || decoded.endsWith("/")) {
+    return {
+      status: "refused",
+      reason: "DATABASE_URL must name a SQLite file.",
+    };
+  }
+  if (decoded.startsWith("//")) {
+    return {
+      status: "refused",
+      reason: "DATABASE_URL must not be a network (UNC-style) path.",
+    };
+  }
+  if (decoded.includes("\\")) {
+    return {
+      status: "refused",
+      reason: "DATABASE_URL must not contain backslashes (UNC/Windows network paths are not local SQLite targets).",
+    };
+  }
+  const absolute = decoded.startsWith("/")
+    ? decoded
+    : resolve(PRISMA_SCHEMA_DIR, decoded);
+  return { status: "ok", path: absolute };
 }
 
 /**
  * Validate that the environment points at a local SQLite file suitable for
  * a destructive operation. Refuses production, a missing DATABASE_URL, and
- * any non-`file:` URL (including every PostgreSQL URL).
+ * any URL that is not a genuine local `file:` URL (including every
+ * PostgreSQL URL). Returns the absolute path Prisma will actually use, so
+ * callers can display the real target.
  */
 export function checkLocalSqliteTarget(env = process.env) {
   if (env.NODE_ENV === "production") {
@@ -57,18 +148,9 @@ export function checkLocalSqliteTarget(env = process.env) {
       reason: "DATABASE_URL is not set; refusing to guess a database target.",
     };
   }
-  if (!raw.startsWith("file:")) {
-    const scheme = raw.split(":")[0] || "(none)";
-    return {
-      status: "refused",
-      reason: `DATABASE_URL must be a local file: URL; got scheme "${scheme}". Destructive operations never target PostgreSQL or any network database.`,
-    };
-  }
-  const path = resolveFileUrlPath(raw);
-  if (!path) {
-    return { status: "refused", reason: "DATABASE_URL is a file: URL with an empty path." };
-  }
-  return { status: "ok", databasePath: path };
+  const resolved = resolveFileUrlPath(raw);
+  if (resolved.status !== "ok") return resolved;
+  return { status: "ok", databasePath: resolved.path };
 }
 
 /**

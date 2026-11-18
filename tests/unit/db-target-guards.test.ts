@@ -2,6 +2,8 @@
 // The guards are pure functions over env/argv, so these tests exercise the
 // exact code the destructive scripts use — no database, no subprocess.
 import { describe, expect, it } from "vitest";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   checkDestructiveOptIn,
   checkLocalBaseUrl,
@@ -15,6 +17,11 @@ import {
 function env(overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
   return { NODE_ENV: "test", ...overrides };
 }
+
+// Prisma resolves a relative SQLite file: URL against the Prisma schema
+// directory (prisma/), not the working directory — verified 2026-11-19
+// against both `prisma db push` and the generated Prisma Client.
+const schemaDir = join(fileURLToPath(new URL("../..", import.meta.url)), "prisma");
 
 describe("checkLocalSqliteTarget", () => {
   it("refuses production even for a local file", () => {
@@ -62,18 +69,43 @@ describe("checkLocalSqliteTarget", () => {
     expect(checkLocalSqliteTarget(env({ DATABASE_URL: "file:" })).status).toBe("refused");
   });
 
+  it("refuses a file: URL with a hostname/authority", () => {
+    for (const url of ["file://server/share.db", "file://localhost/tmp/x.db"]) {
+      const result = checkLocalSqliteTarget(env({ DATABASE_URL: url }));
+      expect(result.status).toBe("refused");
+      if (result.status === "refused") {
+        expect(result.reason).toContain("hostname/authority");
+      }
+    }
+  });
+
+  it("refuses a file: URL with a query string or fragment", () => {
+    expect(
+      checkLocalSqliteTarget(env({ DATABASE_URL: "file:/tmp/x.db?mode=ro" })),
+    ).toEqual({
+      status: "refused",
+      reason: expect.stringContaining("query string"),
+    });
+    expect(
+      checkLocalSqliteTarget(env({ DATABASE_URL: "file:/tmp/x.db#frag" })).status,
+    ).toBe("refused");
+  });
+
   it("accepts an absolute local file URL", () => {
     expect(
       checkLocalSqliteTarget(env({ DATABASE_URL: "file:/tmp/khareedo-test.sqlite" })),
     ).toEqual({ status: "ok", databasePath: "/tmp/khareedo-test.sqlite" });
+    expect(
+      checkLocalSqliteTarget(env({ DATABASE_URL: "file:///tmp/khareedo-test.sqlite" })),
+    ).toEqual({ status: "ok", databasePath: "/tmp/khareedo-test.sqlite" });
   });
 
-  it("accepts a repo-relative file URL", () => {
+  it("resolves a repo-relative file URL against the Prisma schema directory", () => {
     const result = checkLocalSqliteTarget(env({ DATABASE_URL: "file:./dev.db" }));
-    expect(result.status).toBe("ok");
-    if (result.status === "ok") {
-      expect(result.databasePath.endsWith("/dev.db")).toBe(true);
-    }
+    expect(result).toEqual({ status: "ok", databasePath: join(schemaDir, "dev.db") });
+    // The old code resolved this to /dev.db (filesystem root) while Prisma
+    // targets prisma/dev.db — the displayed target must be the real one.
+    expect(result).not.toEqual({ status: "ok", databasePath: "/dev.db" });
   });
 
   it("accepts a disposable test database path", () => {
@@ -92,12 +124,98 @@ describe("checkLocalSqliteTarget", () => {
 
 describe("resolveFileUrlPath", () => {
   it("resolves absolute file URLs", () => {
-    expect(resolveFileUrlPath("file:/tmp/x.db")).toBe("/tmp/x.db");
+    expect(resolveFileUrlPath("file:/tmp/x.db")).toEqual({
+      status: "ok",
+      path: "/tmp/x.db",
+    });
+    expect(resolveFileUrlPath("file:///tmp/x.db")).toEqual({
+      status: "ok",
+      path: "/tmp/x.db",
+    });
   });
 
-  it("resolves repo-relative file URLs against the working directory", () => {
-    expect(resolveFileUrlPath("file:./dev.db").endsWith("/dev.db")).toBe(true);
-    expect(resolveFileUrlPath("file:dev.db").endsWith("/dev.db")).toBe(true);
+  it("resolves relative file URLs against the Prisma schema directory", () => {
+    expect(resolveFileUrlPath("file:./dev.db")).toEqual({
+      status: "ok",
+      path: join(schemaDir, "dev.db"),
+    });
+    expect(resolveFileUrlPath("file:dev.db")).toEqual({
+      status: "ok",
+      path: join(schemaDir, "dev.db"),
+    });
+    expect(resolveFileUrlPath("file:./db/custom.db")).toEqual({
+      status: "ok",
+      path: join(schemaDir, "db", "custom.db"),
+    });
+  });
+
+  it("decodes percent-encoding", () => {
+    expect(resolveFileUrlPath("file:./x%20y.db")).toEqual({
+      status: "ok",
+      path: join(schemaDir, "x y.db"),
+    });
+  });
+
+  it("refuses file URLs with a hostname/authority", () => {
+    for (const url of ["file://server/share.db", "file://localhost/tmp/x.db"]) {
+      const result = resolveFileUrlPath(url);
+      expect(result.status).toBe("refused");
+      if (result.status === "refused") {
+        expect(result.reason).toContain("hostname/authority");
+      }
+    }
+  });
+
+  it("refuses UNC-style network paths", () => {
+    // file:////server/share.db has an empty authority and a // path.
+    expect(resolveFileUrlPath("file:////server/share.db")).toEqual({
+      status: "refused",
+      reason: expect.stringContaining("network"),
+    });
+    // Backslashes are the Windows UNC form.
+    expect(resolveFileUrlPath("file:///\\\\server\\share.db")).toEqual({
+      status: "refused",
+      reason: expect.stringContaining("backslashes"),
+    });
+  });
+
+  it("refuses query strings and fragments", () => {
+    expect(resolveFileUrlPath("file:/tmp/x.db?mode=ro")).toEqual({
+      status: "refused",
+      reason: expect.stringContaining("query string"),
+    });
+    expect(resolveFileUrlPath("file:/tmp/x.db#frag")).toEqual({
+      status: "refused",
+      reason: expect.stringContaining("fragment"),
+    });
+  });
+
+  it("refuses malformed URLs", () => {
+    expect(resolveFileUrlPath("file://[::1")).toEqual({
+      status: "refused",
+      reason: expect.stringContaining("not a valid URL"),
+    });
+    expect(resolveFileUrlPath("file:%")).toEqual({
+      status: "refused",
+      reason: expect.stringContaining("percent-encoding"),
+    });
+  });
+
+  it("refuses URLs that do not name a file", () => {
+    for (const url of ["file:", "file://", "file:///", "file:/tmp/x.db/"]) {
+      expect(resolveFileUrlPath(url).status).toBe("refused");
+    }
+  });
+
+  it("refuses non-file schemes without echoing the value", () => {
+    const result = resolveFileUrlPath(
+      "postgresql://postgres:secret@db.example.supabase.co:5432/postgres",
+    );
+    expect(result.status).toBe("refused");
+    if (result.status === "refused") {
+      expect(result.reason).toContain('scheme "postgresql"');
+      expect(result.reason).not.toContain("secret");
+    }
   });
 });
 
