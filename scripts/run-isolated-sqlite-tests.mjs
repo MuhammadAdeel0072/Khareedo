@@ -273,7 +273,7 @@ function runTestFilesAgainstFreshDatabase(testFiles, appUrl) {
     console.log("APPLICATION_DATABASE_MATCH=false");
 
     const initStatus = runPrisma(
-      ["db", "push", "--schema", "prisma/schema.prisma", "--skip-generate"],
+      ["db", "push", "--schema", "prisma/schema.sqlite.prisma", "--skip-generate"],
       testEnvironment.env
     );
     if (initStatus !== 0) throw new Error(`Prisma initialization failed with exit code ${initStatus}.`);

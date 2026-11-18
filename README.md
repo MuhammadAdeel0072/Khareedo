@@ -24,9 +24,9 @@ Database migrations for **Supabase PostgreSQL** ship in `prisma/migrations/` (ap
 ## Quick start (sandbox/demo)
 
 ```bash
-npm install            # or: bun install
+npm install
 cp .env.example .env   # defaults work for local SQLite
-npx prisma db push     # create schema
+DB_DESTRUCTIVE_ALLOW=1 npm run db:push   # create schema (guarded: local SQLite only, see docs/SQL-SAFETY.md)
 SEED_ALLOW=1 bun scripts/seed.ts   # demo catalog + settings (no accounts by default)
 npm run dev            # http://localhost:3000
 ```
@@ -57,12 +57,17 @@ untouched. See [docs/SEEDING.md](docs/SEEDING.md) for the full contract.
 npm run dev          # dev server (port 3000)
 npm run lint         # ESLint
 npm run build        # production build
-bunx vitest run      # unit + integration tests
+npx vitest run       # unit + integration tests
 npx playwright test  # e2e (needs: npx playwright install chromium)
 bun scripts/seed.ts  # re-seed demo data (requires SEED_ALLOW=1; see docs/SEEDING.md)
 bun scripts/generate-images.ts --max-seconds=300 --concurrency=2
                      # regenerate product/banner images (resumable, skips existing)
 ```
+
+npm is the only package manager (`package-lock.json` is the only lockfile).
+`bun` is used only as a JavaScript/TypeScript runtime — to run the built
+server (`bun .next/standalone/server.js`) and TS scripts such as the seed —
+never to install dependencies. See [docs/PRISMA.md](docs/PRISMA.md).
 
 ## Operations: health and worker heartbeat
 

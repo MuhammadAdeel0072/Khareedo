@@ -78,6 +78,14 @@ server.log
 # Local schema backup
 /prisma/*.backup
 
+# Competing package-manager lockfiles (PR-08): npm is the only package
+# manager and package-lock.json is the only lockfile. bun.lock was removed
+# (stale and unrequired — nothing installs with bun); keep it out of the
+# tree so it cannot come back by accident.
+bun.lock
+yarn.lock
+pnpm-lock.yaml
+
 # Temporary inspection results
 /tool-results/
 # Khareedo local development and security files
