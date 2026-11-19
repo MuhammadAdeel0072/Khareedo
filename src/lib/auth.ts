@@ -12,6 +12,7 @@ import { db } from "@/lib/db";
 import { findUserByEmail } from "@/services/auth-users.service";
 import { verifyEmailTokenForLogin } from "@/services/email-verification.service";
 import { ADMIN_AUDIT_ACTIONS, recordAdminAuditBestEffort } from "@/services/admin-audit.service";
+import { encodeSessionToken } from "@/lib/session-token";
 
 const googleId = process.env.GOOGLE_CLIENT_ID;
 const googleSecret = process.env.GOOGLE_CLIENT_SECRET;
@@ -98,7 +99,13 @@ if (googleEnabled) {
 
 export const authOptions: NextAuthOptions = {
   session: { strategy: "jwt", maxAge: 60 * 60 * 24 * 7 }, // 7 days
-  jwt: { maxAge: 60 * 60 * 24 * 7 },
+  // Custom encode (PR-25): the default NextAuth encode stamps a fresh
+  // `iat`/`exp` on every encode, so `GET /api/auth/session` re-issued a
+  // stolen token with fresh timestamps and a password reset could not kill
+  // it. encodeSessionToken preserves the original `iat`/`exp` when
+  // re-encoding an existing token, so a session can never be extended past
+  // its original expiry. `decode` stays the library default.
+  jwt: { maxAge: 60 * 60 * 24 * 7, encode: encodeSessionToken },
   secret: AUTH_SECRET,
   pages: { signIn: "/login", error: "/login" },
   providers,
