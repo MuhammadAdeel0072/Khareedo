@@ -18,6 +18,7 @@ import { z } from "zod";
 import { requireAdminMfaVerified } from "@/lib/auth-guard";
 import { clientIp, rateLimit } from "@/lib/rate-limit";
 import { handleRoute, jsonError, jsonOk, parseBody } from "@/lib/api";
+import { adminAuditContext } from "@/services/admin-audit.service";
 import { MfaUnavailableError, startAdminMfaReplacement } from "@/services/admin-mfa.service";
 
 export const runtime = "nodejs";
@@ -51,6 +52,7 @@ export async function POST(request: Request) {
         email: user.email,
         password: parsed.data.password,
         code: parsed.data.code,
+        audit: adminAuditContext(request, user),
       });
       if (replacement === null) {
         return jsonError(

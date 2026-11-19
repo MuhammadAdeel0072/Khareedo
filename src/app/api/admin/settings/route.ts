@@ -3,10 +3,15 @@ import { saveSettings } from "@/services/settings.service";
 import { settingsSchema } from "@/lib/validation";
 import { requireAdminMfaVerified } from "@/lib/auth-guard";
 import { parseBody, jsonOk, handleRoute } from "@/lib/api";
+import {
+  ADMIN_AUDIT_ACTIONS,
+  adminAuditContext,
+  recordAdminAuditBestEffort,
+} from "@/services/admin-audit.service";
 
 export async function PUT(request: Request) {
   return handleRoute(async () => {
-    await requireAdminMfaVerified();
+    const admin = await requireAdminMfaVerified();
     const parsed = await parseBody(request, settingsSchema);
     if (parsed.error) return parsed.error;
     const d = parsed.data;
@@ -28,6 +33,33 @@ export async function PUT(request: Request) {
       gift_wrap_description: d.gift_wrap_description || "",
       facebook_url: d.facebook_url || "",
       instagram_url: d.instagram_url || "",
+    });
+    // Keys only, never values: setting values may be sensitive (contact
+    // details, payment toggles). The key list shows what changed.
+    await recordAdminAuditBestEffort(adminAuditContext(request, admin), {
+      action: ADMIN_AUDIT_ACTIONS.SETTINGS_UPDATED,
+      targetType: "StoreSetting",
+      metadata: {
+        keys: [
+          "store_name",
+          "store_tagline",
+          "store_email",
+          "store_phone",
+          "store_address",
+          "whatsapp_number",
+          "announcement_text",
+          "cod_enabled",
+          "online_payment_enabled",
+          "delivery_fee_standard",
+          "delivery_fee_express",
+          "free_delivery_threshold",
+          "gift_wrap_enabled",
+          "gift_wrap_charge",
+          "gift_wrap_description",
+          "facebook_url",
+          "instagram_url",
+        ],
+      },
     });
     return jsonOk({});
   });

@@ -3,12 +3,17 @@ import { adminUpdateCategory, adminDeleteCategory } from "@/services/categories.
 import { categorySchema } from "@/lib/validation";
 import { requireAdminMfaVerified } from "@/lib/auth-guard";
 import { parseBody, jsonError, jsonOk, handleRoute } from "@/lib/api";
+import {
+  ADMIN_AUDIT_ACTIONS,
+  adminAuditContext,
+  recordAdminAuditBestEffort,
+} from "@/services/admin-audit.service";
 
 type Ctx = { params: Promise<{ id: string }> };
 
 export async function PUT(request: Request, ctx: Ctx) {
   return handleRoute(async () => {
-    await requireAdminMfaVerified();
+    const admin = await requireAdminMfaVerified();
     const { id } = await ctx.params;
     const parsed = await parseBody(request, categorySchema);
     if (parsed.error) return parsed.error;
@@ -22,16 +27,27 @@ export async function PUT(request: Request, ctx: Ctx) {
       isActive: d.isActive,
       sortOrder: d.sortOrder,
     });
+    await recordAdminAuditBestEffort(adminAuditContext(request, admin), {
+      action: ADMIN_AUDIT_ACTIONS.CATEGORY_UPDATED,
+      targetType: "Category",
+      targetId: id,
+      metadata: { name: d.name },
+    });
     return jsonOk({ category });
   });
 }
 
-export async function DELETE(_request: Request, ctx: Ctx) {
+export async function DELETE(request: Request, ctx: Ctx) {
   return handleRoute(async () => {
-    await requireAdminMfaVerified();
+    const admin = await requireAdminMfaVerified();
     const { id } = await ctx.params;
     const result = await adminDeleteCategory(id);
     if (!result.ok) return jsonError(result.reason ?? "Cannot delete this category.", 409);
+    await recordAdminAuditBestEffort(adminAuditContext(request, admin), {
+      action: ADMIN_AUDIT_ACTIONS.CATEGORY_DELETED,
+      targetType: "Category",
+      targetId: id,
+    });
     return jsonOk({});
   });
 }

@@ -177,6 +177,7 @@ function selectTestFiles(arguments_) {
         "tests/unit/integration.payment-refunds.test.ts",
         "tests/unit/integration.password-reset.test.ts",
         "tests/unit/integration.admin-mfa.test.ts",
+        "tests/unit/integration.admin-audit.test.ts",
         "tests/unit/integration.seed.test.ts",
       ];
   const unitTestRoot = path.join(projectRoot, "tests", "unit");

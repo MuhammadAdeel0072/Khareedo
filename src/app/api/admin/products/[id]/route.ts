@@ -4,6 +4,11 @@ import { productSchema } from "@/lib/validation";
 import { requireAdminMfaVerified } from "@/lib/auth-guard";
 import { parseBody, jsonError, jsonOk, handleRoute } from "@/lib/api";
 import {
+  ADMIN_AUDIT_ACTIONS,
+  adminAuditContext,
+  recordAdminAuditBestEffort,
+} from "@/services/admin-audit.service";
+import {
   productWriteErrorResponse,
   validateProductCategory,
 } from "@/lib/product-api-errors";
@@ -22,7 +27,7 @@ export async function GET(_request: Request, ctx: Ctx) {
 
 export async function PUT(request: Request, ctx: Ctx) {
   return handleRoute(async () => {
-    await requireAdminMfaVerified();
+    const admin = await requireAdminMfaVerified();
     const { id } = await ctx.params;
     const parsed = await parseBody(request, productSchema);
     if (parsed.error) return parsed.error;
@@ -57,6 +62,12 @@ export async function PUT(request: Request, ctx: Ctx) {
         stock: d.stock,
         lowStockThreshold: d.lowStockThreshold,
       });
+      await recordAdminAuditBestEffort(adminAuditContext(request, admin), {
+        action: ADMIN_AUDIT_ACTIONS.PRODUCT_UPDATED,
+        targetType: "Product",
+        targetId: id,
+        metadata: { name: d.name },
+      });
       return jsonOk({ product });
     } catch (error) {
       const response = productWriteErrorResponse(error);
@@ -66,11 +77,16 @@ export async function PUT(request: Request, ctx: Ctx) {
   });
 }
 
-export async function DELETE(_request: Request, ctx: Ctx) {
+export async function DELETE(request: Request, ctx: Ctx) {
   return handleRoute(async () => {
-    await requireAdminMfaVerified();
+    const admin = await requireAdminMfaVerified();
     const { id } = await ctx.params;
     await adminArchiveProduct(id);
+    await recordAdminAuditBestEffort(adminAuditContext(request, admin), {
+      action: ADMIN_AUDIT_ACTIONS.PRODUCT_ARCHIVED,
+      targetType: "Product",
+      targetId: id,
+    });
     return jsonOk({});
   });
 }

@@ -43,6 +43,7 @@ model User {
   verificationTokens VerificationToken[]
   passwordResetTokens PasswordResetToken[]
   adminMfa      AdminMfa?
+  adminAuditLogs AdminAuditLog[]
 
   @@index([role, createdAt])
 }
@@ -134,6 +135,33 @@ model AdminMfaRecoveryCode {
   createdAt  DateTime  @default(now())
 
   @@index([mfaId])
+}
+
+// Append-only administrator audit log (PR-12). One row per security-
+// relevant admin action (MFA lifecycle, product/category/inventory/order/
+// refund/payment/settings changes, exports). The application never updates
+// or deletes these rows: there is no update/delete API for them, and the
+// service only exposes record + list. adminUserId is nullable with
+// onDelete: SetNull so deleting an admin account does not erase history.
+// metadata is minimal structured context (e.g. before/after values); it
+// must NEVER contain passwords, tokens, secrets, TOTP secrets, recovery
+// codes, or payment secrets — the service strips sensitive keys.
+model AdminAuditLog {
+  id          String   @id @default(cuid())
+  adminUserId String?
+  adminUser   User?    @relation(fields: [adminUserId], references: [id], onDelete: SetNull)
+  action      String
+  targetType  String
+  targetId    String?
+  requestId   String?
+  ipAddress   String?
+  userAgent   String?
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  @@index([adminUserId, createdAt])
+  @@index([action, createdAt])
+  @@index([targetType, targetId, createdAt])
 }
 
 // Email outbox (PR-09 security-review fix). Password reset emails are sent

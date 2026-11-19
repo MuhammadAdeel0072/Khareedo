@@ -30,6 +30,12 @@ import QRCode from "qrcode";
 import bcrypt from "bcryptjs";
 import { db } from "@/lib/db";
 import { generateTotpSecret, totpAuthUrl, verifyTotpCode } from "@/lib/totp";
+import {
+  ADMIN_AUDIT_ACTIONS,
+  recordAdminAudit,
+  recordAdminAuditBestEffort,
+  type AdminAuditContext,
+} from "@/services/admin-audit.service";
 
 export const MFA_ISSUER = "Khareedo";
 export const MFA_RECOVERY_CODE_COUNT = 10;
@@ -204,7 +210,11 @@ function isUniqueConstraintError(error: unknown): boolean {
  * activation, which sets enabledAt. Deleting codes from this path could
  * destroy codes issued by a concurrent successful activation.
  */
-export async function startAdminMfaEnrollment(input: { userId: string; email: string }): Promise<{
+export async function startAdminMfaEnrollment(input: {
+  userId: string;
+  email: string;
+  audit?: AdminAuditContext;
+}): Promise<{
   qrCodeDataUrl: string;
   manualKey: string;
   otpauthUrl: string;
@@ -227,6 +237,13 @@ export async function startAdminMfaEnrollment(input: { userId: string; email: st
     },
   });
   if (replaced.count === 1) {
+    if (input.audit) {
+      await recordAdminAuditBestEffort(input.audit, {
+        action: ADMIN_AUDIT_ACTIONS.MFA_ENROLLMENT_STARTED,
+        targetType: "AdminMfa",
+        targetId: input.userId,
+      });
+    }
     return { qrCodeDataUrl, manualKey: secret, otpauthUrl };
   }
   // No pending row was replaced: either no row exists (first enrollment)
@@ -242,6 +259,13 @@ export async function startAdminMfaEnrollment(input: { userId: string; email: st
         lastUsedStep: 0,
       },
     });
+    if (input.audit) {
+      await recordAdminAuditBestEffort(input.audit, {
+        action: ADMIN_AUDIT_ACTIONS.MFA_ENROLLMENT_STARTED,
+        targetType: "AdminMfa",
+        targetId: input.userId,
+      });
+    }
     return { qrCodeDataUrl, manualKey: secret, otpauthUrl };
   } catch (error) {
     if (!isUniqueConstraintError(error)) throw error;
@@ -315,6 +339,7 @@ export async function startAdminMfaReplacement(input: {
   email: string;
   password: string;
   code: string;
+  audit?: AdminAuditContext;
 }): Promise<{ qrCodeDataUrl: string; manualKey: string; otpauthUrl: string } | null> {
   const key = requireMfaKey();
   const mfa = await db.adminMfa.findUnique({
@@ -335,6 +360,13 @@ export async function startAdminMfaReplacement(input: {
     where: { id: mfa.id },
     data: { pendingSecretEncrypted: encryptTotpSecret(secret, key) },
   });
+  if (input.audit) {
+    await recordAdminAuditBestEffort(input.audit, {
+      action: ADMIN_AUDIT_ACTIONS.MFA_REPLACEMENT_STARTED,
+      targetType: "AdminMfa",
+      targetId: input.userId,
+    });
+  }
   return { qrCodeDataUrl, manualKey: secret, otpauthUrl };
 }
 
@@ -366,7 +398,11 @@ export async function startAdminMfaReplacement(input: {
  *   codes on an active enrollment without the requireAdminMfaVerified
  *   gate of the recovery-codes endpoint.
  */
-export async function activateAdminMfa(input: { userId: string; code: string }): Promise<string[] | null> {
+export async function activateAdminMfa(input: {
+  userId: string;
+  code: string;
+  audit?: AdminAuditContext;
+}): Promise<string[] | null> {
   const key = requireMfaKey();
   const mfa = await db.adminMfa.findUnique({ where: { userId: input.userId } });
   if (!mfa) return null;
@@ -411,7 +447,19 @@ export async function activateAdminMfa(input: { userId: string; code: string }):
       });
       if (claimed.count !== 1) return null;
       await tx.adminMfaRecoveryCode.deleteMany({ where: { mfaId: mfa.id } });
-      return createRecoveryCodes(mfa.id, tx);
+      const codes = await createRecoveryCodes(mfa.id, tx);
+      if (input.audit) {
+        await recordAdminAudit(
+          input.audit,
+          {
+            action: ADMIN_AUDIT_ACTIONS.MFA_REPLACEMENT_ACTIVATED,
+            targetType: "AdminMfa",
+            targetId: input.userId,
+          },
+          tx
+        );
+      }
+      return codes;
     });
   }
   // First-time activation. The secret-equality guard is the race
@@ -429,7 +477,19 @@ export async function activateAdminMfa(input: { userId: string; code: string }):
       data: { enabledAt: now, lastVerifiedAt: now, lastUsedStep: step },
     });
     if (claimed.count !== 1) return null;
-    return createRecoveryCodes(mfa.id, tx);
+    const codes = await createRecoveryCodes(mfa.id, tx);
+    if (input.audit) {
+      await recordAdminAudit(
+        input.audit,
+        {
+          action: ADMIN_AUDIT_ACTIONS.MFA_ACTIVATED,
+          targetType: "AdminMfa",
+          targetId: input.userId,
+        },
+        tx
+      );
+    }
+    return codes;
   });
 }
 
@@ -509,12 +569,27 @@ export function isMfaVerifiedForSession(
  * transaction, so a failed creation leaves the previous codes intact
  * instead of leaving MFA enabled with no recovery codes.
  */
-export async function regenerateAdminMfaRecoveryCodes(userId: string): Promise<string[] | null> {
+export async function regenerateAdminMfaRecoveryCodes(
+  userId: string,
+  audit?: AdminAuditContext
+): Promise<string[] | null> {
   const mfa = await db.adminMfa.findUnique({ where: { userId }, select: { id: true, enabledAt: true } });
   if (!mfa || !mfa.enabledAt) return null;
   return db.$transaction(async (tx) => {
     await tx.adminMfaRecoveryCode.deleteMany({ where: { mfaId: mfa.id } });
-    return createRecoveryCodes(mfa.id, tx);
+    const codes = await createRecoveryCodes(mfa.id, tx);
+    if (audit) {
+      await recordAdminAudit(
+        audit,
+        {
+          action: ADMIN_AUDIT_ACTIONS.MFA_RECOVERY_CODES_REGENERATED,
+          targetType: "AdminMfa",
+          targetId: userId,
+        },
+        tx
+      );
+    }
+    return codes;
   });
 }
 
@@ -528,6 +603,7 @@ export async function disableAdminMfa(input: {
   userId: string;
   password: string;
   code: string;
+  audit?: AdminAuditContext;
 }): Promise<boolean> {
   const user = await db.user.findUnique({ where: { id: input.userId }, select: { passwordHash: true } });
   if (!user?.passwordHash) return false;
@@ -545,5 +621,12 @@ export async function disableAdminMfa(input: {
   });
   if (verification !== "verified") return false;
   await db.adminMfa.delete({ where: { id: mfa.id } });
+  if (input.audit) {
+    await recordAdminAuditBestEffort(input.audit, {
+      action: ADMIN_AUDIT_ACTIONS.MFA_DISABLED,
+      targetType: "AdminMfa",
+      targetId: input.userId,
+    });
+  }
   return true;
 }

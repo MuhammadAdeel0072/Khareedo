@@ -1,7 +1,12 @@
 // Admin exports — Excel (.xlsx) and PDF downloads (server-generated, admin-only).
 // GET /api/admin/export?type=reports|products|orders|customers&format=xlsx|pdf
-import { requireAdminMfaVerified } from "@/lib/auth-guard";
+import { requireAdminMfaVerified, type SessionUser } from "@/lib/auth-guard";
 import { jsonError, handleRoute } from "@/lib/api";
+import {
+  ADMIN_AUDIT_ACTIONS,
+  adminAuditContext,
+  recordAdminAuditBestEffort,
+} from "@/services/admin-audit.service";
 import { buildWorkbook } from "@/lib/export/excel";
 import { buildPdfReport } from "@/lib/export/pdf";
 import {
@@ -41,9 +46,27 @@ function binaryResponse(buf: Buffer, mime: string, filename: string): Response {
   });
 }
 
+/**
+ * Record a successful export. Called once per success path, after the file
+ * is built — a failed build must not produce a success record. The export
+ * type + format are recorded, never the exported rows (customer PII).
+ */
+async function recordExportAudit(
+  request: Request,
+  admin: SessionUser,
+  type: string,
+  format: string
+): Promise<void> {
+  await recordAdminAuditBestEffort(adminAuditContext(request, admin), {
+    action: ADMIN_AUDIT_ACTIONS.EXPORT_CREATED,
+    targetType: "Export",
+    metadata: { type, format },
+  });
+}
+
 export async function GET(request: Request) {
   return handleRoute(async () => {
-    await requireAdminMfaVerified();
+    const admin = await requireAdminMfaVerified();
 
     const { searchParams } = new URL(request.url);
     const type = searchParams.get("type") ?? "";
@@ -103,6 +126,7 @@ export async function GET(request: Request) {
             rows: lowStock.map((p) => [p.name, p.quantity, p.price]),
           },
         ]);
+        await recordExportAudit(request, admin, type, format);
         return binaryResponse(buf, XLSX_MIME, filename);
       }
 
@@ -153,6 +177,7 @@ export async function GET(request: Request) {
           },
         ]
       );
+      await recordExportAudit(request, admin, type, format);
       return binaryResponse(buf, "application/pdf", filename);
     }
 
@@ -183,6 +208,7 @@ export async function GET(request: Request) {
             ]),
           },
         ]);
+        await recordExportAudit(request, admin, type, format);
         return binaryResponse(buf, XLSX_MIME, filename);
       }
       const buf = await buildPdfReport(
@@ -202,6 +228,7 @@ export async function GET(request: Request) {
           },
         ]
       );
+      await recordExportAudit(request, admin, type, format);
       return binaryResponse(buf, "application/pdf", filename);
     }
 
@@ -253,6 +280,7 @@ export async function GET(request: Request) {
             ]),
           },
         ]);
+        await recordExportAudit(request, admin, type, format);
         return binaryResponse(buf, XLSX_MIME, filename);
       }
       const buf = await buildPdfReport(
@@ -277,6 +305,7 @@ export async function GET(request: Request) {
           },
         ]
       );
+      await recordExportAudit(request, admin, type, format);
       return binaryResponse(buf, "application/pdf", filename);
     }
 
@@ -299,6 +328,7 @@ export async function GET(request: Request) {
           rows: rows.map((c) => [c.name, c.email, c.phone, c.orders, c.totalSpent, c.addresses, c.joined]),
         },
       ]);
+      await recordExportAudit(request, admin, type, format);
       return binaryResponse(buf, XLSX_MIME, filename);
     }
     const buf = await buildPdfReport(
@@ -318,6 +348,7 @@ export async function GET(request: Request) {
         },
       ]
     );
+    await recordExportAudit(request, admin, type, format);
     return binaryResponse(buf, "application/pdf", filename);
   });
 }

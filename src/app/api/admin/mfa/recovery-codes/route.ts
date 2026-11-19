@@ -6,6 +6,7 @@
 import { requireAdminMfaVerified } from "@/lib/auth-guard";
 import { clientIp, rateLimit } from "@/lib/rate-limit";
 import { handleRoute, jsonError, jsonOk } from "@/lib/api";
+import { adminAuditContext } from "@/services/admin-audit.service";
 import { regenerateAdminMfaRecoveryCodes } from "@/services/admin-mfa.service";
 
 export const runtime = "nodejs";
@@ -22,7 +23,10 @@ export async function POST(request: Request) {
         retryAfterSec: Math.max(ipLimit.retryAfterSec, userLimit.retryAfterSec),
       });
     }
-    const recoveryCodes = await regenerateAdminMfaRecoveryCodes(user.id);
+    const recoveryCodes = await regenerateAdminMfaRecoveryCodes(
+      user.id,
+      adminAuditContext(request, user)
+    );
     if (recoveryCodes === null) {
       return jsonError("Administrator MFA is not enabled.", 400);
     }

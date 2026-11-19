@@ -13,6 +13,7 @@
 import { requireAdmin } from "@/lib/auth-guard";
 import { clientIp, rateLimit } from "@/lib/rate-limit";
 import { handleRoute, jsonError, jsonOk } from "@/lib/api";
+import { adminAuditContext } from "@/services/admin-audit.service";
 import {
   MfaAlreadyEnabledError,
   MfaUnavailableError,
@@ -34,7 +35,11 @@ export async function POST(request: Request) {
       });
     }
     try {
-      const enrollment = await startAdminMfaEnrollment({ userId: user.id, email: user.email });
+      const enrollment = await startAdminMfaEnrollment({
+        userId: user.id,
+        email: user.email,
+        audit: adminAuditContext(request, user),
+      });
       return jsonOk({
         qrCodeDataUrl: enrollment.qrCodeDataUrl,
         manualKey: enrollment.manualKey,

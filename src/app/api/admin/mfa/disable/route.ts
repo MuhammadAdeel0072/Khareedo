@@ -8,6 +8,7 @@ import { z } from "zod";
 import { requireAdminMfaVerified } from "@/lib/auth-guard";
 import { clientIp, rateLimit } from "@/lib/rate-limit";
 import { handleRoute, jsonError, jsonOk, parseBody } from "@/lib/api";
+import { adminAuditContext } from "@/services/admin-audit.service";
 import { disableAdminMfa } from "@/services/admin-mfa.service";
 
 export const runtime = "nodejs";
@@ -35,6 +36,7 @@ export async function POST(request: Request) {
       userId: user.id,
       password: parsed.data.password,
       code: parsed.data.code,
+      audit: adminAuditContext(request, user),
     });
     if (!disabled) {
       return jsonError("Your password or code was not correct. MFA has not been disabled.", 400);

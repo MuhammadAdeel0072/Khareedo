@@ -13,6 +13,11 @@ import { requestOrigin } from "@/lib/request-origin";
 import { createSafepayProvider } from "@/lib/safepay/provider";
 import { createPaymentRefundService } from "@/services/payment-refund.service";
 import { SAFEPAY_REFUNDS_SANDBOX_ONLY } from "@/lib/safepay/readiness";
+import {
+  ADMIN_AUDIT_ACTIONS,
+  adminAuditContext,
+  recordAdminAuditBestEffort,
+} from "@/services/admin-audit.service";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -114,6 +119,16 @@ export async function POST(request: Request) {
         { status, headers: { "Cache-Control": "no-store" } });
     }
     const row = await refunds.getRefund(result.refundId);
+    await recordAdminAuditBestEffort(adminAuditContext(request, user), {
+      action: ADMIN_AUDIT_ACTIONS.PAYMENT_REFUND_REQUESTED,
+      targetType: "PaymentRefund",
+      targetId: result.refundId,
+      metadata: {
+        paymentId: parsed.data.paymentId,
+        kind: result.kind,
+        ...(parsed.data.amountMinor !== undefined ? { amountMinor: parsed.data.amountMinor } : {}),
+      },
+    });
     return Response.json({ ok: true,
       result: { kind: result.kind,
         ...(result.kind === "created" ? { submission: result.submission } : {}),

@@ -5,6 +5,11 @@
 import { requireAdminMfaVerified } from "@/lib/auth-guard";
 import { handleRoute, jsonError, jsonOk } from "@/lib/api";
 import {
+  ADMIN_AUDIT_ACTIONS,
+  adminAuditContext,
+  recordAdminAuditBestEffort,
+} from "@/services/admin-audit.service";
+import {
   getProductImageExtension,
   MAX_PRODUCT_IMAGE_REQUEST_SIZE,
   MAX_PRODUCT_IMAGE_SIZE,
@@ -50,7 +55,7 @@ async function readBoundedBody(request: Request): Promise<ArrayBuffer | null> {
 
 export async function POST(request: Request) {
   return handleRoute(async () => {
-    await requireAdminMfaVerified();
+    const admin = await requireAdminMfaVerified();
 
     const contentType = request.headers.get("content-type") ?? "";
     if (!contentType.toLowerCase().startsWith("multipart/form-data;")) {
@@ -130,6 +135,13 @@ export async function POST(request: Request) {
       .from(MEDIA_BUCKET)
       .getPublicUrl(filePath);
 
+    // filePath is the stored object key (collision-resistant, server-generated),
+    // never the user-supplied filename or the file contents.
+    await recordAdminAuditBestEffort(adminAuditContext(request, admin), {
+      action: ADMIN_AUDIT_ACTIONS.UPLOAD_CREATED,
+      targetType: "Upload",
+      metadata: { fileName: filePath },
+    });
     return jsonOk({ url: data.publicUrl });
   });
 }

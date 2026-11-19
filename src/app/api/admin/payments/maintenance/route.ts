@@ -11,6 +11,11 @@ import { requireAdminMfaVerified, AuthError } from "@/lib/auth-guard";
 import { rateLimit } from "@/lib/rate-limit";
 import { parseBody, jsonOk } from "@/lib/api";
 import {
+  ADMIN_AUDIT_ACTIONS,
+  adminAuditContext,
+  recordAdminAuditBestEffort,
+} from "@/services/admin-audit.service";
+import {
   createPaymentMaintenanceRunner,
   MAINTENANCE_ACTIONS,
 } from "@/services/payment-maintenance.service";
@@ -64,6 +69,12 @@ export async function POST(request: Request) {
 
     const runner = createPaymentMaintenanceRunner();
     const result = await runner.run(action, batch, orderId ? { orderId } : undefined);
+    await recordAdminAuditBestEffort(adminAuditContext(request, user), {
+      action: ADMIN_AUDIT_ACTIONS.PAYMENT_MAINTENANCE_RUN,
+      targetType: "Payment",
+      targetId: orderId ?? null,
+      metadata: { maintenanceAction: action, batch },
+    });
     const response = jsonOk(result);
     response.headers.set("Cache-Control", "no-store");
     return response;
