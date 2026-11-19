@@ -18,6 +18,7 @@ import { z } from "zod";
 import { requireAdmin } from "@/lib/auth-guard";
 import { clientIp, rateLimit } from "@/lib/rate-limit";
 import { handleRoute, jsonError, jsonOk, parseBody } from "@/lib/api";
+import { adminAuditContext } from "@/services/admin-audit.service";
 import { MfaUnavailableError, activateAdminMfa } from "@/services/admin-mfa.service";
 
 export const runtime = "nodejs";
@@ -41,7 +42,11 @@ export async function POST(request: Request) {
       });
     }
     try {
-      const recoveryCodes = await activateAdminMfa({ userId: user.id, code: parsed.data.code });
+      const recoveryCodes = await activateAdminMfa({
+        userId: user.id,
+        code: parsed.data.code,
+        audit: adminAuditContext(request, user),
+      });
       if (recoveryCodes === null) {
         return jsonError("That code is not valid. Check your authenticator app and try again.", 400);
       }

@@ -3,6 +3,11 @@
 import ExcelJS from "exceljs";
 import { requireAdminMfaVerified } from "@/lib/auth-guard";
 import { jsonError, jsonOk, handleRoute } from "@/lib/api";
+import {
+  ADMIN_AUDIT_ACTIONS,
+  adminAuditContext,
+  recordAdminAuditBestEffort,
+} from "@/services/admin-audit.service";
 import { parseProductsSheet, IMPORT_MAX_ROWS, type SheetRow } from "@/lib/import/products";
 import { adminCreateProduct } from "@/services/products.service";
 import { db } from "@/lib/db";
@@ -14,7 +19,7 @@ const MAX_FILE_BYTES = 2 * 1024 * 1024; // 2 MB
 
 export async function POST(request: Request) {
   return handleRoute(async () => {
-    await requireAdminMfaVerified();
+    const admin = await requireAdminMfaVerified();
 
     let form: FormData;
     try {
@@ -115,6 +120,11 @@ export async function POST(request: Request) {
       }
     }
 
+    await recordAdminAuditBestEffort(adminAuditContext(request, admin), {
+      action: ADMIN_AUDIT_ACTIONS.IMPORT_COMPLETED,
+      targetType: "Product",
+      metadata: { created, skipped, failed, totalRows: parsed.rows.length },
+    });
     return jsonOk({
       created,
       skipped,

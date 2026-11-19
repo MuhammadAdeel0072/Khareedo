@@ -15,6 +15,7 @@ import {
   Megaphone,
   Menu,
   Package,
+  ScrollText,
   Settings,
   ShoppingCart,
   Store,
@@ -34,6 +35,7 @@ const NAV = [
   { href: "/admin/coupons", label: "Coupons", icon: Tags },
   { href: "/admin/promotions", label: "Promotions", icon: Megaphone },
   { href: "/admin/reports", label: "Reports", icon: BarChart3 },
+  { href: "/admin/audit-log", label: "Audit log", icon: ScrollText },
   { href: "/admin/settings", label: "Settings", icon: Settings },
 ];
 

@@ -12,6 +12,17 @@ const mocks = vi.hoisted(() => {
 
   return {
     TestAuthError,
+    // The real requireAdminMfaVerified returns the authenticated admin
+    // (never undefined); the audit hook reads admin.id from it, so the
+    // mock must return a realistic SessionUser.
+    adminUser: {
+      id: "admin-1",
+      email: "admin@example.invalid",
+      name: "Test Admin",
+      role: "ADMIN",
+      mfaEnabledAt: new Date("2026-11-19T00:00:00.000Z"),
+      mfaLastVerifiedAt: new Date("2026-11-19T00:00:00.000Z"),
+    },
     requireAdmin: vi.fn(),
     categoryFindUnique: vi.fn(),
     adminCreateProduct: vi.fn(),
@@ -110,7 +121,7 @@ describe("admin product image upload", () => {
     vi.clearAllMocks();
     vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://example.supabase.co");
     vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", "test-service-key");
-    mocks.requireAdmin.mockResolvedValue(undefined);
+    mocks.requireAdmin.mockResolvedValue(mocks.adminUser);
     mocks.storageUpload.mockResolvedValue({ error: null });
     mocks.getPublicUrl.mockImplementation((path: string) => ({
       data: {
@@ -200,7 +211,7 @@ describe("admin remote product image import", () => {
     vi.clearAllMocks();
     vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://example.supabase.co");
     vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", "test-service-key");
-    mocks.requireAdmin.mockResolvedValue(undefined);
+    mocks.requireAdmin.mockResolvedValue(mocks.adminUser);
     mocks.fetchRemoteImage.mockResolvedValue({
       bytes: new Uint8Array([0xff, 0xd8, 0xff, 0x00]),
       contentType: "image/jpeg",
@@ -285,7 +296,7 @@ describe("admin remote product image import", () => {
 describe("admin product create and edit APIs", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.requireAdmin.mockResolvedValue(undefined);
+    mocks.requireAdmin.mockResolvedValue(mocks.adminUser);
     mocks.categoryFindUnique.mockResolvedValue(category);
     mocks.adminCreateProduct.mockResolvedValue(product);
     mocks.adminUpdateProduct.mockResolvedValue(product);

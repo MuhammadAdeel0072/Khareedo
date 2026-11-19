@@ -4,13 +4,18 @@ import { productSchema } from "@/lib/validation";
 import { requireAdminMfaVerified } from "@/lib/auth-guard";
 import { parseBody, jsonError, jsonOk, handleRoute } from "@/lib/api";
 import {
+  ADMIN_AUDIT_ACTIONS,
+  adminAuditContext,
+  recordAdminAuditBestEffort,
+} from "@/services/admin-audit.service";
+import {
   productWriteErrorResponse,
   validateProductCategory,
 } from "@/lib/product-api-errors";
 
 export async function POST(request: Request) {
   return handleRoute(async () => {
-    await requireAdminMfaVerified();
+    const admin = await requireAdminMfaVerified();
     const parsed = await parseBody(request, productSchema);
     if (parsed.error) return parsed.error;
     const d = parsed.data;
@@ -43,6 +48,12 @@ export async function POST(request: Request) {
         images: d.images,
         stock: d.stock,
         lowStockThreshold: d.lowStockThreshold,
+      });
+      await recordAdminAuditBestEffort(adminAuditContext(request, admin), {
+        action: ADMIN_AUDIT_ACTIONS.PRODUCT_CREATED,
+        targetType: "Product",
+        targetId: product.id,
+        metadata: { name: d.name, price: d.price },
       });
       return jsonOk({ product });
     } catch (error) {

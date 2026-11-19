@@ -8,6 +8,11 @@ import {
 } from "@/lib/constants";
 import { withPerformanceTiming } from "@/lib/performance-timing";
 import { ReservationIntegrityError, updateManagedOrderStatus } from "@/services/safepay-reservations.service";
+import {
+  ADMIN_AUDIT_ACTIONS,
+  recordAdminAudit,
+  type AdminAuditContext,
+} from "@/services/admin-audit.service";
 
 export interface OrderSummaryRow {
   id: string;
@@ -233,7 +238,8 @@ export interface StatusUpdateResult {
  */
 export async function adminUpdateOrderStatus(
   orderId: string,
-  next: OrderStatus
+  next: OrderStatus,
+  audit?: AdminAuditContext
 ): Promise<StatusUpdateResult> {
   const order = await db.order.findUnique({
     where: { id: orderId },
@@ -244,8 +250,25 @@ export async function adminUpdateOrderStatus(
   // Managed payments must never enter the legacy cancellation/restock/mark-failed branch.
   if (order.paymentFlowVersion !== null) {
     try {
-      return await db.$transaction(tx => updateManagedOrderStatus(tx, orderId, next, new Date()),
-        { isolationLevel: "Serializable", maxWait: 5_000, timeout: 15_000 });
+      return await db.$transaction(
+        async (tx) => {
+          const result = await updateManagedOrderStatus(tx, orderId, next, new Date());
+          if (result.ok && audit) {
+            await recordAdminAudit(
+              audit,
+              {
+                action: ADMIN_AUDIT_ACTIONS.ORDER_STATUS_CHANGED,
+                targetType: "Order",
+                targetId: orderId,
+                metadata: { from: order.status, to: next, reference: order.reference },
+              },
+              tx
+            );
+          }
+          return result;
+        },
+        { isolationLevel: "Serializable", maxWait: 5_000, timeout: 15_000 }
+      );
     } catch (error) {
       if (error instanceof ReservationIntegrityError)
         return { ok: false, error: "Reservation integrity requires review. No changes were committed." };
@@ -306,6 +329,18 @@ export async function adminUpdateOrderStatus(
         where: { orderId, status: "PENDING" },
         data: { status: order.paymentMethod === "COD" ? "PENDING" : "FAILED" },
       });
+    }
+    if (audit) {
+      await recordAdminAudit(
+        audit,
+        {
+          action: ADMIN_AUDIT_ACTIONS.ORDER_STATUS_CHANGED,
+          targetType: "Order",
+          targetId: orderId,
+          metadata: { from: current, to: next, reference: order.reference },
+        },
+        tx
+      );
     }
     return true;
   });

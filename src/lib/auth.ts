@@ -11,6 +11,7 @@ import bcrypt from "bcryptjs";
 import { db } from "@/lib/db";
 import { findUserByEmail } from "@/services/auth-users.service";
 import { verifyEmailTokenForLogin } from "@/services/email-verification.service";
+import { ADMIN_AUDIT_ACTIONS, recordAdminAuditBestEffort } from "@/services/admin-audit.service";
 
 const googleId = process.env.GOOGLE_CLIENT_ID;
 const googleSecret = process.env.GOOGLE_CLIENT_SECRET;
@@ -216,6 +217,26 @@ export const authOptions: NextAuthOptions = {
       // revocable, so this is how a reset signs out existing sessions.
       if (typeof token.iat === "number") session.iat = token.iat;
       return session;
+    },
+  },
+  // Admin sign-ins are written to the append-only audit log (PR-12).
+  // The event has no request context (no IP/user-agent), so only the admin
+  // id, action, and target are recorded. The write goes through the
+  // audit service's best-effort path: a failed write is surfaced through
+  // error monitoring (captureError, AUDIT_WRITE_FAILED) and can never
+  // throw, so it can never break sign-in.
+  events: {
+    async signIn({ user }) {
+      const role = (user as { role?: string } | null)?.role;
+      if (role !== "ADMIN" || !user.id) return;
+      await recordAdminAuditBestEffort(
+        { adminUserId: user.id },
+        {
+          action: ADMIN_AUDIT_ACTIONS.AUTH_ADMIN_LOGIN,
+          targetType: "User",
+          targetId: user.id,
+        }
+      );
     },
   },
 };
