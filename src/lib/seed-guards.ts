@@ -77,13 +77,89 @@ export function checkSeedTarget(env: NodeJS.ProcessEnv): SeedCheck {
         "target. Set DATABASE_URL to a local SQLite file: URL.",
     };
   }
-  if (!databaseUrl.startsWith("file:")) {
+  // The file: check is deliberately as strict as the destructive-operation
+  // guard (scripts/db-target-guards.mjs, resolveFileUrlPath): a bare
+  // startsWith("file:") would also accept a hostname authority, a query
+  // string, a fragment, malformed percent-encoding, a directory, or a
+  // UNC/Windows network path — none of which is a local SQLite file.
+  // (Phase 2, area E, finding F-1 / D-2.)
+  const fileCheck = checkSeedFileUrl(databaseUrl);
+  if (!fileCheck.ok) return fileCheck;
+  return { ok: true };
+}
+
+/**
+ * Validate that a DATABASE_URL is a genuine local SQLite `file:` URL.
+ * Mirrors scripts/db-target-guards.mjs resolveFileUrlPath, minus the
+ * absolute-path resolution (the seed only needs the refusal decision).
+ * Never echoes the URL value in a refusal reason (it could carry
+ * credentials in the non-file case).
+ */
+export function checkSeedFileUrl(raw: string): SeedCheck {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return { ok: false, reason: "DATABASE_URL is not a valid URL." };
+  }
+  if (url.protocol !== "file:") {
+    const scheme = raw.split(":")[0] || "(none)";
     return {
       ok: false,
       reason:
-        "DATABASE_URL must be a local SQLite file: URL. The seed only ever " +
-        "touches a local SQLite file and must never be pointed at a network " +
-        "database.",
+        `DATABASE_URL must be a local SQLite file: URL; got scheme "${scheme}". ` +
+        "The seed only ever touches a local SQLite file and must never be " +
+        "pointed at a network database.",
+    };
+  }
+  // Reject any authority component. The URL parser normalizes
+  // file://localhost/ to an empty hostname, so check the raw string: after
+  // "file:", "//" followed by a non-"/" character is an authority
+  // (a server name or localhost), while "///" is the empty authority of an
+  // absolute path.
+  const afterScheme = raw.slice("file:".length);
+  if (/^\/\/[^/]/.test(afterScheme) || url.hostname !== "") {
+    return {
+      ok: false,
+      reason:
+        "DATABASE_URL must not have a hostname/authority (file://server/... " +
+        "and file://localhost/... are not local SQLite targets).",
+    };
+  }
+  if (url.search !== "") {
+    return { ok: false, reason: "DATABASE_URL must not have a query string." };
+  }
+  if (url.hash !== "") {
+    return { ok: false, reason: "DATABASE_URL must not have a fragment." };
+  }
+  // The path is recovered from the raw string, not url.pathname: the parser
+  // normalizes file:./x.db and file:x.db to /x.db, losing the relative form.
+  let remainder = afterScheme;
+  if (remainder.startsWith("//")) {
+    const slash = remainder.indexOf("/", 2);
+    remainder = slash === -1 ? "" : remainder.slice(slash);
+  }
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(remainder);
+  } catch {
+    return { ok: false, reason: "DATABASE_URL has malformed percent-encoding." };
+  }
+  if (!decoded || decoded === "/" || decoded.endsWith("/")) {
+    return { ok: false, reason: "DATABASE_URL must name a SQLite file." };
+  }
+  if (decoded.startsWith("//")) {
+    return {
+      ok: false,
+      reason: "DATABASE_URL must not be a network (UNC-style) path.",
+    };
+  }
+  if (decoded.includes("\\")) {
+    return {
+      ok: false,
+      reason:
+        "DATABASE_URL must not contain backslashes (UNC/Windows network " +
+        "paths are not local SQLite targets).",
     };
   }
   return { ok: true };

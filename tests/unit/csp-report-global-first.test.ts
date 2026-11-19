@@ -52,10 +52,15 @@ describe("global bucket is checked first", () => {
 
   beforeEach(() => {
     warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // The test simulates a deployment behind a trusted proxy, so the
+    // rotating spoofed headers are honoured as distinct client IPs
+    // (Phase 2, area G) and the global bucket is what exhausts.
+    process.env.TRUSTED_PROXY_IPS = "10.0.0.1";
   });
 
   afterEach(() => {
     warnSpy.mockRestore();
+    delete process.env.TRUSTED_PROXY_IPS;
   });
 
   it("requests rejected by the exhausted global bucket never reach the per-IP bucket", async () => {

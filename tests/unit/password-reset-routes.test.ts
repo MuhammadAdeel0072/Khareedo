@@ -49,6 +49,9 @@ describe("POST /api/auth/forgot-password", () => {
     mockRequestPasswordReset.mockReset();
     mockResetPasswordWithToken.mockReset();
     mockRequestPasswordReset.mockResolvedValue(undefined);
+    // The tests simulate a deployment behind a trusted proxy, so each
+    // test's distinct forwarded IP gets its own bucket (Phase 2, area G).
+    process.env.TRUSTED_PROXY_IPS = "10.0.0.1";
   });
 
   it("returns the same message for an existing account", async () => {
@@ -114,6 +117,8 @@ describe("POST /api/auth/reset-password", () => {
   beforeEach(() => {
     mockRequestPasswordReset.mockReset();
     mockResetPasswordWithToken.mockReset();
+    // Same trusted-proxy simulation as the forgot-password describe.
+    process.env.TRUSTED_PROXY_IPS = "10.0.0.1";
   });
 
   it("resets the password with a valid token", async () => {

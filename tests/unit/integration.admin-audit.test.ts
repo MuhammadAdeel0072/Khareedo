@@ -179,7 +179,12 @@ describe("admin audit log (integration)", () => {
     expect(enrollment.manualKey).toMatch(/^[A-Z2-7]{32}$/);
     const step = totpTimeStep();
     const code = totpCodeForStep(enrollment.manualKey, step);
-    const codes = await activateAdminMfa({ userId: adminId, code, audit: auditContext });
+    const codes = await activateAdminMfa({
+      userId: adminId,
+      code,
+      audit: auditContext,
+      sessionSid: "session-aaa",
+    });
     expect(codes).not.toBeNull();
     expect(codes).toHaveLength(10);
     const { entries } = await listAdminAuditLogs({

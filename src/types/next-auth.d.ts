@@ -11,6 +11,10 @@ declare module "next-auth" {
     // The auth guard compares it against passwordChangedAt to invalidate
     // sessions issued before a password reset (PR-09).
     iat?: number;
+    // Session identifier (Phase 2, area B — M-4), minted once at sign-in
+    // in the jwt callback. The MFA guard binds a verification to this
+    // exact session. Absent on tokens issued before the change.
+    sid?: string;
   }
   interface User {
     role?: string;
@@ -20,5 +24,7 @@ declare module "next-auth" {
 declare module "next-auth/jwt" {
   interface JWT {
     role?: string;
+    // Session identifier, minted once at sign-in (see Session.sid above).
+    sid?: string;
   }
 }

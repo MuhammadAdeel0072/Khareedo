@@ -101,6 +101,11 @@ describe("report-only CSP", () => {
 });
 
 describe("next.config.ts wiring", () => {
+  it("disables the X-Powered-By header (no framework fingerprinting)", () => {
+    // Phase 2, area D: Next.js sends X-Powered-By: Next.js by default.
+    expect(nextConfig.poweredByHeader).toBe(false);
+  });
+
   it("applies the security headers to every path", async () => {
     expect(typeof nextConfig.headers).toBe("function");
     const routes = await nextConfig.headers!();

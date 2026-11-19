@@ -69,6 +69,10 @@ const nextConfig: NextConfig = {
      "./tool-results/**/*",
     ],
   },
+  // Do not advertise the framework version in the X-Powered-By response
+  // header (Phase 2, area D): it is fingerprinting information an attacker
+  // uses to pick version-specific exploits, and nothing in the app reads it.
+  poweredByHeader: false,
   reactStrictMode: false,
 };
 

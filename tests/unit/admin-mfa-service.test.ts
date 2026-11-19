@@ -184,7 +184,7 @@ describe("admin MFA service", () => {
     mockTx.adminMfa.updateMany.mockResolvedValue({ count: 1 });
     mockTx.adminMfaRecoveryCode.createMany.mockResolvedValue({ count: 10 });
 
-    const codes = await activateAdminMfa({ userId: ADMIN_ID, code });
+    const codes = await activateAdminMfa({ userId: ADMIN_ID, code, sessionSid: "session-aaa" });
     expect(codes).toHaveLength(10);
     for (const c of codes!) expect(c).toMatch(/^[A-Z2-9]{5}-[A-Z2-9]{5}$/);
     // Enabling and issuing codes happened in one transaction.
@@ -223,7 +223,7 @@ describe("admin MFA service", () => {
 
     // The database failure aborts the activation (the transaction rolls
     // back), so MFA is never left enabled without its recovery codes.
-    await expect(activateAdminMfa({ userId: ADMIN_ID, code })).rejects.toThrow("database unavailable");
+    await expect(activateAdminMfa({ userId: ADMIN_ID, code, sessionSid: "session-aaa" })).rejects.toThrow("database unavailable");
     expect(mockDb.$transaction).toHaveBeenCalledTimes(1);
     expect(mockTx.adminMfa.updateMany).toHaveBeenCalledTimes(1);
   });
@@ -240,7 +240,7 @@ describe("admin MFA service", () => {
       lastUsedStep: 0,
     });
 
-    const codes = await activateAdminMfa({ userId: ADMIN_ID, code: "000000" });
+    const codes = await activateAdminMfa({ userId: ADMIN_ID, code: "000000", sessionSid: "session-aaa" });
     expect(codes).toBeNull();
     // The code never verified, so no transaction was started.
     expect(mockDb.$transaction).not.toHaveBeenCalled();
@@ -262,7 +262,7 @@ describe("admin MFA service", () => {
       lastUsedStep: step, // this step was already used
     });
 
-    const codes = await activateAdminMfa({ userId: ADMIN_ID, code });
+    const codes = await activateAdminMfa({ userId: ADMIN_ID, code, sessionSid: "session-aaa" });
     expect(codes).toBeNull();
     // The replay was rejected before any write, so no transaction started.
     expect(mockDb.$transaction).not.toHaveBeenCalled();
@@ -287,7 +287,7 @@ describe("admin MFA service", () => {
     });
     mockDb.adminMfa.updateMany.mockResolvedValue({ count: 1 });
 
-    const result = await verifyAdminMfaForSession({ userId: ADMIN_ID, code, sessionIat });
+    const result = await verifyAdminMfaForSession({ userId: ADMIN_ID, code, sessionIat, sessionSid: "session-aaa" });
     expect(result).toBe("verified");
     expect(mockDb.adminMfa.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: "mfa-1", lastUsedStep: { lt: step } } })
@@ -314,6 +314,7 @@ describe("admin MFA service", () => {
       userId: ADMIN_ID,
       code,
       sessionIat: Math.floor(Date.now() / 1000) - 60,
+      sessionSid: "session-aaa",
     });
     expect(result).toBe("invalid");
     expect(mockDb.adminMfa.updateMany).not.toHaveBeenCalled();
@@ -340,6 +341,7 @@ describe("admin MFA service", () => {
       userId: ADMIN_ID,
       code: recoveryCode,
       sessionIat: Math.floor(Date.now() / 1000) - 60,
+      sessionSid: "session-aaa",
     });
     expect(result).toBe("verified");
     // The code was consumed atomically (guarded by usedAt null).
@@ -366,6 +368,7 @@ describe("admin MFA service", () => {
       userId: ADMIN_ID,
       code: "ZZZZZ-ZZZZZ",
       sessionIat: Math.floor(Date.now() / 1000) - 60,
+      sessionSid: "session-aaa",
     });
     expect(result).toBe("invalid");
     expect(mockDb.adminMfaRecoveryCode.updateMany).not.toHaveBeenCalled();
@@ -385,8 +388,101 @@ describe("admin MFA service", () => {
       userId: ADMIN_ID,
       code: "123456",
       sessionIat: Math.floor(Date.now() / 1000) - 60,
+      sessionSid: "session-aaa",
     });
     expect(result).toBe("not-enrolled");
+  });
+
+  it("session verification fails closed when the session has no sid (pre-sid token)", async () => {
+    const key = Buffer.from(TEST_KEY, "base64");
+    const secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+    const step = totpTimeStep();
+    const code = totpCodeForStep(secret, step);
+    mockDb.adminMfa.findUnique.mockResolvedValue({
+      id: "mfa-1",
+      userId: ADMIN_ID,
+      secretEncrypted: encryptTotpSecret(secret, key),
+      pendingSecretEncrypted: null,
+      enabledAt: new Date("2026-11-19T09:00:00.000Z"),
+      lastVerifiedAt: null,
+      lastVerifiedSessionId: null,
+      lastUsedStep: 0,
+      recoveryCodes: [],
+    });
+
+    // The code is valid, but there is no session id to bind the
+    // verification to — it must not verify. The admin signs out and signs
+    // in again, which mints a sid.
+    const result = await verifyAdminMfaForSession({
+      userId: ADMIN_ID,
+      code,
+      sessionIat: Math.floor(Date.now() / 1000) - 60,
+      sessionSid: undefined,
+    });
+    expect(result).toBe("invalid");
+    expect(mockDb.adminMfa.updateMany).not.toHaveBeenCalled();
+    expect(mockDb.adminMfa.update).not.toHaveBeenCalled();
+  });
+
+  it("session verification records the session id it verified in", async () => {
+    const key = Buffer.from(TEST_KEY, "base64");
+    const secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+    const step = totpTimeStep();
+    const code = totpCodeForStep(secret, step);
+    const sessionIat = Math.floor(Date.now() / 1000) - 60;
+    mockDb.adminMfa.findUnique.mockResolvedValue({
+      id: "mfa-1",
+      userId: ADMIN_ID,
+      secretEncrypted: encryptTotpSecret(secret, key),
+      pendingSecretEncrypted: null,
+      enabledAt: new Date("2026-11-19T09:00:00.000Z"),
+      lastVerifiedAt: null,
+      lastVerifiedSessionId: null,
+      lastUsedStep: 0,
+      recoveryCodes: [],
+    });
+    mockDb.adminMfa.updateMany.mockResolvedValue({ count: 1 });
+    mockDb.adminMfa.update.mockResolvedValue({});
+
+    const result = await verifyAdminMfaForSession({
+      userId: ADMIN_ID,
+      code,
+      sessionIat,
+      sessionSid: "session-aaa",
+    });
+    expect(result).toBe("verified");
+    // The verification is bound to this session id.
+    expect(mockDb.adminMfa.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "mfa-1" },
+        data: expect.objectContaining({ lastVerifiedSessionId: "session-aaa" }),
+      })
+    );
+  });
+
+  it("activation binds the activating session", async () => {
+    const key = Buffer.from(TEST_KEY, "base64");
+    const secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+    const step = totpTimeStep();
+    const code = totpCodeForStep(secret, step);
+    const storedSecret = encryptTotpSecret(secret, key);
+    mockDb.adminMfa.findUnique.mockResolvedValue({
+      id: "mfa-1",
+      userId: ADMIN_ID,
+      secretEncrypted: storedSecret,
+      pendingSecretEncrypted: null,
+      enabledAt: null,
+      lastUsedStep: 0,
+    });
+    mockTx.adminMfa.updateMany.mockResolvedValue({ count: 1 });
+    mockTx.adminMfaRecoveryCode.createMany.mockResolvedValue({ count: 10 });
+
+    const codes = await activateAdminMfa({ userId: ADMIN_ID, code, sessionSid: "session-aaa" });
+    expect(codes).toHaveLength(10);
+    const updateCall = mockTx.adminMfa.updateMany.mock.calls[0][0];
+    expect(updateCall.data).toEqual(
+      expect.objectContaining({ lastVerifiedSessionId: "session-aaa" })
+    );
   });
 
   it("regeneration deletes all previous codes and returns a fresh set", async () => {
@@ -450,7 +546,7 @@ describe("admin MFA service", () => {
     // The failure aborts the transaction, so the secret swap and the
     // deletion of the old codes roll back together: the old secret and
     // its recovery codes stay active.
-    await expect(activateAdminMfa({ userId: ADMIN_ID, code })).rejects.toThrow("database unavailable");
+    await expect(activateAdminMfa({ userId: ADMIN_ID, code, sessionSid: "session-aaa" })).rejects.toThrow("database unavailable");
     expect(mockDb.$transaction).toHaveBeenCalledTimes(1);
     // The swap was attempted only for the pending secret this activation
     // actually verified (pending-secret equality guard).
@@ -463,8 +559,10 @@ describe("admin MFA service", () => {
     const bcrypt = await import("bcryptjs");
     const passwordHash = await bcrypt.hash("correct-password", 4);
     mockDb.user.findUnique.mockResolvedValue({ passwordHash });
-    mockDb.adminMfa.findUnique.mockResolvedValueOnce({ id: "mfa-1", enabledAt: new Date() });
-    // The verification step (called internally) needs the full MFA row.
+    // Disablement loads the full MFA row itself and checks the code as a
+    // fresh proof of possession (consumeValidAdminMfaCode), so a single
+    // findUnique returning the complete row is what the code under test
+    // actually does.
     const key = Buffer.from(TEST_KEY, "base64");
     const secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
     const step = totpTimeStep();

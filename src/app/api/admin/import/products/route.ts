@@ -2,6 +2,7 @@
 // POST /api/admin/import/products  — multipart/form-data, field "file".
 import ExcelJS from "exceljs";
 import { requireAdminMfaVerified } from "@/lib/auth-guard";
+import { rateLimit } from "@/lib/rate-limit";
 import { jsonError, jsonOk, handleRoute } from "@/lib/api";
 import {
   ADMIN_AUDIT_ACTIONS,
@@ -20,6 +21,15 @@ const MAX_FILE_BYTES = 2 * 1024 * 1024; // 2 MB
 export async function POST(request: Request) {
   return handleRoute(async () => {
     const admin = await requireAdminMfaVerified();
+
+    // A bulk import parses a spreadsheet and creates products: 5/min per
+    // admin (Phase 2, area A). Keyed on the admin id (see upload route).
+    const limit = rateLimit(`admin-import:${admin.id}`, 5, 60 * 1000);
+    if (!limit.ok) {
+      return jsonError(`Too many imports. Please try again in ${limit.retryAfterSec}s.`, 429, undefined, {
+        headers: { "Retry-After": String(limit.retryAfterSec) },
+      });
+    }
 
     let form: FormData;
     try {

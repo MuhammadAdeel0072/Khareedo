@@ -1,9 +1,20 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { requestOrigin } from "@/lib/request-origin";
 
 const headers = (entries: Record<string, string> = {}) => new Headers(entries);
 
 describe("request-origin derivation", () => {
+  beforeEach(() => {
+    // These tests simulate a deployment behind a trusted proxy, so the
+    // forwarded headers are honoured (Phase 2, area G: forwarded headers
+    // are only trusted when TRUSTED_PROXY_IPS is configured).
+    process.env.TRUSTED_PROXY_IPS = "10.0.0.1";
+  });
+
+  afterEach(() => {
+    delete process.env.TRUSTED_PROXY_IPS;
+  });
+
   it("uses the direct host header as plain HTTP when no proxy headers exist", () => {
     expect(requestOrigin(headers({ host: "localhost:3000" }))).toBe("http://localhost:3000");
   });
@@ -30,5 +41,21 @@ describe("request-origin derivation", () => {
     expect(requestOrigin(headers({ host: "evil host" }))).toBeNull();
     expect(requestOrigin(headers({ host: "x".repeat(300) }))).toBeNull();
     expect(requestOrigin(headers({ host: "shop.example.pk", "x-forwarded-proto": "ftp" }))).toBeNull();
+  });
+
+  it("ignores forwarded headers when no trusted proxy is configured", () => {
+    // Fail-safe (Phase 2, area G): without TRUSTED_PROXY_IPS, forwarded
+    // headers are client-controlled and must not mint an origin.
+    delete process.env.TRUSTED_PROXY_IPS;
+    expect(requestOrigin(headers({
+      host: "internal:3000",
+      "x-forwarded-host": "preview-abc.space-z.ai",
+      "x-forwarded-proto": "https",
+    }))).toBe("http://internal:3000");
+    // Forwarded headers alone, with no host at all, cannot mint an origin.
+    expect(requestOrigin(headers({
+      "x-forwarded-host": "shop.example.pk",
+      "x-forwarded-proto": "https",
+    }))).toBeNull();
   });
 });

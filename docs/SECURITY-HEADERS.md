@@ -96,19 +96,26 @@ To review reports, search server logs for `"type":"csp-report"`. A report
 means a resource *would have been blocked* under an enforcing policy —
 during the report-only window, nothing is actually blocked.
 
-### Trust model for forwarded IPs (reviewed 2026-11-18)
+### Trust model for forwarded IPs (reviewed 2026-11-18; fixed 2026-11-19, Phase 2)
 
-The per-IP bucket keys on `clientIp()` (`src/lib/rate-limit.ts`), which
-trusts the first `X-Forwarded-For` entry. That header is client-controlled
-unless a trusted proxy overwrites it — so forwarded-IP trust cannot be
-established from the repository alone:
+The per-IP bucket keys on `clientIp()` (`src/lib/rate-limit.ts`). Before
+Phase 2 it trusted the first `X-Forwarded-For` entry unconditionally —
+client-controlled unless a trusted proxy overwrote it. That is fixed:
+`clientIp()` now honours forwarded headers **only when
+`TRUSTED_PROXY_IPS` is configured** (`src/lib/trusted-proxy.ts`); without
+it, every client is reported as `"unknown"` and all requests share one
+bucket. A spoofed header can therefore no longer buy a fresh bucket — it
+cannot even get past the per-IP cap (`tests/unit/csp-report-spoof.test.ts`
+now covers both the trusted-proxy case and the untrusted fail-safe).
+
+What still needs the deployment decision (Q-01):
 
 - **What the proxy does:** the repo's `Caddyfile` sets
   `header_up X-Forwarded-For {remote_host}` on both handlers. In Caddy,
   that *replaces* the incoming header with the connecting client's IP
   (Caddy's default is to append, which would pass a spoofed value
   through); a client-supplied value cannot survive this Caddyfile.
-- **Why that is not enough to trust it:** the `Caddyfile` dates from the
+- **Why that is not enough to trust it yet:** the `Caddyfile` dates from the
   initial project checkpoint, listens on plain HTTP `:81`, and nothing in
   the repo says it is the production proxy — there is no Dockerfile,
   compose file, or deployment guide naming it, and no firewall rule
@@ -117,17 +124,19 @@ established from the repository alone:
   all interfaces by default, so on an unprotected host an attacker could
   bypass Caddy entirely and send any `X-Forwarded-For` they like straight
   to the app.
-- **Consequence:** do not claim robust per-IP protection for this
-  endpoint. The per-IP bucket is a fairness mechanism for honest clients;
-  the global bucket is the protection, and the spoof tests prove it:
-  rotating the claimed IP on every request still stops at 300 reports/min
-  (`tests/unit/csp-report-spoof.test.ts`).
+- **Consequence until the proxy is named and `TRUSTED_PROXY_IPS` is set:**
+  per-IP limits work, but as one shared `"unknown"` bucket — a fairness
+  mechanism, not per-client protection. The global bucket remains the
+  protection for this endpoint, and the spoof tests prove it: rotating
+  the claimed IP on every request still stops at 300 reports/min
+  (`tests/unit/csp-report-spoof.test.ts`). Once the production proxy is
+  named and its IPs are put in `TRUSTED_PROXY_IPS`, per-IP buckets become
+  real per-client buckets. See `docs/DEPLOYMENT.md` ("Production
+  security configuration").
 - **Same caveat, wider scope:** `clientIp()` is shared by the register,
   checkout, Safepay session, resend-verification and admin image-import
-  routes — their per-IP limits are equally spoofable if the app is reached
-  directly. Fixing the shared helper (or pinning the deployment so :3000
-  is localhost-only behind the overwriting proxy) is a follow-up, not
-  part of this PR.
+  routes — their per-IP limits are equally shared-bucket until the proxy
+  is configured.
 - **Per-process limits:** both buckets live in a module-level `Map` in
   the server process. That matches the current single-instance deployment
   assumption. Under a multi-instance deployment each instance enforces its
@@ -166,7 +175,10 @@ established from the repository alone:
 - **CSP is report-only.** Nothing is enforced. After at least one release
   of reports with no unexpected violations, a follow-up PR can switch the
   same directives to an enforcing `Content-Security-Policy` header
-  (keeping report-only alongside it during the transition).
+  (keeping report-only alongside it during the transition). This was
+  re-confirmed as a deliberate decision in Phase 2 (not a missed bug):
+  enforcement could break legitimate functionality, and the report
+  window has not run yet.
 - **HSTS is not preloaded and has no `includeSubDomains`.** Add
   `includeSubDomains` only after confirming every subdomain serves HTTPS;
   add `preload` only if the domain is submitted to the preload list.
@@ -178,9 +190,10 @@ established from the repository alone:
   deployment path, not just in `next start`. The same proxy question
   decides whether `X-Forwarded-For` can be trusted at all — see the trust
   model in the reporting section above.
-- **Per-IP rate limiting is best effort, per process.** Both buckets of
-  the CSP report endpoint (and every other `clientIp()`-based limit in
-  the app) are spoofable if the app is reached directly, and are enforced
+- **Per-IP rate limiting is best effort, per process, and shared-bucket
+  until the proxy is configured.** Both buckets of the CSP report endpoint
+  (and every other `clientIp()`-based limit in the app) collapse into one
+  `"unknown"` bucket while `TRUSTED_PROXY_IPS` is unset, and are enforced
   separately by each server process under multi-instance deployment.
 - **Report volume is only visible in server logs.** There is no dashboard
   or alerting for CSP reports by design — alerting on violations would
@@ -188,3 +201,10 @@ established from the repository alone:
 - **`unsafe-inline` remains in `script-src`/`style-src`.** Removing it
   needs Next.js nonce support wired through the proxy/middleware; that is
   a separate change with its own testing.
+- **`X-Powered-By` is disabled** (`poweredByHeader: false` in
+  `next.config.ts`, Phase 2) so responses do not advertise the framework
+  version.
+- **CSRF is enforced in the proxy, not by headers.** Same-origin
+  validation for state-changing API requests lives in `src/proxy.ts`
+  (rules in `src/lib/csrf.ts`); see `docs/REQUIREMENTS-TRACEABILITY.md`.
+  SameSite=Lax cookies remain the first layer.

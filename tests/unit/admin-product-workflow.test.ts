@@ -22,6 +22,8 @@ const mocks = vi.hoisted(() => {
       role: "ADMIN",
       mfaEnabledAt: new Date("2026-11-19T00:00:00.000Z"),
       mfaLastVerifiedAt: new Date("2026-11-19T00:00:00.000Z"),
+      mfaLastVerifiedSessionId: "session-aaa",
+      sessionSid: "session-aaa",
     },
     requireAdmin: vi.fn(),
     categoryFindUnique: vi.fn(),

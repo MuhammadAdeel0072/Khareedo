@@ -1,6 +1,7 @@
 import { loadSafepayConfig, loadSafepayWebhookSecret, SafepayConfigurationError } from "@/lib/safepay/config";
 import { capturePaymentAlert } from "@/lib/error-monitoring";
 import { requestOrigin } from "@/lib/request-origin";
+import { rateLimit, clientIp } from "@/lib/rate-limit";
 import { createPaymentWebhookService } from "@/services/payment-webhook.service";
 import { createPaymentPayloadVault } from "@/lib/payments/payload-vault";
 import { loadPaymentPayloadVaultKeys } from "@/lib/payments/vault-env";
@@ -28,6 +29,22 @@ const retainedRequestHeaders = ["content-type", "user-agent", "x-sfpy-signature"
   "x-sfpy-timestamp", "x-sfpy-event-type", "x-sfpy-aggregator-id"] as const;
 
 export async function POST(request: Request) {
+  // Rate limiting, global bucket first (Phase 2, area A — same pattern as
+  // POST /api/csp-report): a flood must be rejected before config loading,
+  // body parsing, or any per-IP bucket work. 600/min global and 60/min per
+  // IP are far above legitimate Safepay volume (a handful of events per
+  // order), so a 429 here means an attack, not a real delivery; Safepay
+  // retries any non-2xx delivery, so a genuinely delayed legitimate event
+  // is redelivered rather than lost.
+  const global = rateLimit("webhook-safepay:global", 600, 60 * 1000);
+  if (!global.ok) {
+    return reply(429, { ok: false, code: "TOO_MANY_REQUESTS" }, { "Retry-After": String(global.retryAfterSec) });
+  }
+  const perIp = rateLimit(`webhook-safepay:${clientIp(request.headers)}`, 60, 60 * 1000);
+  if (!perIp.ok) {
+    return reply(429, { ok: false, code: "TOO_MANY_REQUESTS" }, { "Retry-After": String(perIp.retryAfterSec) });
+  }
+
   let config, webhookSecret: string;
   try {
     config = loadSafepayConfig(process.env, requestOrigin(request.headers) ?? undefined);

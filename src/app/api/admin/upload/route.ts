@@ -3,6 +3,7 @@
 // prefix, selected with target=banner). Admin-gated, request-size bounded,
 // magic-byte validated, collision-resistant object names, upsert disabled.
 import { requireAdminMfaVerified } from "@/lib/auth-guard";
+import { rateLimit } from "@/lib/rate-limit";
 import { handleRoute, jsonError, jsonOk } from "@/lib/api";
 import {
   ADMIN_AUDIT_ACTIONS,
@@ -56,6 +57,17 @@ async function readBoundedBody(request: Request): Promise<ArrayBuffer | null> {
 export async function POST(request: Request) {
   return handleRoute(async () => {
     const admin = await requireAdminMfaVerified();
+
+    // Uploads write to storage and are expensive per request: 10/min per
+    // admin (Phase 2, area A). Keyed on the admin id, not the IP — an admin
+    // is authenticated and MFA-verified here, so per-account is the right
+    // bucket and it cannot be evaded by rotating IPs.
+    const limit = rateLimit(`admin-upload:${admin.id}`, 10, 60 * 1000);
+    if (!limit.ok) {
+      return jsonError(`Too many uploads. Please try again in ${limit.retryAfterSec}s.`, 429, undefined, {
+        headers: { "Retry-After": String(limit.retryAfterSec) },
+      });
+    }
 
     const contentType = request.headers.get("content-type") ?? "";
     if (!contentType.toLowerCase().startsWith("multipart/form-data;")) {

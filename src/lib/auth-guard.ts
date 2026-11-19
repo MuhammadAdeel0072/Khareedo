@@ -14,21 +14,36 @@ export interface SessionUser {
   // the role. Null for customers and for admins who never enrolled.
   mfaEnabledAt: Date | null;
   mfaLastVerifiedAt: Date | null;
+  // Session the admin last verified MFA in (Phase 2, area B — M-4). Null
+  // when never verified in a session-bound way.
+  mfaLastVerifiedSessionId: string | null;
+  // This JWT's session identifier (`sid` claim, minted at sign-in).
+  // Undefined on tokens issued before the change.
+  sessionSid: string | undefined;
 }
 
 /**
  * Decide whether MFA is verified for a session issued at `iat` (seconds).
  * The guard requires lastVerifiedAt to be after the session's issued-at
- * time, so each new login must verify MFA again — the same pattern as
- * PR-09's passwordChangedAt. When either value is missing the check cannot
- * apply and the session is not MFA-verified.
+ * time AND the verification to be bound to this exact session
+ * (lastVerifiedSessionId === sessionSid), so each new login must verify MFA
+ * again — the same pattern as PR-09's passwordChangedAt — and a
+ * verification performed in one session cannot authorize a different
+ * (possibly stolen) session. When any value is missing the check cannot
+ * apply and the session is not MFA-verified (fail closed). Sessions issued
+ * before the sid change carry no sid, so their admins re-verify once after
+ * signing in again.
  */
 export function isMfaVerifiedForSession(
   lastVerifiedAt: Date | null,
-  iat: number | undefined
+  iat: number | undefined,
+  lastVerifiedSessionId: string | null | undefined,
+  sessionSid: string | undefined
 ): boolean {
   if (!lastVerifiedAt || typeof iat !== "number") return false;
-  return lastVerifiedAt.getTime() > iat * 1000;
+  if (lastVerifiedAt.getTime() <= iat * 1000) return false;
+  if (!lastVerifiedSessionId || !sessionSid) return false;
+  return lastVerifiedSessionId === sessionSid;
 }
 
 /**
@@ -61,8 +76,9 @@ const readRequestUser = cache(async (): Promise<SessionUser | null> => {
       role: true,
       passwordChangedAt: true,
       // Admin MFA state (PR-10). The secret is never selected here — only
-      // the timestamps the guard needs to decide enforcement.
-      adminMfa: { select: { enabledAt: true, lastVerifiedAt: true } },
+      // the timestamps and session binding the guard needs to decide
+      // enforcement.
+      adminMfa: { select: { enabledAt: true, lastVerifiedAt: true, lastVerifiedSessionId: true } },
     },
   });
   if (!user) return null;
@@ -80,6 +96,8 @@ const readRequestUser = cache(async (): Promise<SessionUser | null> => {
     role: user.role,
     mfaEnabledAt: user.adminMfa?.enabledAt ?? null,
     mfaLastVerifiedAt: user.adminMfa?.lastVerifiedAt ?? null,
+    mfaLastVerifiedSessionId: user.adminMfa?.lastVerifiedSessionId ?? null,
+    sessionSid: session.sid,
   };
 });
 
@@ -141,7 +159,14 @@ export async function requireAdminMfaVerified(): Promise<SessionUser> {
     );
   }
   const session = await getRequestSession();
-  if (!isMfaVerifiedForSession(user.mfaLastVerifiedAt, session?.iat)) {
+  if (
+    !isMfaVerifiedForSession(
+      user.mfaLastVerifiedAt,
+      session?.iat,
+      user.mfaLastVerifiedSessionId,
+      user.sessionSid
+    )
+  ) {
     throw new MfaRequiredError(
       "MFA_VERIFICATION_REQUIRED",
       "Please verify your multi-factor authentication code to continue.",

@@ -25,6 +25,7 @@
 //   or never started (HTTP 200 — the app itself is up).
 // - down: database unreachable (HTTP 503).
 import { db } from "@/lib/db";
+import { rateLimit } from "@/lib/rate-limit";
 import {
   getWorkerHeartbeat,
   type WorkerHeartbeatSnapshot,
@@ -112,6 +113,19 @@ async function checkDatabase(): Promise<HealthCheck> {
 }
 
 export async function GET() {
+  // A global-only bucket (Phase 2, area A): the endpoint is unauthenticated
+  // by design, so there is no per-client identity to key on, and a per-IP
+  // bucket would be evadable via spoofed headers until a trusted proxy is
+  // configured. 300/min is far above any legitimate monitor (typically one
+  // probe every 10-30s); beyond it the endpoint answers 429 instead of
+  // burning a database probe per request.
+  const limit = rateLimit("health:global", 300, 60 * 1000);
+  if (!limit.ok) {
+    return Response.json(
+      { ok: false, error: `Too many requests. Please try again in ${limit.retryAfterSec}s.` },
+      { status: 429, headers: { "Retry-After": String(limit.retryAfterSec), "Cache-Control": "no-store" } },
+    );
+  }
   const [database, worker] = await Promise.all([
     checkDatabase(),
     Promise.resolve(getWorkerHeartbeat()),

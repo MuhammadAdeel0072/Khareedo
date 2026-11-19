@@ -1,6 +1,7 @@
 // Admin exports — Excel (.xlsx) and PDF downloads (server-generated, admin-only).
 // GET /api/admin/export?type=reports|products|orders|customers&format=xlsx|pdf
 import { requireAdminMfaVerified, type SessionUser } from "@/lib/auth-guard";
+import { rateLimit } from "@/lib/rate-limit";
 import { jsonError, handleRoute } from "@/lib/api";
 import {
   ADMIN_AUDIT_ACTIONS,
@@ -67,6 +68,15 @@ async function recordExportAudit(
 export async function GET(request: Request) {
   return handleRoute(async () => {
     const admin = await requireAdminMfaVerified();
+
+    // Exports build whole workbooks/PDFs server-side: 30/min per admin
+    // (Phase 2, area A). Keyed on the admin id (see upload route).
+    const limit = rateLimit(`admin-export:${admin.id}`, 30, 60 * 1000);
+    if (!limit.ok) {
+      return jsonError(`Too many exports. Please try again in ${limit.retryAfterSec}s.`, 429, undefined, {
+        headers: { "Retry-After": String(limit.retryAfterSec) },
+      });
+    }
 
     const { searchParams } = new URL(request.url);
     const type = searchParams.get("type") ?? "";
