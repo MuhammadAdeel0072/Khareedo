@@ -50,8 +50,15 @@ jobs:
           DATABASE_URL: file:./ci-placeholder.sqlite
           SUPABASE_POSTGRES_URL: postgresql://ci:ci@127.0.0.1:5432/ci
 
+      - name: Unit tests
+        run: npm test
+        env:
+          DATABASE_URL: file:./ci-placeholder.sqlite
+          SUPABASE_POSTGRES_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+
       - name: Production build
         run: npm run build
         env:
           SUPABASE_POSTGRES_URL: postgresql://ci:ci@127.0.0.1:5432/ci
           NEXTAUTH_SECRET: ci-build-only-placeholder-not-for-production
+```
