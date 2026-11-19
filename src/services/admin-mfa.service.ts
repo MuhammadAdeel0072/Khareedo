@@ -155,6 +155,16 @@ export async function getAdminMfaStatus(userId: string): Promise<AdminMfaStatus>
   };
 }
 
+/** True when a Prisma error is a unique-constraint violation (P2002). */
+function isUniqueConstraintError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: string }).code === "P2002"
+  );
+}
+
 /**
  * Start (or restart) FIRST-TIME MFA enrollment. Generates a fresh secret,
  * encrypts and stores it (replacing any pending enrollment), and returns
@@ -166,6 +176,15 @@ export async function getAdminMfaStatus(userId: string): Promise<AdminMfaStatus>
  * enrollment changes go through startAdminMfaReplacement, which requires
  * the current password and a valid current code. Throws
  * MfaUnavailableError when the encryption key is not configured.
+ *
+ * TOCTOU-safe: the write is conditional on MFA still being disabled.
+ * The secret and QR code are generated first (outside any write); the
+ * database write then uses updateMany guarded on `enabledAt: null`, so a
+ * concurrent activation that enabled MFA between the check and the write
+ * cannot be overwritten — the update matches zero rows and the enrollment
+ * is refused. A fresh row is created only when no row exists. Recovery
+ * codes are deleted only after the conditional update has succeeded (the
+ * update is the authorization), never before.
  */
 export async function startAdminMfaEnrollment(input: { userId: string; email: string }): Promise<{
   qrCodeDataUrl: string;
@@ -173,41 +192,56 @@ export async function startAdminMfaEnrollment(input: { userId: string; email: st
   otpauthUrl: string;
 }> {
   const key = requireMfaKey();
-  // Refuse to touch an active enrollment. A pending (never-enabled)
-  // enrollment may be restarted; there is no active secret to protect.
-  const existing = await db.adminMfa.findUnique({
-    where: { userId: input.userId },
-    select: { enabledAt: true },
-  });
-  if (existing?.enabledAt) throw new MfaAlreadyEnabledError();
   const secret = generateTotpSecret();
   const otpauthUrl = totpAuthUrl({ issuer: MFA_ISSUER, account: input.email, secret });
   const qrCodeDataUrl = await QRCode.toDataURL(otpauthUrl, { errorCorrectionLevel: "M", margin: 2 });
-  await db.adminMfa.upsert({
-    where: { userId: input.userId },
-    create: {
-      userId: input.userId,
-      secretEncrypted: encryptTotpSecret(secret, key),
+  const encrypted = encryptTotpSecret(secret, key);
+  // Replace a still-disabled (pending) enrollment. The enabledAt guard is
+  // the race protection: if a concurrent activation enabled MFA after the
+  // pre-check, this matches zero rows and the enrollment is refused.
+  const replaced = await db.adminMfa.updateMany({
+    where: { userId: input.userId, enabledAt: null },
+    data: {
+      secretEncrypted: encrypted,
       pendingSecretEncrypted: null,
-      enabledAt: null,
-      lastVerifiedAt: null,
-      lastUsedStep: 0,
-    },
-    update: {
-      secretEncrypted: encryptTotpSecret(secret, key),
-      pendingSecretEncrypted: null,
-      enabledAt: null,
       lastVerifiedAt: null,
       lastUsedStep: 0,
     },
   });
-  // A fresh first-time enrollment has no recovery codes yet (they are
-  // issued at activation). Any stale codes from a previous enrollment are
-  // discarded here; the active enrollment (if any) is untouched because
-  // the guard above already rejected it.
-  const mfa = await db.adminMfa.findUnique({ where: { userId: input.userId }, select: { id: true } });
-  if (mfa) await db.adminMfaRecoveryCode.deleteMany({ where: { mfaId: mfa.id } });
-  return { qrCodeDataUrl, manualKey: secret, otpauthUrl };
+  if (replaced.count === 1) {
+    // The update is the authorization: only now may the old pending
+    // enrollment's recovery codes be discarded. (A pending enrollment has
+    // none — codes are issued at activation — but a stale row might.)
+    const mfa = await db.adminMfa.findUnique({ where: { userId: input.userId }, select: { id: true } });
+    if (mfa) await db.adminMfaRecoveryCode.deleteMany({ where: { mfaId: mfa.id } });
+    return { qrCodeDataUrl, manualKey: secret, otpauthUrl };
+  }
+  // No pending row was replaced: either no row exists (first enrollment)
+  // or MFA is now active (a concurrent activation won the race).
+  try {
+    await db.adminMfa.create({
+      data: {
+        userId: input.userId,
+        secretEncrypted: encrypted,
+        pendingSecretEncrypted: null,
+        enabledAt: null,
+        lastVerifiedAt: null,
+        lastUsedStep: 0,
+      },
+    });
+    return { qrCodeDataUrl, manualKey: secret, otpauthUrl };
+  } catch (error) {
+    if (!isUniqueConstraintError(error)) throw error;
+    // A row appeared concurrently. Re-check: if MFA is now active, refuse;
+    // if a concurrent enrollment created a pending row, our secret was not
+    // stored, so refuse and let the caller retry against that enrollment.
+    const existing = await db.adminMfa.findUnique({
+      where: { userId: input.userId },
+      select: { enabledAt: true },
+    });
+    if (existing?.enabledAt) throw new MfaAlreadyEnabledError();
+    throw new Error("Another MFA enrollment started at the same time. Please try again.");
+  }
 }
 
 /**
@@ -340,9 +374,13 @@ export async function activateAdminMfa(input: { userId: string; code: string }):
     // cleared, MFA stays enabled, and the old recovery codes are rotated.
     // The pendingSecretEncrypted guard makes the swap single-flight: the
     // first activation clears the slot, so a concurrent one matches nothing.
+    // The equality check on the pending bytes also guards against a
+    // concurrent replacement start overwriting the pending secret after
+    // this activation read it: the swap only happens for the secret this
+    // activation actually verified.
     const swapped = await db.$transaction(async (tx) => {
       const claimed = await tx.adminMfa.updateMany({
-        where: { id: mfa.id, pendingSecretEncrypted: { not: null } },
+        where: { id: mfa.id, pendingSecretEncrypted: pendingBytes },
         data: {
           secretEncrypted: pendingBytes,
           pendingSecretEncrypted: null,
@@ -357,8 +395,15 @@ export async function activateAdminMfa(input: { userId: string; code: string }):
     if (!swapped) return null;
     return createRecoveryCodes(mfa.id);
   }
+  // First-time activation. The secret-equality guard is the race
+  // protection: the activation verified a code against the secret it read,
+  // so the update only succeeds while that same secret is still stored. A
+  // concurrent enrollment that replaced the secret after the read matches
+  // zero rows, so activation cannot enable MFA with a secret the admin
+  // never set up (which would lock them out). enabledAt: null guards
+  // against a concurrent activation having already enabled MFA.
   const claimed = await db.adminMfa.updateMany({
-    where: { id: mfa.id, lastUsedStep: { lt: step } },
+    where: { id: mfa.id, secretEncrypted: pendingBytes, enabledAt: null, lastUsedStep: { lt: step } },
     data: { enabledAt: now, lastVerifiedAt: now, lastUsedStep: step },
   });
   if (claimed.count !== 1) return null;

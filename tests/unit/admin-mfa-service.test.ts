@@ -9,7 +9,14 @@ const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 
 const { mockDb } = vi.hoisted(() => ({
   mockDb: {
-    adminMfa: { findUnique: vi.fn(), upsert: vi.fn(), updateMany: vi.fn(), update: vi.fn(), delete: vi.fn() },
+    adminMfa: {
+      findUnique: vi.fn(),
+      upsert: vi.fn(),
+      updateMany: vi.fn(),
+      update: vi.fn(),
+      create: vi.fn(),
+      delete: vi.fn(),
+    },
     adminMfaRecoveryCode: { createMany: vi.fn(), deleteMany: vi.fn(), updateMany: vi.fn() },
     user: { findUnique: vi.fn() },
   },
@@ -106,9 +113,10 @@ describe("admin MFA service", () => {
   });
 
   it("enrollment stores an encrypted secret and returns a QR code + manual key", async () => {
-    mockDb.adminMfa.upsert.mockResolvedValue({});
-    mockDb.adminMfa.findUnique.mockResolvedValue({ id: "mfa-1" });
-    mockDb.adminMfaRecoveryCode.deleteMany.mockResolvedValue({ count: 0 });
+    // No pending row exists, so the conditional update matches nothing and
+    // the enrollment is created.
+    mockDb.adminMfa.updateMany.mockResolvedValue({ count: 0 });
+    mockDb.adminMfa.create.mockResolvedValue({ id: "mfa-1" });
 
     const enrollment = await startAdminMfaEnrollment({ userId: ADMIN_ID, email: ADMIN_EMAIL });
     expect(enrollment.qrCodeDataUrl).toMatch(/^data:image\/png;base64,/);
@@ -116,7 +124,11 @@ describe("admin MFA service", () => {
     expect(enrollment.otpauthUrl).toContain("otpauth://totp/");
     expect(enrollment.otpauthUrl).toContain(encodeURIComponent(ADMIN_EMAIL));
 
-    const stored = mockDb.adminMfa.upsert.mock.calls[0][0].create;
+    // The conditional update only touches a still-disabled enrollment.
+    expect(mockDb.adminMfa.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { userId: ADMIN_ID, enabledAt: null } })
+    );
+    const stored = mockDb.adminMfa.create.mock.calls[0][0].data;
     expect(stored.userId).toBe(ADMIN_ID);
     expect(stored.enabledAt).toBeNull();
     // The stored secret decrypts to the manual key.
@@ -124,12 +136,25 @@ describe("admin MFA service", () => {
     expect(decryptTotpSecret(stored.secretEncrypted, key)).toBe(enrollment.manualKey);
   });
 
+  it("enrollment replaces a pending enrollment via the conditional update", async () => {
+    mockDb.adminMfa.updateMany.mockResolvedValue({ count: 1 });
+    mockDb.adminMfa.findUnique.mockResolvedValue({ id: "mfa-1" });
+    mockDb.adminMfaRecoveryCode.deleteMany.mockResolvedValue({ count: 0 });
+
+    const enrollment = await startAdminMfaEnrollment({ userId: ADMIN_ID, email: ADMIN_EMAIL });
+    expect(enrollment.manualKey).toMatch(/^[A-Z2-7]{32}$/);
+    expect(mockDb.adminMfa.create).not.toHaveBeenCalled();
+    // Recovery codes are deleted only after the conditional update succeeded.
+    expect(mockDb.adminMfaRecoveryCode.deleteMany).toHaveBeenCalledWith({ where: { mfaId: "mfa-1" } });
+  });
+
   it("enrollment fails closed without the encryption key", async () => {
     delete process.env.ADMIN_MFA_ENCRYPTION_KEY;
     await expect(startAdminMfaEnrollment({ userId: ADMIN_ID, email: ADMIN_EMAIL })).rejects.toThrow(
       "Administrator MFA is not configured."
     );
-    expect(mockDb.adminMfa.upsert).not.toHaveBeenCalled();
+    expect(mockDb.adminMfa.updateMany).not.toHaveBeenCalled();
+    expect(mockDb.adminMfa.create).not.toHaveBeenCalled();
   });
 
   it("activation enables MFA only after a valid first code, and returns recovery codes", async () => {
@@ -137,10 +162,11 @@ describe("admin MFA service", () => {
     const secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
     const step = totpTimeStep();
     const code = totpCodeForStep(secret, step);
+    const storedSecret = encryptTotpSecret(secret, key);
     mockDb.adminMfa.findUnique.mockResolvedValue({
       id: "mfa-1",
       userId: ADMIN_ID,
-      secretEncrypted: encryptTotpSecret(secret, key),
+      secretEncrypted: storedSecret,
       pendingSecretEncrypted: null,
       enabledAt: null,
       lastUsedStep: 0,
@@ -152,10 +178,13 @@ describe("admin MFA service", () => {
     const codes = await activateAdminMfa({ userId: ADMIN_ID, code });
     expect(codes).toHaveLength(10);
     for (const c of codes!) expect(c).toMatch(/^[A-Z2-9]{5}-[A-Z2-9]{5}$/);
-    // The activation claimed the time step atomically.
-    expect(mockDb.adminMfa.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: "mfa-1", lastUsedStep: { lt: step } } })
-    );
+    // The activation claimed the time step atomically, and only while the
+    // same secret is still stored (stale-secret race guard).
+    const updateCall = mockDb.adminMfa.updateMany.mock.calls[0][0];
+    expect(updateCall.where.id).toBe("mfa-1");
+    expect(updateCall.where.enabledAt).toBeNull();
+    expect(updateCall.where.lastUsedStep).toEqual({ lt: step });
+    expect(updateCall.where.secretEncrypted).toEqual(storedSecret);
     // Recovery codes were stored as hashes only.
     const created = mockDb.adminMfaRecoveryCode.createMany.mock.calls[0][0].data;
     expect(created).toHaveLength(10);

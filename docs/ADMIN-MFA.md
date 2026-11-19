@@ -46,6 +46,17 @@ stolen admin password alone could previously take over MFA by
 re-enrolling). To change authenticators, an admin uses the replacement
 flow below.
 
+The enrollment write is TOCTOU-safe: it replaces a pending enrollment
+only via a conditional update guarded on `enabledAt: null`, so a
+concurrent activation that enabled MFA between the check and the write
+cannot be overwritten (the update matches zero rows and enrollment is
+refused). A fresh row is created only when no row exists. Recovery codes
+are deleted only after that conditional update has succeeded. Likewise,
+activation only succeeds while the secret it verified is still the stored
+secret (a secret-equality guard on the conditional update), so a
+concurrent enrollment cannot leave MFA enabled with a secret the admin
+never set up.
+
 ### Replacing an authenticator (active MFA)
 
 1. The admin is signed in with an MFA-verified session and opens

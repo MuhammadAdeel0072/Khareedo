@@ -378,3 +378,93 @@ describe("admin MFA replacement (P1 fix)", () => {
     await cleanupMfa();
   });
 });
+
+describe("admin MFA enrollment/activation races (TOCTOU fix)", () => {
+  async function cleanupMfa() {
+    await db.adminMfaRecoveryCode.deleteMany({ where: { mfa: { userId: adminId } } });
+    await db.adminMfa.deleteMany({ where: { userId: adminId } });
+  }
+
+  it("concurrent enrollment and activation cannot overwrite active MFA or enable with a stale secret", async () => {
+    // Start from a pending enrollment, then race a second enrollment
+    // against the activation of the first. Either outcome is acceptable,
+    // but the invariant must hold in both: active MFA is never overwritten,
+    // and activation never enables MFA with a secret the admin did not set up.
+    const enrollment = await startAdminMfaEnrollment({ userId: adminId, email: adminEmail });
+    const firstCode = totpCodeForStep(enrollment.manualKey, totpTimeStep());
+    const [enrollResult, activateResult] = await Promise.allSettled([
+      startAdminMfaEnrollment({ userId: adminId, email: adminEmail }),
+      activateAdminMfa({ userId: adminId, code: firstCode }),
+    ]);
+    const key = Buffer.from(TEST_KEY, "base64");
+    const mfa = await db.adminMfa.findUnique({ where: { userId: adminId } });
+    expect(mfa).not.toBeNull();
+    if (activateResult.status === "fulfilled" && activateResult.value !== null) {
+      // Activation won: MFA is enabled with the FIRST secret, 10 recovery
+      // codes were issued, and the enrollment was refused.
+      expect(enrollResult.status).toBe("rejected");
+      expect(mfa!.enabledAt).not.toBeNull();
+      expect(decryptTotpSecret(mfa!.secretEncrypted, key)).toBe(enrollment.manualKey);
+      const codes = await db.adminMfaRecoveryCode.findMany({ where: { mfaId: mfa!.id } });
+      expect(codes).toHaveLength(10);
+      expect(codes.every((c) => c.usedAt === null)).toBe(true);
+    } else {
+      // Enrollment won: MFA is still pending with the SECOND secret, the
+      // activation was refused, and no recovery codes were issued.
+      expect(activateResult.status === "fulfilled" && activateResult.value === null).toBe(true);
+      expect(mfa!.enabledAt).toBeNull();
+      const stored = decryptTotpSecret(mfa!.secretEncrypted, key);
+      expect(stored).not.toBe(enrollment.manualKey);
+      expect(stored).toMatch(/^[A-Z2-7]{32}$/);
+      const codes = await db.adminMfaRecoveryCode.findMany({ where: { mfaId: mfa!.id } });
+      expect(codes).toHaveLength(0);
+    }
+    await cleanupMfa();
+  });
+
+  it("activation cannot enable MFA with a superseded secret", async () => {
+    // Deterministic form of the stale-secret race: enroll, then replace
+    // the secret with a second enrollment, then try to activate with a
+    // code from the first secret. The stored secret is the second one, so
+    // the first code must not enable MFA.
+    const first = await startAdminMfaEnrollment({ userId: adminId, email: adminEmail });
+    const firstCode = totpCodeForStep(first.manualKey, totpTimeStep());
+    const second = await startAdminMfaEnrollment({ userId: adminId, email: adminEmail });
+    expect(second.manualKey).not.toBe(first.manualKey);
+    const codes = await activateAdminMfa({ userId: adminId, code: firstCode });
+    expect(codes).toBeNull();
+    const mfa = await db.adminMfa.findUnique({ where: { userId: adminId } });
+    expect(mfa!.enabledAt).toBeNull();
+    const key = Buffer.from(TEST_KEY, "base64");
+    expect(decryptTotpSecret(mfa!.secretEncrypted, key)).toBe(second.manualKey);
+    // The second secret still activates normally.
+    const secondCodes = await activateAdminMfa({
+      userId: adminId,
+      code: totpCodeForStep(second.manualKey, totpTimeStep()),
+    });
+    expect(secondCodes).toHaveLength(10);
+    await cleanupMfa();
+  });
+
+  it("concurrent enrollments leave a single pending enrollment and no recovery codes", async () => {
+    // Two first-time enrollments racing from no row: at most one stores
+    // its secret per write, the final state is a single pending enrollment
+    // with one of the two secrets, and no recovery codes exist.
+    const [a, b] = await Promise.allSettled([
+      startAdminMfaEnrollment({ userId: adminId, email: adminEmail }),
+      startAdminMfaEnrollment({ userId: adminId, email: adminEmail }),
+    ]);
+    const succeeded = [a, b].filter((r) => r.status === "fulfilled");
+    expect(succeeded.length).toBeGreaterThanOrEqual(1);
+    const mfa = await db.adminMfa.findUnique({ where: { userId: adminId } });
+    expect(mfa).not.toBeNull();
+    expect(mfa!.enabledAt).toBeNull();
+    const key = Buffer.from(TEST_KEY, "base64");
+    const stored = decryptTotpSecret(mfa!.secretEncrypted, key);
+    const keys = succeeded.map((r) => (r as PromiseFulfilledResult<{ manualKey: string }>).value.manualKey);
+    expect(keys).toContain(stored);
+    const codes = await db.adminMfaRecoveryCode.findMany({ where: { mfaId: mfa!.id } });
+    expect(codes).toHaveLength(0);
+    await cleanupMfa();
+  });
+});
