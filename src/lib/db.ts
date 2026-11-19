@@ -15,7 +15,7 @@ const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined;
 };
 
-function postgresConnectionUrl(): string {
+export function postgresConnectionUrl(): string {
   const connectionString = process.env.SUPABASE_POSTGRES_URL;
   if (!connectionString) {
     throw new Error("SUPABASE_POSTGRES_URL is required for the application database.");
@@ -41,7 +41,24 @@ function postgresConnectionUrl(): string {
     );
   }
 
+  // Supabase Postgres (pooler and direct hosts) presents a certificate signed
+  // by Supabase's private CA (Supabase Root 2021 CA), which is not in the
+  // runtime's trusted roots. Without the downloaded CA certificate, verify-full
+  // TLS fails with a cryptic certificate error, so fail fast with an actionable
+  // message instead. Loopback databases are unaffected (sslmode=disable).
+  const isSupabaseHost =
+    url.hostname.endsWith(".pooler.supabase.com") ||
+    url.hostname.endsWith(".supabase.co");
   const caCertificate = process.env.SUPABASE_DB_CA_CERT;
+  if (isSupabaseHost && !caCertificate) {
+    throw new Error(
+      "SUPABASE_DB_CA_CERT is required when connecting to a Supabase host. " +
+        "Supabase Postgres presents a certificate signed by Supabase's private CA, " +
+        "which is not in the runtime's trusted roots, so verify-full TLS fails without it. " +
+        "Download the CA certificate from Supabase Dashboard → Database Settings → SSL Configuration " +
+        "and set SUPABASE_DB_CA_CERT to its file path."
+    );
+  }
   if (caCertificate) {
     const caPath = resolve(caCertificate);
     readFileSync(caPath);

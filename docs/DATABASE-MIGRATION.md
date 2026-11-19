@@ -27,11 +27,15 @@ key is required for application database access.
 
 ## TLS and schema changes
 
-The application enforces `sslmode=verify-full` for its Supabase connection. If
-`SUPABASE_DB_CA_CERT` is configured, its certificate is also supplied to Prisma
-as the trusted root; otherwise certificate verification uses the runtime's
-trusted roots. Configure `SUPABASE_POSTGRES_URL` and, when using the downloaded
-CA, `SUPABASE_DB_CA_CERT` in the deployment environment. The standalone build
+The application enforces `sslmode=verify-full` for its Supabase connection.
+`SUPABASE_DB_CA_CERT` is **required** when connecting to a Supabase host
+(pooler or direct): Supabase Postgres presents a certificate signed by
+Supabase's private CA (Supabase Root 2021 CA), which is not in the runtime's
+trusted roots, so verify-full TLS fails without it. When the variable is set,
+its certificate is supplied to Prisma as the trusted root (`sslrootcert`); when
+it is unset for a Supabase host, the application fails fast with a clear error
+instead of a cryptic TLS failure. Configure `SUPABASE_POSTGRES_URL` and
+`SUPABASE_DB_CA_CERT` in the deployment environment. The standalone build
 omits `.env`, so inject runtime secrets through the deployment platform and
 include the CA certificate file at the configured path. Keep the URL
 server-side and never print it.
