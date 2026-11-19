@@ -11,7 +11,7 @@ import bcrypt from "bcryptjs";
 import { db } from "@/lib/db";
 import { findUserByEmail } from "@/services/auth-users.service";
 import { verifyEmailTokenForLogin } from "@/services/email-verification.service";
-import { ADMIN_AUDIT_ACTIONS, recordAdminAudit } from "@/services/admin-audit.service";
+import { ADMIN_AUDIT_ACTIONS, recordAdminAuditBestEffort } from "@/services/admin-audit.service";
 
 const googleId = process.env.GOOGLE_CLIENT_ID;
 const googleSecret = process.env.GOOGLE_CLIENT_SECRET;
@@ -221,25 +221,22 @@ export const authOptions: NextAuthOptions = {
   },
   // Admin sign-ins are written to the append-only audit log (PR-12).
   // The event has no request context (no IP/user-agent), so only the admin
-  // id, action, and target are recorded. A failed audit write must never
-  // break sign-in, so it is swallowed here (the audit service's
-  // best-effort path surfaces it via error monitoring instead).
+  // id, action, and target are recorded. The write goes through the
+  // audit service's best-effort path: a failed write is surfaced through
+  // error monitoring (captureError, AUDIT_WRITE_FAILED) and can never
+  // throw, so it can never break sign-in.
   events: {
     async signIn({ user }) {
       const role = (user as { role?: string } | null)?.role;
       if (role !== "ADMIN" || !user.id) return;
-      try {
-        await recordAdminAudit(
-          { adminUserId: user.id },
-          {
-            action: ADMIN_AUDIT_ACTIONS.AUTH_ADMIN_LOGIN,
-            targetType: "User",
-            targetId: user.id,
-          }
-        );
-      } catch {
-        // Never break sign-in for an audit failure.
-      }
+      await recordAdminAuditBestEffort(
+        { adminUserId: user.id },
+        {
+          action: ADMIN_AUDIT_ACTIONS.AUTH_ADMIN_LOGIN,
+          targetType: "User",
+          targetId: user.id,
+        }
+      );
     },
   },
 };
