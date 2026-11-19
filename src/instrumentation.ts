@@ -42,4 +42,15 @@ export async function register() {
     // Server startup must never depend on the worker; the next sweep would retry.
     captureError(error, { operation: "payment-maintenance-worker-start" });
   }
+  // Email outbox worker (PR-09): delivers password reset emails enqueued by
+  // the forgot-password endpoint. Shares the same opt-out as the payment
+  // worker — a serverless deploy should use an external cron/scheduler to
+  // call deliverPendingOutboxEmails instead. Server startup must never
+  // depend on it.
+  try {
+    const { startEmailOutboxWorker } = await import("@/services/email-outbox.service");
+    startEmailOutboxWorker();
+  } catch (error) {
+    captureError(error, { operation: "email-outbox-worker-start" });
+  }
 }

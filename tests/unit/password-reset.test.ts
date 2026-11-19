@@ -1,4 +1,4 @@
-// Password reset service tests (PR-09).
+// Password reset service tests (PR-09, security-review fix).
 //
 // The reset flow mirrors the email-verification token pattern: a
 // cryptographically secure random token, only its SHA-256 hash stored,
@@ -6,17 +6,23 @@
 // never persisted. A successful reset sets passwordChangedAt so the auth
 // guard invalidates sessions issued before the reset (NextAuth v4 JWTs are
 // not revocable).
+//
+// Enumeration safety (security-review fix): requestPasswordReset enqueues
+// exactly one outbox row — the same single DB write for every address —
+// and never sends email synchronously. A background worker generates the
+// token at delivery time and sends the email, so SMTP failures and delivery
+// timing can never reveal whether an account exists.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { mockDb, mockSendPasswordResetEmail, mockFindUserByEmail } = vi.hoisted(() => ({
+const { mockDb, mockEnqueuePasswordResetEmail, mockFindUserByEmail } = vi.hoisted(() => ({
   mockDb: { $transaction: vi.fn() },
-  mockSendPasswordResetEmail: vi.fn(),
+  mockEnqueuePasswordResetEmail: vi.fn(),
   mockFindUserByEmail: vi.fn(),
 }));
 
 vi.mock("@/lib/db", () => ({ db: mockDb }));
-vi.mock("@/services/email.service", () => ({
-  sendPasswordResetEmail: mockSendPasswordResetEmail,
+vi.mock("@/services/email-outbox.service", () => ({
+  enqueuePasswordResetEmail: mockEnqueuePasswordResetEmail,
 }));
 vi.mock("@/services/auth-users.service", () => ({
   findUserByEmail: mockFindUserByEmail,
@@ -91,8 +97,9 @@ function setUpResetToken(overrides: {
 describe("password reset tokens", () => {
   beforeEach(() => {
     mockDb.$transaction.mockReset();
-    mockSendPasswordResetEmail.mockReset();
+    mockEnqueuePasswordResetEmail.mockReset();
     mockFindUserByEmail.mockReset();
+    mockEnqueuePasswordResetEmail.mockResolvedValue(undefined);
   });
 
   it("hashes tokens deterministically (same token, same hash)", () => {
@@ -113,68 +120,63 @@ describe("password reset tokens", () => {
     expect(isPasswordResetTokenUsable({ expiresAt: new Date(now.getTime() + 60_000), consumedAt: now }, now)).toBe(false);
   });
 
-  it("requesting a reset for a credentials account creates one token and emails it", async () => {
+  it("requesting a reset for a credentials account enqueues one outbox row (no token, no email yet)", async () => {
     mockFindUserByEmail.mockResolvedValue(customer);
-    let createdData: { tokenHash: string; expiresAt: Date } | null = null;
-    const transaction = {
-      passwordResetToken: {
-        deleteMany: vi.fn(async () => ({ count: 0 })),
-        create: vi.fn(async ({ data }: { data: { tokenHash: string; expiresAt: Date } }) => {
-          createdData = data;
-          return { id: "reset-1", ...data };
-        }),
-      },
-    };
-    mockDb.$transaction.mockImplementation((callback: (t: unknown) => unknown) => callback(transaction));
 
     await requestPasswordReset("customer@example.com");
 
     expect(mockFindUserByEmail).toHaveBeenCalledWith("customer@example.com");
-    expect(transaction.passwordResetToken.deleteMany).toHaveBeenCalledWith({ where: { userId: customer.id } });
-    expect(createdData).not.toBeNull();
-    expect(createdData!.tokenHash).toMatch(/^[a-f0-9]{64}$/);
-    // The token expires 1 hour after it is issued.
-    expect(createdData!.expiresAt.getTime() - Date.now()).toBeGreaterThan(59 * 60 * 1000);
-    expect(createdData!.expiresAt.getTime() - Date.now()).toBeLessThanOrEqual(60 * 60 * 1000);
-    // The raw token is sent by email, never stored.
-    expect(mockSendPasswordResetEmail).toHaveBeenCalledTimes(1);
-    const sentToken = mockSendPasswordResetEmail.mock.calls[0][0].token as string;
-    expect(typeof sentToken).toBe("string");
-    expect(sentToken.length).toBeGreaterThan(20);
-    expect(hashPasswordResetToken(sentToken)).toBe(createdData!.tokenHash);
+    // Exactly one outbox row, carrying the userId so the worker can deliver.
+    // No token is created here and no email is sent here — the worker does
+    // both at delivery time.
+    expect(mockEnqueuePasswordResetEmail).toHaveBeenCalledTimes(1);
+    expect(mockEnqueuePasswordResetEmail).toHaveBeenCalledWith({
+      userId: customer.id,
+      email: "customer@example.com",
+      name: "Customer",
+    });
+    // The service never touches the token table or the mailer directly.
+    expect(mockDb.$transaction).not.toHaveBeenCalled();
   });
 
-  it("requesting a reset for an unknown email does nothing (enumeration-safe)", async () => {
+  it("requesting a reset for an unknown email enqueues the same single no-op row (indistinguishable)", async () => {
     mockFindUserByEmail.mockResolvedValue(null);
 
     await requestPasswordReset("nobody@example.com");
 
+    // Same observable work as for a registered account: exactly one outbox
+    // row. The row carries no userId, so the worker discards it without
+    // sending anything — but the endpoint's DB write is identical.
+    expect(mockEnqueuePasswordResetEmail).toHaveBeenCalledTimes(1);
+    expect(mockEnqueuePasswordResetEmail).toHaveBeenCalledWith({
+      userId: null,
+      email: "nobody@example.com",
+      name: null,
+    });
     expect(mockDb.$transaction).not.toHaveBeenCalled();
-    expect(mockSendPasswordResetEmail).not.toHaveBeenCalled();
   });
 
-  it("requesting a reset for an OAuth-only account (no password) does nothing", async () => {
+  it("requesting a reset for an OAuth-only account (no password) enqueues the same single no-op row", async () => {
     mockFindUserByEmail.mockResolvedValue({ ...customer, passwordHash: null });
 
     await requestPasswordReset("customer@example.com");
 
+    expect(mockEnqueuePasswordResetEmail).toHaveBeenCalledTimes(1);
+    expect(mockEnqueuePasswordResetEmail).toHaveBeenCalledWith({
+      userId: null,
+      email: "customer@example.com",
+      name: "Customer",
+    });
     expect(mockDb.$transaction).not.toHaveBeenCalled();
-    expect(mockSendPasswordResetEmail).not.toHaveBeenCalled();
   });
 
-  it("requesting a reset twice replaces the old token (only one valid token)", async () => {
+  it("requesting a reset twice enqueues two rows (the worker dedups tokens at delivery)", async () => {
     mockFindUserByEmail.mockResolvedValue(customer);
-    const deleteMany = vi.fn(async () => ({ count: 1 }));
-    const create = vi.fn(async ({ data }: { data: unknown }) => ({ id: "reset-2", ...(data as object) }));
-    mockDb.$transaction.mockImplementation((callback: (t: unknown) => unknown) =>
-      callback({ passwordResetToken: { deleteMany, create } })
-    );
 
     await requestPasswordReset("customer@example.com");
     await requestPasswordReset("customer@example.com");
 
-    expect(deleteMany).toHaveBeenCalledTimes(2);
-    expect(create).toHaveBeenCalledTimes(2);
+    expect(mockEnqueuePasswordResetEmail).toHaveBeenCalledTimes(2);
   });
 
   it("a valid token resets the password, consumes the token, and returns the user", async () => {
@@ -227,15 +229,14 @@ describe("password reset tokens", () => {
 
   it("an admin account can reset its password the same way as a customer", async () => {
     mockFindUserByEmail.mockResolvedValue(admin);
-    const create = vi.fn(async ({ data }: { data: unknown }) => ({ id: "reset-admin", ...(data as object) }));
-    mockDb.$transaction.mockImplementation((callback: (t: unknown) => unknown) =>
-      callback({ passwordResetToken: { deleteMany: vi.fn(async () => ({ count: 0 })), create } })
-    );
 
     await requestPasswordReset("admin@example.com");
 
-    expect(create).toHaveBeenCalledTimes(1);
-    expect(mockSendPasswordResetEmail).toHaveBeenCalledTimes(1);
-    expect(mockSendPasswordResetEmail.mock.calls[0][0].email).toBe("admin@example.com");
+    expect(mockEnqueuePasswordResetEmail).toHaveBeenCalledTimes(1);
+    expect(mockEnqueuePasswordResetEmail).toHaveBeenCalledWith({
+      userId: admin.id,
+      email: "admin@example.com",
+      name: "Admin",
+    });
   });
 });

@@ -1,31 +1,24 @@
-// API route tests for password reset (PR-09):
+// API route tests for password reset (PR-09, security-review fix):
 // POST /api/auth/forgot-password and POST /api/auth/reset-password.
 // The service layer is mocked; the real (in-memory) rate limiter is used,
 // with a distinct client IP per test so buckets do not leak between tests.
+//
+// Enumeration safety (security-review fix): the forgot-password route never
+// sends email synchronously and never checks SMTP configuration, so its
+// response cannot reveal whether an account exists — not through status,
+// body, or timing. It enqueues one outbox row and returns the same 200 for
+// every address. SMTP failures happen in the background worker and never
+// reach this response.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { mockRequestPasswordReset, mockResetPasswordWithToken, mockIsEmailConfigured, MockEmailDeliveryNotConfiguredError } = vi.hoisted(() => {
-  class MockEmailDeliveryNotConfiguredError extends Error {
-    constructor() {
-      super("Email delivery is not configured.");
-      this.name = "EmailDeliveryNotConfiguredError";
-    }
-  }
-  return {
-    mockRequestPasswordReset: vi.fn(),
-    mockResetPasswordWithToken: vi.fn(),
-    mockIsEmailConfigured: vi.fn(),
-    MockEmailDeliveryNotConfiguredError,
-  };
-});
+const { mockRequestPasswordReset, mockResetPasswordWithToken } = vi.hoisted(() => ({
+  mockRequestPasswordReset: vi.fn(),
+  mockResetPasswordWithToken: vi.fn(),
+}));
 
 vi.mock("@/services/password-reset.service", () => ({
   requestPasswordReset: mockRequestPasswordReset,
   resetPasswordWithToken: mockResetPasswordWithToken,
-}));
-vi.mock("@/services/email.service", () => ({
-  EmailDeliveryNotConfiguredError: MockEmailDeliveryNotConfiguredError,
-  isEmailDeliveryConfigured: mockIsEmailConfigured,
 }));
 
 import { POST as forgotPasswordPOST } from "@/app/api/auth/forgot-password/route";
@@ -55,8 +48,6 @@ describe("POST /api/auth/forgot-password", () => {
   beforeEach(() => {
     mockRequestPasswordReset.mockReset();
     mockResetPasswordWithToken.mockReset();
-    mockIsEmailConfigured.mockReset();
-    mockIsEmailConfigured.mockReturnValue(true);
     mockRequestPasswordReset.mockResolvedValue(undefined);
   });
 
@@ -70,8 +61,8 @@ describe("POST /api/auth/forgot-password", () => {
   });
 
   it("returns the same message for an unknown email (enumeration-safe)", async () => {
-    // The service is a no-op for unknown emails, but the route response is
-    // identical — the caller cannot tell the difference.
+    // The service enqueues a no-op row for unknown emails, but the route
+    // response is identical — the caller cannot tell the difference.
     const res = await postForgot("nobody@example.com", "10.0.0.2");
     expect(res.status).toBe(200);
     const data = (await res.json()) as { ok: boolean; message: string };
@@ -79,16 +70,22 @@ describe("POST /api/auth/forgot-password", () => {
     expect(data.message).toContain("If an account exists");
   });
 
-  it("rejects an invalid email with 422", async () => {
-    const res = await postForgot("not-an-email", "10.0.0.3");
-    expect(res.status).toBe(422);
-    expect(mockRequestPasswordReset).not.toHaveBeenCalled();
+  it("returns the same 200 for an OAuth-only address (no SMTP check, no 503)", async () => {
+    // Regression: the route used to return 503 when SMTP was not configured,
+    // but only for registered accounts — a 503 revealed the account exists.
+    // The route no longer checks SMTP configuration at all, so it returns
+    // 200 for every address regardless of mailer state.
+    const res = await postForgot("oauth-only@example.com", "10.0.0.3");
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { ok: boolean; message: string };
+    expect(data.ok).toBe(true);
+    expect(data.message).toContain("If an account exists");
+    expect(mockRequestPasswordReset).toHaveBeenCalledWith("oauth-only@example.com");
   });
 
-  it("returns 503 when email delivery is not configured", async () => {
-    mockIsEmailConfigured.mockReturnValue(false);
-    const res = await postForgot("customer@example.com", "10.0.0.4");
-    expect(res.status).toBe(503);
+  it("rejects an invalid email with 422", async () => {
+    const res = await postForgot("not-an-email", "10.0.0.4");
+    expect(res.status).toBe(422);
     expect(mockRequestPasswordReset).not.toHaveBeenCalled();
   });
 
@@ -117,8 +114,6 @@ describe("POST /api/auth/reset-password", () => {
   beforeEach(() => {
     mockRequestPasswordReset.mockReset();
     mockResetPasswordWithToken.mockReset();
-    mockIsEmailConfigured.mockReset();
-    mockIsEmailConfigured.mockReturnValue(true);
   });
 
   it("resets the password with a valid token", async () => {

@@ -1,10 +1,13 @@
 // Integration test — password reset end to end against a throwaway SQLite
-// database (PR-09). Run with: npm run test:db
+// database (PR-09, security-review fix). Run with: npm run test:db
 //
-// Covers the full flow with the real Prisma layer: request a reset (token
-// stored hashed, raw token emailed once), redeem it (password changes,
-// passwordChangedAt is recorded, token is consumed), and prove the old
-// password no longer works, the new one does, and the token cannot be reused.
+// Covers the full outbox flow with the real Prisma layer: request a reset
+// (one outbox row, no token, no email yet), deliver it (the worker creates
+// the token, stores only its hash, and sends the email), redeem the token
+// (password changes, passwordChangedAt is recorded, token is consumed), and
+// prove the old password no longer works, the new one does, and the token
+// cannot be reused. Also proves an unknown email enqueues a no-op row that
+// delivery discards without sending anything.
 import { describe, expect, it, beforeAll, afterAll, vi } from "vitest";
 import bcrypt from "bcryptjs";
 import { assertDisposableTestDatabase } from "../helpers/disposable-sqlite.mjs";
@@ -30,6 +33,7 @@ vi.mock("@/services/email.service", () => ({
 import { db } from "@/lib/db";
 import { requestPasswordReset, resetPasswordWithToken } from "@/services/password-reset.service";
 import { hashPasswordResetToken } from "@/services/password-reset.service";
+import { deliverPendingOutboxEmails } from "@/services/email-outbox.service";
 
 // These tests run only through the disposable SQLite test harness. They
 // exercise the real Prisma layer and never use the application's configured
@@ -57,15 +61,29 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await db.passwordResetToken.deleteMany({ where: { userId } });
+  await db.emailOutbox.deleteMany({ where: { email: userEmail } });
+  await db.emailOutbox.deleteMany({ where: { email: "nobody-at-all@example.invalid" } });
   await db.user.deleteMany({ where: { id: userId } });
   await db.$disconnect();
 });
 
 describe("password reset (integration)", () => {
-  it("resets the password end to end and invalidates the old one", async () => {
-    // Request a reset: one token row is stored (hashed) and the raw token
-    // is emailed once.
+  it("resets the password end to end via the outbox and invalidates the old one", async () => {
+    // Request a reset: exactly one outbox row is created. No token exists
+    // yet and no email has been sent — the endpoint returns immediately.
     await requestPasswordReset(userEmail);
+    expect(sentTokens).toHaveLength(0);
+    expect(await db.passwordResetToken.count({ where: { userId } })).toBe(0);
+    const outboxRows = await db.emailOutbox.findMany({ where: { email: userEmail } });
+    expect(outboxRows).toHaveLength(1);
+    expect(outboxRows[0].type).toBe("PASSWORD_RESET");
+    expect(outboxRows[0].userId).toBe(userId);
+    expect(outboxRows[0].status).toBe("PENDING");
+
+    // Deliver: the worker creates the token (hash only) and sends the email.
+    const delivery = await deliverPendingOutboxEmails(10);
+    expect(delivery.delivered).toBe(1);
+    expect(delivery.discarded).toBe(0);
     expect(sentTokens).toHaveLength(1);
     const rawToken = sentTokens[0];
     const stored = await db.passwordResetToken.findUnique({
@@ -77,6 +95,8 @@ describe("password reset (integration)", () => {
     expect(stored!.consumedAt).toBeNull();
     // The raw token is never stored — only its hash.
     expect(stored!.tokenHash).not.toContain(rawToken);
+    // The outbox row is deleted after a successful send.
+    expect(await db.emailOutbox.count({ where: { email: userEmail } })).toBe(0);
 
     // Redeem the token: password changes and passwordChangedAt is recorded.
     const result = await resetPasswordWithToken(rawToken, NEW_PASSWORD);
@@ -121,10 +141,21 @@ describe("password reset (integration)", () => {
     expect(await bcrypt.compare(NEW_PASSWORD, user!.passwordHash!)).toBe(true);
   });
 
-  it("requesting a reset for an unknown email creates no token", async () => {
-    const before = await db.passwordResetToken.count();
+  it("an unknown email enqueues a no-op row that delivery discards without sending", async () => {
+    const before = sentTokens.length;
     await requestPasswordReset("nobody-at-all@example.invalid");
-    const after = await db.passwordResetToken.count();
-    expect(after).toBe(before);
+    // An outbox row is created (the endpoint's DB write is identical for
+    // every address), but it carries no userId.
+    const rows = await db.emailOutbox.findMany({ where: { email: "nobody-at-all@example.invalid" } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].userId).toBeNull();
+
+    // Delivery discards it without sending anything or creating a token.
+    const delivery = await deliverPendingOutboxEmails(10);
+    expect(delivery.discarded).toBe(1);
+    expect(delivery.delivered).toBe(0);
+    expect(sentTokens).toHaveLength(before);
+    expect(await db.passwordResetToken.count()).toBe(1); // only the earlier reset token
+    expect(await db.emailOutbox.count({ where: { email: "nobody-at-all@example.invalid" } })).toBe(0);
   });
 });

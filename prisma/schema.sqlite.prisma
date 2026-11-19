@@ -90,6 +90,32 @@ model PasswordResetToken {
   @@index([expiresAt])
 }
 
+// Email outbox (PR-09 security-review fix). Password reset emails are sent
+// asynchronously by a background worker, never synchronously from the
+// forgot-password endpoint — so the endpoint's observable behaviour (status,
+// body, timing) is identical whether or not an account exists, and SMTP
+// failures can never reveal account existence. The raw reset token is NOT
+// stored here: the worker generates it when it delivers the email, so the
+// token only ever exists in the worker's memory and in the email itself.
+// Rows with a null userId are no-ops (unregistered / OAuth-only addresses)
+// that the worker discards without sending anything.
+model EmailOutbox {
+  id            String    @id @default(cuid())
+  type          String // "PASSWORD_RESET"
+  userId        String?
+  email         String
+  name          String?
+  status        String    @default("PENDING") // PENDING | FAILED
+  attempts      Int       @default(0)
+  nextAttemptAt DateTime  @default(now())
+  lastError     String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([status, nextAttemptAt])
+  @@index([createdAt])
+}
+
 model Address {
   id         String   @id @default(cuid())
   userId     String
