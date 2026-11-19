@@ -36,6 +36,10 @@ import {
   defaultPaymentMethod,
   type CheckoutPaymentMethod,
 } from "@/lib/payment-defaults";
+import {
+  addressFieldErrors,
+  isValidCustomerEmail,
+} from "@/lib/checkout-validation";
 import type { CartDetails } from "@/types/cart";
 import { ProductImage } from "@/components/products/product-image";
 import { WhatsAppSupportLink } from "@/components/layout/whatsapp-float";
@@ -278,25 +282,34 @@ export function CheckoutFlow({
     };
   }, [deliveryMethod, couponCode, quoteRequestKey]);
 
-  // ─── Address form validation (client-side pre-check; server re-validates) ───
+  // ─── Address validation (client-side pre-check; server re-validates) ───
+  // Address fields only — a saved address carries no email (the Address
+  // model has none), so the email is validated separately as the CUSTOMER
+  // email below. Requiring it on the address made every saved address fail
+  // at Confirm Order and bounce the customer back to step 1.
   function validateAddress(a: CheckoutAddress): boolean {
-    const errors: Record<string, string> = {};
-    if (a.fullName.trim().length < 2) errors.fullName = "Recipient name is required";
-    // A contact email is required for the order record (FR-19, BR-02).
-    // Checkout requires sign-in (PR-04, D-01), so the signed-in customer's
-    // email is prefilled — this only re-validates the field value.
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(a.email ?? ""))
-      errors.email = "Please enter a valid email address";
-    if (!/^(\+?92|0)?\d{10}$/.test(a.phone.replace(/[\s-]/g, "")))
-      errors.phone = "Enter a valid phone (e.g. 0300 1234567)";
-    if (a.line1.trim().length < 5) errors.line1 = "Please enter the full street address";
-    if (a.city.trim().length < 2) errors.city = "City is required";
+    const errors = addressFieldErrors(a);
     setFieldErrors(errors);
     return Object.keys(errors).length === 0;
   }
 
+  // The contact email belongs to the customer, not the delivery address
+  // (checkoutCustomerSchema). Signed-in customers use their session email;
+  // guests use the email they typed into the new-address form.
+  function effectiveCustomerEmail(address: CheckoutAddress | null): string {
+    return user?.email ?? address?.email ?? "";
+  }
+
+  function validateCustomerEmail(email: string): boolean {
+    if (!isValidCustomerEmail(email)) {
+      setFieldErrors((prev) => ({ ...prev, email: "Please enter a valid email address" }));
+      return false;
+    }
+    return true;
+  }
+
   async function saveNewAddress(): Promise<CheckoutAddress | null> {
-    if (!validateAddress(form)) return null;
+    if (!validateAddress(form) || !validateCustomerEmail(effectiveCustomerEmail(form))) return null;
     const res = await fetch("/api/account/addresses", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -323,7 +336,7 @@ export function CheckoutFlow({
   }
 
   async function toStep(n: number) {
-    if (n === 2 && !validateAddress(form)) return;
+    if (n === 2 && (!validateAddress(form) || !validateCustomerEmail(effectiveCustomerEmail(form)))) return;
     setStep(n);
   }
 
@@ -335,7 +348,7 @@ export function CheckoutFlow({
       return;
     }
     const address = activeAddress();
-    if (!address || !validateAddress(address)) {
+    if (!address || !validateAddress(address) || !validateCustomerEmail(effectiveCustomerEmail(address))) {
       setStep(1);
       toast.error("Please complete your delivery details first.");
       return;
@@ -614,7 +627,7 @@ export function CheckoutFlow({
                   if (user && selectedAddressId === "new" && showNewForm) {
                     const saved = await saveNewAddress();
                     if (!saved) return;
-                  } else if (!user && !validateAddress(form)) {
+                  } else if (!user && (!validateAddress(form) || !validateCustomerEmail(form.email ?? ""))) {
                     return;
                   }
                   setStep(2);
