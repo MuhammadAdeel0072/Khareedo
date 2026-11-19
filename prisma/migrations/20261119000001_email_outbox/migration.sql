@@ -11,9 +11,7 @@ BEGIN;
 CREATE TABLE "EmailOutbox" (
   "id" TEXT NOT NULL,
   "type" TEXT NOT NULL,
-  "userId" TEXT,
   "email" TEXT NOT NULL,
-  "name" TEXT,
   "status" TEXT NOT NULL DEFAULT 'PENDING',
   "attempts" INTEGER NOT NULL DEFAULT 0,
   "nextAttemptAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,

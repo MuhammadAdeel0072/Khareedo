@@ -7,11 +7,14 @@
 // guard invalidates sessions issued before the reset (NextAuth v4 JWTs are
 // not revocable).
 //
-// Enumeration safety (security-review fix): requestPasswordReset enqueues
-// exactly one outbox row — the same single DB write for every address —
-// and never sends email synchronously. A background worker generates the
-// token at delivery time and sends the email, so SMTP failures and delivery
-// timing can never reveal whether an account exists.
+// Enumeration safety (security-review fix): requestPasswordReset performs
+// NO account lookup at all — it enqueues exactly one outbox row carrying
+// only the submitted normalized email address, the same row for every valid
+// email, and never sends email synchronously. A background worker performs
+// the account lookup after the HTTP request has returned and silently
+// discards unknown and OAuth-only addresses. The synchronous request path
+// used to call findUserByEmail before enqueueing, which meant the HTTP
+// request still performed account-dependent database work.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { mockDb, mockEnqueuePasswordResetEmail, mockFindUserByEmail } = vi.hoisted(() => ({
@@ -24,6 +27,8 @@ vi.mock("@/lib/db", () => ({ db: mockDb }));
 vi.mock("@/services/email-outbox.service", () => ({
   enqueuePasswordResetEmail: mockEnqueuePasswordResetEmail,
 }));
+// findUserByEmail is mocked only to PROVE the service never calls it: the
+// mock is asserted not to have been called in every request test below.
 vi.mock("@/services/auth-users.service", () => ({
   findUserByEmail: mockFindUserByEmail,
 }));
@@ -120,52 +125,50 @@ describe("password reset tokens", () => {
     expect(isPasswordResetTokenUsable({ expiresAt: new Date(now.getTime() + 60_000), consumedAt: now }, now)).toBe(false);
   });
 
-  it("requesting a reset for a credentials account enqueues one outbox row (no token, no email yet)", async () => {
+  it("requesting a reset enqueues one row carrying only the email (no lookup, no token, no email yet)", async () => {
     mockFindUserByEmail.mockResolvedValue(customer);
 
     await requestPasswordReset("customer@example.com");
 
-    expect(mockFindUserByEmail).toHaveBeenCalledWith("customer@example.com");
-    // Exactly one outbox row, carrying the userId so the worker can deliver.
-    // No token is created here and no email is sent here — the worker does
-    // both at delivery time.
+    // The service performs NO account lookup: findUserByEmail is never
+    // called, so the request path cannot branch on account existence.
+    expect(mockFindUserByEmail).not.toHaveBeenCalled();
+    // Exactly one outbox row, carrying only the submitted email. No token
+    // is created here and no email is sent here — the worker does the
+    // lookup, the token, and the email after the HTTP request returns.
     expect(mockEnqueuePasswordResetEmail).toHaveBeenCalledTimes(1);
     expect(mockEnqueuePasswordResetEmail).toHaveBeenCalledWith({
-      userId: customer.id,
       email: "customer@example.com",
-      name: "Customer",
     });
-    // The service never touches the token table or the mailer directly.
+    // The service never touches the token table directly.
     expect(mockDb.$transaction).not.toHaveBeenCalled();
   });
 
-  it("requesting a reset for an unknown email enqueues the same single no-op row (indistinguishable)", async () => {
+  it("requesting a reset for an unknown email enqueues the identical row (indistinguishable)", async () => {
     mockFindUserByEmail.mockResolvedValue(null);
 
     await requestPasswordReset("nobody@example.com");
 
-    // Same observable work as for a registered account: exactly one outbox
-    // row. The row carries no userId, so the worker discards it without
-    // sending anything — but the endpoint's DB write is identical.
+    // Same observable work as for a registered account: no lookup, exactly
+    // one outbox row carrying only the email. The worker will discard it
+    // after the request returns, but the request itself is identical.
+    expect(mockFindUserByEmail).not.toHaveBeenCalled();
     expect(mockEnqueuePasswordResetEmail).toHaveBeenCalledTimes(1);
     expect(mockEnqueuePasswordResetEmail).toHaveBeenCalledWith({
-      userId: null,
       email: "nobody@example.com",
-      name: null,
     });
     expect(mockDb.$transaction).not.toHaveBeenCalled();
   });
 
-  it("requesting a reset for an OAuth-only account (no password) enqueues the same single no-op row", async () => {
+  it("requesting a reset for an OAuth-only account (no password) enqueues the identical row", async () => {
     mockFindUserByEmail.mockResolvedValue({ ...customer, passwordHash: null });
 
     await requestPasswordReset("customer@example.com");
 
+    expect(mockFindUserByEmail).not.toHaveBeenCalled();
     expect(mockEnqueuePasswordResetEmail).toHaveBeenCalledTimes(1);
     expect(mockEnqueuePasswordResetEmail).toHaveBeenCalledWith({
-      userId: null,
       email: "customer@example.com",
-      name: "Customer",
     });
     expect(mockDb.$transaction).not.toHaveBeenCalled();
   });
@@ -176,6 +179,7 @@ describe("password reset tokens", () => {
     await requestPasswordReset("customer@example.com");
     await requestPasswordReset("customer@example.com");
 
+    expect(mockFindUserByEmail).not.toHaveBeenCalled();
     expect(mockEnqueuePasswordResetEmail).toHaveBeenCalledTimes(2);
   });
 
@@ -227,16 +231,15 @@ describe("password reset tokens", () => {
     expect(await resetPasswordWithToken("x".repeat(257), "NewPassword123")).toBeNull();
   });
 
-  it("an admin account can reset its password the same way as a customer", async () => {
+  it("an admin account requests a reset the same way as a customer (no lookup, same row)", async () => {
     mockFindUserByEmail.mockResolvedValue(admin);
 
     await requestPasswordReset("admin@example.com");
 
+    expect(mockFindUserByEmail).not.toHaveBeenCalled();
     expect(mockEnqueuePasswordResetEmail).toHaveBeenCalledTimes(1);
     expect(mockEnqueuePasswordResetEmail).toHaveBeenCalledWith({
-      userId: admin.id,
       email: "admin@example.com",
-      name: "Admin",
     });
   });
 });

@@ -2,12 +2,13 @@
 // database (PR-09, security-review fix). Run with: npm run test:db
 //
 // Covers the full outbox flow with the real Prisma layer: request a reset
-// (one outbox row, no token, no email yet), deliver it (the worker creates
-// the token, stores only its hash, and sends the email), redeem the token
-// (password changes, passwordChangedAt is recorded, token is consumed), and
-// prove the old password no longer works, the new one does, and the token
-// cannot be reused. Also proves an unknown email enqueues a no-op row that
-// delivery discards without sending anything.
+// (one outbox row carrying only the email — no account lookup in the request
+// path, no token, no email yet), deliver it (the worker looks the account
+// up, creates the token, stores only its hash, and sends the email), redeem
+// the token (password changes, passwordChangedAt is recorded, token is
+// consumed), and prove the old password no longer works, the new one does,
+// and the token cannot be reused. Also proves an unknown email enqueues the
+// identical row that delivery discards without sending anything.
 import { describe, expect, it, beforeAll, afterAll, vi } from "vitest";
 import bcrypt from "bcryptjs";
 import { assertDisposableTestDatabase } from "../helpers/disposable-sqlite.mjs";
@@ -69,18 +70,21 @@ afterAll(async () => {
 
 describe("password reset (integration)", () => {
   it("resets the password end to end via the outbox and invalidates the old one", async () => {
-    // Request a reset: exactly one outbox row is created. No token exists
-    // yet and no email has been sent — the endpoint returns immediately.
+    // Request a reset: exactly one outbox row is created, carrying only the
+    // submitted email. No account lookup happens in the request path, no
+    // token exists yet, and no email has been sent — the endpoint returns
+    // immediately.
     await requestPasswordReset(userEmail);
     expect(sentTokens).toHaveLength(0);
     expect(await db.passwordResetToken.count({ where: { userId } })).toBe(0);
     const outboxRows = await db.emailOutbox.findMany({ where: { email: userEmail } });
     expect(outboxRows).toHaveLength(1);
     expect(outboxRows[0].type).toBe("PASSWORD_RESET");
-    expect(outboxRows[0].userId).toBe(userId);
+    expect(outboxRows[0].email).toBe(userEmail);
     expect(outboxRows[0].status).toBe("PENDING");
 
-    // Deliver: the worker creates the token (hash only) and sends the email.
+    // Deliver: the worker looks the account up, creates the token (hash
+    // only) and sends the email.
     const delivery = await deliverPendingOutboxEmails(10);
     expect(delivery.delivered).toBe(1);
     expect(delivery.discarded).toBe(0);
@@ -141,16 +145,18 @@ describe("password reset (integration)", () => {
     expect(await bcrypt.compare(NEW_PASSWORD, user!.passwordHash!)).toBe(true);
   });
 
-  it("an unknown email enqueues a no-op row that delivery discards without sending", async () => {
+  it("an unknown email enqueues a row carrying only the email, which delivery discards without sending", async () => {
     const before = sentTokens.length;
     await requestPasswordReset("nobody-at-all@example.invalid");
     // An outbox row is created (the endpoint's DB write is identical for
-    // every address), but it carries no userId.
+    // every address), carrying only the submitted email — no account lookup
+    // happened in the request path.
     const rows = await db.emailOutbox.findMany({ where: { email: "nobody-at-all@example.invalid" } });
     expect(rows).toHaveLength(1);
-    expect(rows[0].userId).toBeNull();
+    expect(rows[0].email).toBe("nobody-at-all@example.invalid");
 
-    // Delivery discards it without sending anything or creating a token.
+    // Delivery looks the account up, finds nothing, and discards the row
+    // without sending anything or creating a token.
     const delivery = await deliverPendingOutboxEmails(10);
     expect(delivery.discarded).toBe(1);
     expect(delivery.delivered).toBe(0);

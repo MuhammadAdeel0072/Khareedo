@@ -97,14 +97,15 @@ model PasswordResetToken {
 // failures can never reveal account existence. The raw reset token is NOT
 // stored here: the worker generates it when it delivers the email, so the
 // token only ever exists in the worker's memory and in the email itself.
-// Rows with a null userId are no-ops (unregistered / OAuth-only addresses)
-// that the worker discards without sending anything.
+// The row carries only the submitted email address — no userId, no name, no
+// account lookup result — so the row itself cannot encode whether an
+// account exists. The worker performs the account lookup after the HTTP
+// request has returned and silently discards unknown and OAuth-only
+// addresses.
 model EmailOutbox {
   id            String    @id @default(cuid())
   type          String // "PASSWORD_RESET"
-  userId        String?
   email         String
-  name          String?
   status        String    @default("PENDING") // PENDING | FAILED
   attempts      Int       @default(0)
   nextAttemptAt DateTime  @default(now())

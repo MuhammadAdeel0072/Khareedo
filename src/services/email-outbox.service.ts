@@ -17,8 +17,11 @@
 // generates it at delivery time, stores only its SHA-256 hash (in
 // PasswordResetToken, as before), and sends the raw token in the email. The
 // token therefore only ever exists in the worker's memory and in the email.
-// Rows with a null userId are no-ops (unregistered / OAuth-only addresses)
-// that the worker discards without sending anything.
+// The outbox row carries only the submitted email address — no userId, no
+// name, no account lookup result — so the row itself cannot encode whether
+// an account exists. The worker performs the account lookup AFTER the HTTP
+// request has returned, and silently discards unknown and OAuth-only
+// addresses without sending anything.
 //
 // Delivery safety:
 // - Single-flight within a process (the worker never runs two sweeps at once).
@@ -33,6 +36,7 @@ import "server-only";
 import { createHash, randomBytes } from "node:crypto";
 import { db } from "@/lib/db";
 import { sendPasswordResetEmail } from "@/services/email.service";
+import { findUserByEmail } from "@/services/auth-users.service";
 import { captureError } from "@/lib/error-monitoring";
 import {
   PASSWORD_RESET_TOKEN_TTL_MS,
@@ -52,30 +56,23 @@ function backoffMs(attempts: number) {
 export type EmailOutboxRow = {
   id: string;
   type: string;
-  userId: string | null;
   email: string;
-  name: string | null;
   status: string;
   attempts: number;
   nextAttemptAt: Date;
   lastError: string | null;
 };
 
-/** Enqueue a password reset email. The caller passes userId null for an
- * unregistered or OAuth-only address; the worker discards such rows without
- * sending anything. The write is the same single INSERT for every address,
- * so the endpoint's timing does not depend on account existence. */
-export async function enqueuePasswordResetEmail(input: {
-  userId: string | null;
-  email: string;
-  name: string | null;
-}) {
+/** Enqueue a password reset email. Carries only the submitted normalized
+ * email address — no account lookup, no userId, no name — so the row is
+ * identical for every valid email and cannot encode whether an account
+ * exists. The worker looks the account up after the HTTP request has
+ * returned. */
+export async function enqueuePasswordResetEmail(input: { email: string }) {
   await db.emailOutbox.create({
     data: {
       type: EMAIL_OUTBOX_TYPE_PASSWORD_RESET,
-      userId: input.userId,
       email: input.email,
-      name: input.name,
     },
   });
 }
@@ -154,19 +151,17 @@ async function deliverOutboxRow(
   row: EmailOutboxRow,
   now: Date
 ): Promise<"delivered" | "discarded"> {
-  // No-op rows (unregistered / OAuth-only addresses) and unknown types are
-  // discarded without sending anything.
-  if (row.type !== EMAIL_OUTBOX_TYPE_PASSWORD_RESET || !row.userId) {
+  // Unknown types are discarded without sending anything.
+  if (row.type !== EMAIL_OUTBOX_TYPE_PASSWORD_RESET) {
     await db.emailOutbox.delete({ where: { id: row.id } });
     return "discarded";
   }
 
-  // The user may have been deleted or converted to OAuth-only since the
-  // request was enqueued; in that case there is nothing to send.
-  const user = await db.user.findUnique({
-    where: { id: row.userId },
-    select: { id: true, email: true, name: true, passwordHash: true },
-  });
+  // The account lookup happens here, in the background, AFTER the HTTP
+  // request has returned — never in the request path. Unknown and
+  // OAuth-only addresses are silently discarded; only credentials accounts
+  // receive a token and an email.
+  const user = await findUserByEmail(row.email);
   if (!user || !user.passwordHash) {
     await db.emailOutbox.delete({ where: { id: row.id } });
     return "discarded";

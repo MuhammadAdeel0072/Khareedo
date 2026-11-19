@@ -5,17 +5,19 @@
 //
 // Enumeration safety (PR-09 security-review fix): the forgot-password
 // endpoint must be indistinguishable for registered, unregistered, and
-// OAuth-only addresses. The token is therefore NOT created here and the
-// email is NOT sent here. requestPasswordReset enqueues exactly one outbox
-// row — the same single DB write for every address — and returns. A
-// background worker (src/services/email-outbox.service.ts) generates the
-// token at delivery time, stores only its hash, and sends the email. SMTP
-// failures happen in the background, are retried with backoff, and never
-// reach the HTTP response. Identical response text alone was not enough:
-// the synchronous send leaked account existence through timing (a registered
-// account did a DB write plus an SMTP round-trip; an unknown address
-// returned in milliseconds) and through SMTP failure responses (503 for a
-// registered account versus 200 for an unknown one).
+// OAuth-only addresses. requestPasswordReset therefore performs NO account
+// lookup at all — it enqueues exactly one outbox row carrying only the
+// submitted normalized email address, the same row for every valid email,
+// and returns. A background worker (src/services/email-outbox.service.ts)
+// performs the account lookup AFTER the HTTP request has returned, and
+// silently discards unknown and OAuth-only addresses. Only eligible
+// credentials accounts receive a token and an email. The synchronous
+// request path used to call findUserByEmail before enqueueing, which meant
+// the HTTP request still performed account-dependent database work (the
+// lookup returned different results for registered and unknown addresses,
+// and the outbox row stored different userId values). Identical response
+// text and identical timing are not enough if the request itself still
+// branches on account existence.
 //
 // Session invalidation: a successful reset sets passwordChangedAt, and the
 // auth guard invalidates JWT sessions issued at or before that timestamp,
@@ -24,7 +26,6 @@
 import { createHash } from "node:crypto";
 import bcrypt from "bcryptjs";
 import { db } from "@/lib/db";
-import { findUserByEmail } from "@/services/auth-users.service";
 import { passwordSchema } from "@/lib/validation";
 import { enqueuePasswordResetEmail } from "@/services/email-outbox.service";
 
@@ -42,22 +43,17 @@ export function isPasswordResetTokenUsable(
 }
 
 /**
- * Request a password reset. Enumeration-safe: always enqueues exactly one
- * outbox row and resolves (void) with the same observable outcome whether
- * or not an eligible account exists. Only credentials accounts
- * (passwordHash set) carry a userId in the row; unknown emails and
- * OAuth-only accounts enqueue a no-op row (userId null) that the worker
- * discards without sending anything. No token is created here and no email
- * is sent here — the worker does both at delivery time.
+ * Request a password reset. Enumeration-safe: performs NO account lookup.
+ * It enqueues exactly one outbox row carrying only the submitted normalized
+ * email address — the same row for every valid email — and resolves (void).
+ * The background worker looks the account up after the HTTP request has
+ * returned and silently discards unknown and OAuth-only addresses; only
+ * credentials accounts receive a token and an email. No token is created
+ * here and no email is sent here.
  */
 export async function requestPasswordReset(email: string) {
   const normalizedEmail = email.trim().toLowerCase();
-  const user = await findUserByEmail(normalizedEmail);
-  await enqueuePasswordResetEmail({
-    userId: user && user.passwordHash ? user.id : null,
-    email: normalizedEmail,
-    name: user?.name ?? null,
-  });
+  await enqueuePasswordResetEmail({ email: normalizedEmail });
 }
 
 class InvalidResetStateError extends Error {}
