@@ -467,4 +467,39 @@ describe("admin MFA enrollment/activation races (TOCTOU fix)", () => {
     expect(codes).toHaveLength(0);
     await cleanupMfa();
   });
+
+  it("enrollment racing with activation cannot delete newly issued recovery codes", async () => {
+    // Race a re-enrollment against the activation of a pending enrollment.
+    // If activation wins, its recovery codes must survive AND work — the
+    // enrollment must not delete them (enrollment no longer deletes codes
+    // at all: a pending enrollment cannot legitimately have any).
+    const enrollment = await startAdminMfaEnrollment({ userId: adminId, email: adminEmail });
+    const firstCode = totpCodeForStep(enrollment.manualKey, totpTimeStep());
+    const [enrollResult, activateResult] = await Promise.allSettled([
+      startAdminMfaEnrollment({ userId: adminId, email: adminEmail }),
+      activateAdminMfa({ userId: adminId, code: firstCode }),
+    ]);
+    if (activateResult.status === "fulfilled" && activateResult.value !== null) {
+      expect(enrollResult.status).toBe("rejected");
+      const codes = activateResult.value;
+      expect(codes).toHaveLength(10);
+      // The issued codes were not deleted by the racing enrollment: one
+      // of them verifies for a fresh session.
+      const verified = await verifyAdminMfaForSession({
+        userId: adminId,
+        code: codes[0],
+        sessionIat: Math.floor(Date.now() / 1000) + 3600,
+      });
+      expect(verified).toBe("verified");
+      const status = await getAdminMfaStatus(adminId);
+      expect(status.enabled).toBe(true);
+      expect(status.unusedRecoveryCodes).toBe(9);
+    } else {
+      // Enrollment won; activation was refused; no codes were issued.
+      expect(activateResult.status === "fulfilled" && activateResult.value === null).toBe(true);
+      const mfa = await db.adminMfa.findUnique({ where: { userId: adminId } });
+      expect(mfa!.enabledAt).toBeNull();
+    }
+    await cleanupMfa();
+  });
 });

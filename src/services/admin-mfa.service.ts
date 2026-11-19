@@ -120,9 +120,24 @@ export function hashRecoveryCode(code: string): string {
   return createHash("sha256").update(code.trim().toUpperCase()).digest("hex");
 }
 
-async function createRecoveryCodes(mfaId: string, count = MFA_RECOVERY_CODE_COUNT): Promise<string[]> {
+/** Minimal store shape for recovery-code creation. Both the base client
+ * (`db`) and a transaction client (`tx`) satisfy it, so code creation can
+ * run inside a transaction and roll back with it. */
+type RecoveryCodeStore = {
+  adminMfaRecoveryCode: {
+    createMany: (args: {
+      data: { mfaId: string; codeHash: string }[];
+    }) => Promise<{ count: number }>;
+  };
+};
+
+async function createRecoveryCodes(
+  mfaId: string,
+  store: RecoveryCodeStore = db,
+  count = MFA_RECOVERY_CODE_COUNT
+): Promise<string[]> {
   const codes = Array.from({ length: count }, () => generateRecoveryCode());
-  await db.adminMfaRecoveryCode.createMany({
+  await store.adminMfaRecoveryCode.createMany({
     data: codes.map((code) => ({ mfaId, codeHash: hashRecoveryCode(code) })),
   });
   return codes;
@@ -182,9 +197,12 @@ function isUniqueConstraintError(error: unknown): boolean {
  * database write then uses updateMany guarded on `enabledAt: null`, so a
  * concurrent activation that enabled MFA between the check and the write
  * cannot be overwritten — the update matches zero rows and the enrollment
- * is refused. A fresh row is created only when no row exists. Recovery
- * codes are deleted only after the conditional update has succeeded (the
- * update is the authorization), never before.
+ * is refused. A fresh row is created only when no row exists.
+ *
+ * No recovery codes are deleted here: a pending (never-enabled) enrollment
+ * cannot legitimately have recovery codes — codes are only created at
+ * activation, which sets enabledAt. Deleting codes from this path could
+ * destroy codes issued by a concurrent successful activation.
  */
 export async function startAdminMfaEnrollment(input: { userId: string; email: string }): Promise<{
   qrCodeDataUrl: string;
@@ -209,11 +227,6 @@ export async function startAdminMfaEnrollment(input: { userId: string; email: st
     },
   });
   if (replaced.count === 1) {
-    // The update is the authorization: only now may the old pending
-    // enrollment's recovery codes be discarded. (A pending enrollment has
-    // none — codes are issued at activation — but a stale row might.)
-    const mfa = await db.adminMfa.findUnique({ where: { userId: input.userId }, select: { id: true } });
-    if (mfa) await db.adminMfaRecoveryCode.deleteMany({ where: { mfaId: mfa.id } });
     return { qrCodeDataUrl, manualKey: secret, otpauthUrl };
   }
   // No pending row was replaced: either no row exists (first enrollment)
@@ -329,19 +342,25 @@ export async function startAdminMfaReplacement(input: {
  * Activate MFA after enrollment: verify a TOTP code against the pending
  * secret, mark MFA enabled, and generate the recovery codes (returned once,
  * never stored). Returns null when the code is invalid, expired, or a
- * replay.
+ * replay. A database failure while issuing codes aborts the whole
+ * activation (the transaction rolls back), so MFA is never left enabled
+ * without its recovery codes.
  *
  * Two cases (P1 fix):
  * - First-time enrollment: no pending replacement and enabledAt is null.
  *   The code is verified against secretEncrypted; success sets enabledAt.
+ *   Enabling and issuing the recovery-code hashes happen in one
+ *   transaction: they succeed or fail together. No old codes are deleted
+ *   here — a pending enrollment has none.
  * - Replacement enrollment: pendingSecretEncrypted is set (started via
  *   startAdminMfaReplacement after password + current-code reauthentication).
  *   The code is verified against the PENDING secret; success atomically
- *   swaps it into secretEncrypted (in a transaction with the recovery-code
- *   rotation), keeps enabledAt (MFA stays enabled), and invalidates the
- *   old recovery codes. The active secret is never touched until the
- *   replacement code verifies, so a failed or abandoned replacement leaves
- *   the active MFA fully intact.
+ *   swaps it into secretEncrypted, keeps enabledAt (MFA stays enabled),
+ *   invalidates the old recovery codes, and issues fresh ones — all in
+ *   one transaction, so a failed code creation rolls back the swap too.
+ *   The active secret is never touched until the replacement code
+ *   verifies, so a failed or abandoned replacement leaves the active MFA
+ *   fully intact.
  * - MFA already active with no pending replacement: returns null. This
  *   closes a bypass where activate could otherwise regenerate recovery
  *   codes on an active enrollment without the requireAdminMfaVerified
@@ -370,15 +389,17 @@ export async function activateAdminMfa(input: { userId: string; code: string }):
   if (!isReplacement && step <= mfa.lastUsedStep) return null;
   const now = new Date();
   if (isReplacement) {
-    // Atomic swap: the new secret becomes active, the pending slot is
-    // cleared, MFA stays enabled, and the old recovery codes are rotated.
-    // The pendingSecretEncrypted guard makes the swap single-flight: the
-    // first activation clears the slot, so a concurrent one matches nothing.
-    // The equality check on the pending bytes also guards against a
-    // concurrent replacement start overwriting the pending secret after
-    // this activation read it: the swap only happens for the secret this
-    // activation actually verified.
-    const swapped = await db.$transaction(async (tx) => {
+    // Atomic swap + rotation: the new secret becomes active, the pending
+    // slot is cleared, MFA stays enabled, the old recovery codes are
+    // deleted, and fresh ones are issued — all in one transaction. The
+    // pendingSecretEncrypted guard makes the swap single-flight: the
+    // first activation clears the slot, so a concurrent one matches
+    // nothing. The equality check on the pending bytes also guards
+    // against a concurrent replacement start overwriting the pending
+    // secret after this activation read it: the swap only happens for the
+    // secret this activation actually verified. If code creation fails,
+    // the whole transaction rolls back and the old secret and codes stay.
+    return db.$transaction(async (tx) => {
       const claimed = await tx.adminMfa.updateMany({
         where: { id: mfa.id, pendingSecretEncrypted: pendingBytes },
         data: {
@@ -388,12 +409,10 @@ export async function activateAdminMfa(input: { userId: string; code: string }):
           lastUsedStep: step,
         },
       });
-      if (claimed.count !== 1) return false;
+      if (claimed.count !== 1) return null;
       await tx.adminMfaRecoveryCode.deleteMany({ where: { mfaId: mfa.id } });
-      return true;
+      return createRecoveryCodes(mfa.id, tx);
     });
-    if (!swapped) return null;
-    return createRecoveryCodes(mfa.id);
   }
   // First-time activation. The secret-equality guard is the race
   // protection: the activation verified a code against the secret it read,
@@ -401,15 +420,17 @@ export async function activateAdminMfa(input: { userId: string; code: string }):
   // concurrent enrollment that replaced the secret after the read matches
   // zero rows, so activation cannot enable MFA with a secret the admin
   // never set up (which would lock them out). enabledAt: null guards
-  // against a concurrent activation having already enabled MFA.
-  const claimed = await db.adminMfa.updateMany({
-    where: { id: mfa.id, secretEncrypted: pendingBytes, enabledAt: null, lastUsedStep: { lt: step } },
-    data: { enabledAt: now, lastVerifiedAt: now, lastUsedStep: step },
+  // against a concurrent activation having already enabled MFA. Enabling
+  // and issuing the recovery codes are one transaction: if code creation
+  // fails, the enablement rolls back and MFA stays disabled.
+  return db.$transaction(async (tx) => {
+    const claimed = await tx.adminMfa.updateMany({
+      where: { id: mfa.id, secretEncrypted: pendingBytes, enabledAt: null, lastUsedStep: { lt: step } },
+      data: { enabledAt: now, lastVerifiedAt: now, lastUsedStep: step },
+    });
+    if (claimed.count !== 1) return null;
+    return createRecoveryCodes(mfa.id, tx);
   });
-  if (claimed.count !== 1) return null;
-  // Activation issues a fresh set of recovery codes.
-  await db.adminMfaRecoveryCode.deleteMany({ where: { mfaId: mfa.id } });
-  return createRecoveryCodes(mfa.id);
 }
 
 export type MfaVerificationResult = "verified" | "invalid" | "not-enrolled" | "unavailable";
@@ -484,13 +505,17 @@ export function isMfaVerifiedForSession(
 /**
  * Regenerate recovery codes: deletes all previous codes (used and unused)
  * and returns a fresh set (once, never stored). Requires MFA to be enabled.
- * Returns null when MFA is not enabled.
+ * Returns null when MFA is not enabled. Deletion and creation are one
+ * transaction, so a failed creation leaves the previous codes intact
+ * instead of leaving MFA enabled with no recovery codes.
  */
 export async function regenerateAdminMfaRecoveryCodes(userId: string): Promise<string[] | null> {
   const mfa = await db.adminMfa.findUnique({ where: { userId }, select: { id: true, enabledAt: true } });
   if (!mfa || !mfa.enabledAt) return null;
-  await db.adminMfaRecoveryCode.deleteMany({ where: { mfaId: mfa.id } });
-  return createRecoveryCodes(mfa.id);
+  return db.$transaction(async (tx) => {
+    await tx.adminMfaRecoveryCode.deleteMany({ where: { mfaId: mfa.id } });
+    return createRecoveryCodes(mfa.id, tx);
+  });
 }
 
 /**

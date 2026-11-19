@@ -7,8 +7,15 @@ import { totpCodeForStep, totpTimeStep } from "@/lib/totp";
 
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 
-const { mockDb } = vi.hoisted(() => ({
-  mockDb: {
+const { mockDb, mockTx } = vi.hoisted(() => {
+  // mockTx is the transaction client handed to $transaction callbacks.
+  // $transaction executes the callback with mockTx (and propagates a
+  // thrown error, as a real transaction rollback would).
+  const mockTx = {
+    adminMfa: { updateMany: vi.fn() },
+    adminMfaRecoveryCode: { createMany: vi.fn(), deleteMany: vi.fn() },
+  };
+  const mockDb = {
     adminMfa: {
       findUnique: vi.fn(),
       upsert: vi.fn(),
@@ -19,8 +26,10 @@ const { mockDb } = vi.hoisted(() => ({
     },
     adminMfaRecoveryCode: { createMany: vi.fn(), deleteMany: vi.fn(), updateMany: vi.fn() },
     user: { findUnique: vi.fn() },
-  },
-}));
+    $transaction: vi.fn(async (fn: (tx: typeof mockTx) => Promise<unknown>) => fn(mockTx)),
+  };
+  return { mockDb, mockTx };
+});
 
 vi.mock("@/lib/db", () => ({ db: mockDb }));
 vi.mock("qrcode", () => ({ default: { toDataURL: vi.fn(async () => "data:image/png;base64,QR") } }));
@@ -138,14 +147,15 @@ describe("admin MFA service", () => {
 
   it("enrollment replaces a pending enrollment via the conditional update", async () => {
     mockDb.adminMfa.updateMany.mockResolvedValue({ count: 1 });
-    mockDb.adminMfa.findUnique.mockResolvedValue({ id: "mfa-1" });
-    mockDb.adminMfaRecoveryCode.deleteMany.mockResolvedValue({ count: 0 });
 
     const enrollment = await startAdminMfaEnrollment({ userId: ADMIN_ID, email: ADMIN_EMAIL });
     expect(enrollment.manualKey).toMatch(/^[A-Z2-7]{32}$/);
     expect(mockDb.adminMfa.create).not.toHaveBeenCalled();
-    // Recovery codes are deleted only after the conditional update succeeded.
-    expect(mockDb.adminMfaRecoveryCode.deleteMany).toHaveBeenCalledWith({ where: { mfaId: "mfa-1" } });
+    // No recovery codes are deleted: a pending enrollment cannot
+    // legitimately have any, and deleting here could destroy codes issued
+    // by a concurrent successful activation.
+    expect(mockDb.adminMfaRecoveryCode.deleteMany).not.toHaveBeenCalled();
+    expect(mockDb.adminMfa.findUnique).not.toHaveBeenCalled();
   });
 
   it("enrollment fails closed without the encryption key", async () => {
@@ -171,27 +181,51 @@ describe("admin MFA service", () => {
       enabledAt: null,
       lastUsedStep: 0,
     });
-    mockDb.adminMfa.updateMany.mockResolvedValue({ count: 1 });
-    mockDb.adminMfaRecoveryCode.deleteMany.mockResolvedValue({ count: 0 });
-    mockDb.adminMfaRecoveryCode.createMany.mockResolvedValue({ count: 10 });
+    mockTx.adminMfa.updateMany.mockResolvedValue({ count: 1 });
+    mockTx.adminMfaRecoveryCode.createMany.mockResolvedValue({ count: 10 });
 
     const codes = await activateAdminMfa({ userId: ADMIN_ID, code });
     expect(codes).toHaveLength(10);
     for (const c of codes!) expect(c).toMatch(/^[A-Z2-9]{5}-[A-Z2-9]{5}$/);
+    // Enabling and issuing codes happened in one transaction.
+    expect(mockDb.$transaction).toHaveBeenCalledTimes(1);
     // The activation claimed the time step atomically, and only while the
     // same secret is still stored (stale-secret race guard).
-    const updateCall = mockDb.adminMfa.updateMany.mock.calls[0][0];
+    const updateCall = mockTx.adminMfa.updateMany.mock.calls[0][0];
     expect(updateCall.where.id).toBe("mfa-1");
     expect(updateCall.where.enabledAt).toBeNull();
     expect(updateCall.where.lastUsedStep).toEqual({ lt: step });
     expect(updateCall.where.secretEncrypted).toEqual(storedSecret);
     // Recovery codes were stored as hashes only.
-    const created = mockDb.adminMfaRecoveryCode.createMany.mock.calls[0][0].data;
+    const created = mockTx.adminMfaRecoveryCode.createMany.mock.calls[0][0].data;
     expect(created).toHaveLength(10);
     for (const row of created) {
       expect(row.codeHash).toMatch(/^[a-f0-9]{64}$/);
       expect(codes).not.toContain(row.codeHash);
     }
+  });
+
+  it("first-time activation rolls back when recovery-code creation fails", async () => {
+    const key = Buffer.from(TEST_KEY, "base64");
+    const secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+    const step = totpTimeStep();
+    const code = totpCodeForStep(secret, step);
+    mockDb.adminMfa.findUnique.mockResolvedValue({
+      id: "mfa-1",
+      userId: ADMIN_ID,
+      secretEncrypted: encryptTotpSecret(secret, key),
+      pendingSecretEncrypted: null,
+      enabledAt: null,
+      lastUsedStep: 0,
+    });
+    mockTx.adminMfa.updateMany.mockResolvedValue({ count: 1 });
+    mockTx.adminMfaRecoveryCode.createMany.mockRejectedValue(new Error("database unavailable"));
+
+    // The database failure aborts the activation (the transaction rolls
+    // back), so MFA is never left enabled without its recovery codes.
+    await expect(activateAdminMfa({ userId: ADMIN_ID, code })).rejects.toThrow("database unavailable");
+    expect(mockDb.$transaction).toHaveBeenCalledTimes(1);
+    expect(mockTx.adminMfa.updateMany).toHaveBeenCalledTimes(1);
   });
 
   it("activation rejects an invalid first code and does not enable MFA", async () => {
@@ -208,8 +242,10 @@ describe("admin MFA service", () => {
 
     const codes = await activateAdminMfa({ userId: ADMIN_ID, code: "000000" });
     expect(codes).toBeNull();
-    expect(mockDb.adminMfa.updateMany).not.toHaveBeenCalled();
-    expect(mockDb.adminMfaRecoveryCode.createMany).not.toHaveBeenCalled();
+    // The code never verified, so no transaction was started.
+    expect(mockDb.$transaction).not.toHaveBeenCalled();
+    expect(mockTx.adminMfa.updateMany).not.toHaveBeenCalled();
+    expect(mockTx.adminMfaRecoveryCode.createMany).not.toHaveBeenCalled();
   });
 
   it("activation rejects a replayed code (same time step as the last accepted one)", async () => {
@@ -228,7 +264,9 @@ describe("admin MFA service", () => {
 
     const codes = await activateAdminMfa({ userId: ADMIN_ID, code });
     expect(codes).toBeNull();
-    expect(mockDb.adminMfa.updateMany).not.toHaveBeenCalled();
+    // The replay was rejected before any write, so no transaction started.
+    expect(mockDb.$transaction).not.toHaveBeenCalled();
+    expect(mockTx.adminMfa.updateMany).not.toHaveBeenCalled();
   });
 
   it("session verification accepts a valid TOTP code and records it", async () => {
@@ -356,20 +394,69 @@ describe("admin MFA service", () => {
       id: "mfa-1",
       enabledAt: new Date("2026-11-19T09:00:00.000Z"),
     });
-    mockDb.adminMfaRecoveryCode.deleteMany.mockResolvedValue({ count: 10 });
-    mockDb.adminMfaRecoveryCode.createMany.mockResolvedValue({ count: 10 });
+    mockTx.adminMfaRecoveryCode.deleteMany.mockResolvedValue({ count: 10 });
+    mockTx.adminMfaRecoveryCode.createMany.mockResolvedValue({ count: 10 });
 
     const codes = await regenerateAdminMfaRecoveryCodes(ADMIN_ID);
     expect(codes).toHaveLength(10);
-    expect(mockDb.adminMfaRecoveryCode.deleteMany).toHaveBeenCalledWith({ where: { mfaId: "mfa-1" } });
-    const created = mockDb.adminMfaRecoveryCode.createMany.mock.calls[0][0].data;
+    // Deletion and creation are one transaction.
+    expect(mockDb.$transaction).toHaveBeenCalledTimes(1);
+    expect(mockTx.adminMfaRecoveryCode.deleteMany).toHaveBeenCalledWith({ where: { mfaId: "mfa-1" } });
+    const created = mockTx.adminMfaRecoveryCode.createMany.mock.calls[0][0].data;
     expect(new Set(created.map((r: { codeHash: string }) => r.codeHash)).size).toBe(10);
+  });
+
+  it("regeneration rolls back when recovery-code creation fails", async () => {
+    mockDb.adminMfa.findUnique.mockResolvedValue({
+      id: "mfa-1",
+      enabledAt: new Date("2026-11-19T09:00:00.000Z"),
+    });
+    mockTx.adminMfaRecoveryCode.deleteMany.mockResolvedValue({ count: 10 });
+    mockTx.adminMfaRecoveryCode.createMany.mockRejectedValue(new Error("database unavailable"));
+
+    // The failure aborts the transaction, so the previous codes are not
+    // deleted — MFA is not left without recovery codes.
+    await expect(regenerateAdminMfaRecoveryCodes(ADMIN_ID)).rejects.toThrow("database unavailable");
+    expect(mockDb.$transaction).toHaveBeenCalledTimes(1);
   });
 
   it("regeneration returns null when MFA is not enabled", async () => {
     mockDb.adminMfa.findUnique.mockResolvedValue({ id: "mfa-1", enabledAt: null });
     expect(await regenerateAdminMfaRecoveryCodes(ADMIN_ID)).toBeNull();
-    expect(mockDb.adminMfaRecoveryCode.deleteMany).not.toHaveBeenCalled();
+    expect(mockDb.$transaction).not.toHaveBeenCalled();
+    expect(mockTx.adminMfaRecoveryCode.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("replacement activation rolls back when recovery-code creation fails", async () => {
+    const key = Buffer.from(TEST_KEY, "base64");
+    const oldSecret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+    const newSecret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+    const step = totpTimeStep();
+    const code = totpCodeForStep(newSecret, step);
+    const storedPending = encryptTotpSecret(newSecret, key);
+    mockDb.adminMfa.findUnique.mockResolvedValue({
+      id: "mfa-1",
+      userId: ADMIN_ID,
+      secretEncrypted: encryptTotpSecret(oldSecret, key),
+      pendingSecretEncrypted: storedPending,
+      enabledAt: new Date("2026-11-19T09:00:00.000Z"),
+      lastVerifiedAt: null,
+      lastUsedStep: 0,
+    });
+    mockTx.adminMfa.updateMany.mockResolvedValue({ count: 1 });
+    mockTx.adminMfaRecoveryCode.deleteMany.mockResolvedValue({ count: 10 });
+    mockTx.adminMfaRecoveryCode.createMany.mockRejectedValue(new Error("database unavailable"));
+
+    // The failure aborts the transaction, so the secret swap and the
+    // deletion of the old codes roll back together: the old secret and
+    // its recovery codes stay active.
+    await expect(activateAdminMfa({ userId: ADMIN_ID, code })).rejects.toThrow("database unavailable");
+    expect(mockDb.$transaction).toHaveBeenCalledTimes(1);
+    // The swap was attempted only for the pending secret this activation
+    // actually verified (pending-secret equality guard).
+    const updateCall = mockTx.adminMfa.updateMany.mock.calls[0][0];
+    expect(updateCall.where.pendingSecretEncrypted).toEqual(storedPending);
+    expect(updateCall.data.secretEncrypted).toEqual(storedPending);
   });
 
   it("disablement requires the correct password and a valid code, then deletes MFA", async () => {

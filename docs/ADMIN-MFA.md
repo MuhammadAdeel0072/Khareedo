@@ -50,12 +50,24 @@ The enrollment write is TOCTOU-safe: it replaces a pending enrollment
 only via a conditional update guarded on `enabledAt: null`, so a
 concurrent activation that enabled MFA between the check and the write
 cannot be overwritten (the update matches zero rows and enrollment is
-refused). A fresh row is created only when no row exists. Recovery codes
-are deleted only after that conditional update has succeeded. Likewise,
+refused). A fresh row is created only when no row exists. Enrollment
+never deletes recovery codes: a pending (never-enabled) enrollment
+cannot legitimately have any — codes are only created at activation — so
+deleting from this path could destroy codes issued by a concurrent
+successful activation.
+
+Activation is atomic: enabling MFA and issuing the recovery-code hashes
+happen in a single database transaction, so they succeed or fail
+together. A database failure while issuing codes rolls the enablement
+back — MFA is never left enabled without its recovery codes. Likewise,
 activation only succeeds while the secret it verified is still the stored
 secret (a secret-equality guard on the conditional update), so a
 concurrent enrollment cannot leave MFA enabled with a secret the admin
-never set up.
+never set up. The replacement swap is equally atomic: the secret swap,
+the deletion of the old codes, and the issuing of fresh codes are one
+transaction, so a failed code creation rolls the swap back and the old
+secret and codes stay active. Recovery-code regeneration is atomic the
+same way (delete and create in one transaction).
 
 ### Replacing an authenticator (active MFA)
 
