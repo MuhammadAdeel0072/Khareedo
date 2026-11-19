@@ -7,6 +7,7 @@
     "build": "npm run db:generate:postgres && next build && node -e \"const fs=require('node:fs');const envFile='.next/standalone/.env';if(fs.existsSync(envFile))fs.rmSync(envFile);fs.cpSync('.next/static','.next/standalone/.next/static',{recursive:true,force:true});if(fs.existsSync('public'))fs.cpSync('public','.next/standalone/public',{recursive:true,force:true});\"",
     "start": "NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log",
     "lint": "eslint .",
+    "test": "vitest run --exclude 'tests/unit/integration.*' --exclude 'tests/unit/ssrf-guard.test.ts'",
     "test:db": "node scripts/run-isolated-sqlite-tests.mjs",
     "test:db:check": "node scripts/run-isolated-sqlite-tests.mjs --check",
     "db:push": "node scripts/guard-destructive-db.mjs push",

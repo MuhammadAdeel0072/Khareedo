@@ -190,7 +190,7 @@ export default async function OrderPage({
             {order.paymentMethod === "COD"
               ? "Cash on Delivery — please keep the exact amount ready."
               : order.paymentMethod === "BANK_TRANSFER"
-                ? "Bank Transfer — our team will share account details."
+                ? "Bank Transfer"
                 : "Online Payment"}
             {order.giftWrapSelected && (
               <>

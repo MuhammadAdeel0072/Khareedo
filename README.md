@@ -24,7 +24,7 @@ Database migrations for **Supabase PostgreSQL** ship in `prisma/migrations/` (ap
 ## Quick start (sandbox/demo)
 
 ```bash
-npm install
+npm ci
 cp .env.example .env   # defaults work for local SQLite
 DB_DESTRUCTIVE_ALLOW=1 npm run db:push   # create schema (guarded: local SQLite only, see docs/SQL-SAFETY.md)
 SEED_ALLOW=1 bun scripts/seed.ts   # demo catalog + settings (no accounts by default)
