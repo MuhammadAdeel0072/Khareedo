@@ -1,7 +1,7 @@
 // Admin: create product (FR-39, BR-14).
 import { adminCreateProduct } from "@/services/products.service";
 import { productSchema } from "@/lib/validation";
-import { requireAdmin } from "@/lib/auth-guard";
+import { requireAdminMfaVerified } from "@/lib/auth-guard";
 import { parseBody, jsonError, jsonOk, handleRoute } from "@/lib/api";
 import {
   productWriteErrorResponse,
@@ -10,7 +10,7 @@ import {
 
 export async function POST(request: Request) {
   return handleRoute(async () => {
-    await requireAdmin();
+    await requireAdminMfaVerified();
     const parsed = await parseBody(request, productSchema);
     if (parsed.error) return parsed.error;
     const d = parsed.data;

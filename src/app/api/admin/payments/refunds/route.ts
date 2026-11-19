@@ -5,7 +5,7 @@
 // gate (SAFEPAY_REFUNDS_SANDBOX_ONLY) that no request input can widen.
 import { z } from "zod";
 import { db } from "@/lib/db";
-import { requireAdmin, AuthError } from "@/lib/auth-guard";
+import { requireAdminMfaVerified, AuthError } from "@/lib/auth-guard";
 import { rateLimit } from "@/lib/rate-limit";
 import { jsonOk, handleRoute } from "@/lib/api";
 import { loadSafepayConfig, SafepayConfigurationError } from "@/lib/safepay/config";
@@ -67,7 +67,7 @@ function serialize(row: SerializableRefundRow) {
 
 export async function POST(request: Request) {
   try {
-    const user = await requireAdmin();
+    const user = await requireAdminMfaVerified();
     const limit = rateLimit(`payments-refunds-initiate:${user.id}`, 10, 60_000);
     if (!limit.ok) {
       return Response.json({ ok: false, code: "RATE_LIMITED",
@@ -131,7 +131,7 @@ export async function POST(request: Request) {
 
 export async function GET(request: Request) {
   try {
-    const user = await requireAdmin();
+    const user = await requireAdminMfaVerified();
     const limit = rateLimit(`payments-refunds-list:${user.id}`, 30, 60_000);
     if (!limit.ok) {
       return Response.json({ ok: false, code: "RATE_LIMITED",

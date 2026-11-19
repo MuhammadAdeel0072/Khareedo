@@ -42,6 +42,7 @@ Legend: **Impl** = primary implementing file(s); **Verify** = how it is verified
 | FR-03 | Continue with Google | `GoogleProvider` in `src/lib/auth.ts`, auto-enabled when env keys exist | M (needs keys) |
 | FR-04 | Secure sign-out | `signOut()` + cookie clearing | E2E |
 | A-01 (reset) | Password recovery for customers and admins (single-use, expiring, hashed tokens; enumeration-safe; rate-limited; sessions invalidated on reset) | `src/services/password-reset.service.ts`, `/api/auth/forgot-password`, `/api/auth/reset-password`, `/forgot-password`, `/reset-password`, `src/lib/auth-guard.ts` (passwordChangedAt) — PR-09 | UT/IT |
+| A-02 (MFA) | TOTP MFA required for administrators (authenticator apps, QR + manual key, activation only after first-code verification, hashed single-use recovery codes, regeneration, password + code disablement, per-session verification, rate-limited) | `src/lib/totp.ts`, `src/services/admin-mfa.service.ts`, `src/lib/auth-guard.ts` (requireAdminMfaVerified), `/api/admin/mfa/*`, `/admin/mfa/setup`, `/admin/mfa/verify` — PR-10 | UT/IT |
 | FR-05 | Profile & delivery addresses CRUD | `/account/profile`, `/account/addresses`, `/api/account/*` | E2E |
 | FR-06 | Private account data protected | ownership checks in `orders/wishlist/address` services + proxy guard | IT/E2E |
 

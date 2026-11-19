@@ -7,7 +7,7 @@
 // single-order targeted payment re-check for diagnostics.
 import { z } from "zod";
 import { timingSafeEqual } from "node:crypto";
-import { requireAdmin, AuthError } from "@/lib/auth-guard";
+import { requireAdminMfaVerified, AuthError } from "@/lib/auth-guard";
 import { rateLimit } from "@/lib/rate-limit";
 import { parseBody, jsonOk } from "@/lib/api";
 import {
@@ -46,7 +46,7 @@ function tokenMatches(received: string | null, expected: string): boolean {
 
 export async function POST(request: Request) {
   try {
-    const user = await requireAdmin();
+    const user = await requireAdminMfaVerified();
     const limit = rateLimit(`payments-maintenance:${user.id}`, 10, 60_000);
     if (!limit.ok) {
       return Response.json({ ok: false, code: "RATE_LIMITED", error: `Too many maintenance calls. Retry in ${limit.retryAfterSec}s.` },

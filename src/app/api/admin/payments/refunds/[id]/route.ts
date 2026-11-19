@@ -1,6 +1,6 @@
 // Admin refund status — read-only view of one refund ledger operation.
 import { db } from "@/lib/db";
-import { requireAdmin, AuthError } from "@/lib/auth-guard";
+import { requireAdminMfaVerified, AuthError } from "@/lib/auth-guard";
 import { rateLimit } from "@/lib/rate-limit";
 import { jsonOk, handleRoute } from "@/lib/api";
 import { createPaymentRefundService } from "@/services/payment-refund.service";
@@ -15,7 +15,7 @@ const REFUND_SERVICE_OPTIONS = {
 
 export async function GET(_request: Request, ctx: { params: Promise<{ id: string }> }) {
   try {
-    const user = await requireAdmin();
+    const user = await requireAdminMfaVerified();
     const limit = rateLimit(`payments-refunds-status:${user.id}`, 60, 60_000);
     if (!limit.ok) {
       return Response.json({ ok: false, code: "RATE_LIMITED",

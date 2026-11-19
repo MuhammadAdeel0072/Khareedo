@@ -1,4 +1,4 @@
-﻿import { requireAdmin, AuthError } from "@/lib/auth-guard";
+﻿import { requireAdminMfaVerified, AuthError } from "@/lib/auth-guard";
 import { rateLimit } from "@/lib/rate-limit";
 import { db } from "@/lib/db";
 
@@ -9,7 +9,7 @@ const noStore = { "Cache-Control": "no-store" };
 
 export async function GET() {
   try {
-    const admin = await requireAdmin();
+    const admin = await requireAdminMfaVerified();
 
     const limit = rateLimit(
       `payments-review:${admin.id}`,

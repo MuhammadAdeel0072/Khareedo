@@ -2,7 +2,7 @@
 // Shared by product images (bucket root) and banner images ("banners/" key
 // prefix, selected with target=banner). Admin-gated, request-size bounded,
 // magic-byte validated, collision-resistant object names, upsert disabled.
-import { requireAdmin } from "@/lib/auth-guard";
+import { requireAdminMfaVerified } from "@/lib/auth-guard";
 import { handleRoute, jsonError, jsonOk } from "@/lib/api";
 import {
   getProductImageExtension,
@@ -50,7 +50,7 @@ async function readBoundedBody(request: Request): Promise<ArrayBuffer | null> {
 
 export async function POST(request: Request) {
   return handleRoute(async () => {
-    await requireAdmin();
+    await requireAdminMfaVerified();
 
     const contentType = request.headers.get("content-type") ?? "";
     if (!contentType.toLowerCase().startsWith("multipart/form-data;")) {

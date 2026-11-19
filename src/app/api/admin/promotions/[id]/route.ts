@@ -1,14 +1,14 @@
 // Admin: promotion update / delete (FR-42).
 import { db } from "@/lib/db";
 import { promotionSchema } from "@/lib/validation";
-import { requireAdmin } from "@/lib/auth-guard";
+import { requireAdminMfaVerified } from "@/lib/auth-guard";
 import { parseBody, jsonOk, handleRoute } from "@/lib/api";
 
 type Ctx = { params: Promise<{ id: string }> };
 
 export async function PUT(request: Request, ctx: Ctx) {
   return handleRoute(async () => {
-    await requireAdmin();
+    await requireAdminMfaVerified();
     const { id } = await ctx.params;
     const parsed = await parseBody(request, promotionSchema);
     if (parsed.error) return parsed.error;
@@ -32,7 +32,7 @@ export async function PUT(request: Request, ctx: Ctx) {
 
 export async function DELETE(_request: Request, ctx: Ctx) {
   return handleRoute(async () => {
-    await requireAdmin();
+    await requireAdminMfaVerified();
     const { id } = await ctx.params;
     await db.promotion.delete({ where: { id } });
     return jsonOk({});

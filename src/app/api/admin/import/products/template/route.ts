@@ -1,6 +1,6 @@
 // Admin: downloadable Excel template for bulk product import.
 // GET /api/admin/import/products/template
-import { requireAdmin } from "@/lib/auth-guard";
+import { requireAdminMfaVerified } from "@/lib/auth-guard";
 import { handleRoute } from "@/lib/api";
 import { buildWorkbook } from "@/lib/export/excel";
 import { db } from "@/lib/db";
@@ -10,7 +10,7 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   return handleRoute(async () => {
-    await requireAdmin();
+    await requireAdminMfaVerified();
 
     // Example rows use real category names so the first import can succeed as-is.
     const categories = await db.category.findMany({

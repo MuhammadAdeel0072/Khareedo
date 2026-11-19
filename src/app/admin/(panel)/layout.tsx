@@ -1,7 +1,7 @@
 // Admin layout — role-guarded shell (FR-38, NFR-12). The proxy redirects
 // non-admins; this layout additionally re-verifies the role server-side.
 import { redirect } from "next/navigation";
-import { getRequestSession, getSessionUser } from "@/lib/auth-guard";
+import { getRequestSession, getSessionUser, isMfaVerifiedForSession } from "@/lib/auth-guard";
 import { AdminSidebar } from "@/components/admin/admin-sidebar";
 import { getPendingOrdersCount } from "@/services/reports.service";
 
@@ -16,6 +16,13 @@ export default async function AdminLayout({ children }: { children: React.ReactN
     getPendingOrdersCount(),
   ]);
   if (!user || user.role !== "ADMIN") redirect("/admin/login?error=Forbidden");
+  // MFA enforcement (PR-10): an admin who has not enrolled is sent to setup;
+  // an admin whose session has not verified MFA is sent to verify. The MFA
+  // pages live outside this layout so they stay reachable.
+  if (!user.mfaEnabledAt) redirect("/admin/mfa/setup");
+  if (!isMfaVerifiedForSession(user.mfaLastVerifiedAt, session?.iat)) {
+    redirect("/admin/mfa/verify");
+  }
 
   return (
     <div className="flex min-h-screen flex-col lg:flex-row">

@@ -38,6 +38,7 @@ model User {
   oauthAccounts OAuthAccount[]
   verificationTokens VerificationToken[]
   passwordResetTokens PasswordResetToken[]
+  adminMfa      AdminMfa?
 
   @@index([role, createdAt])
 }
@@ -84,6 +85,46 @@ model PasswordResetToken {
 
   @@index([userId])
   @@index([expiresAt])
+}
+
+// Administrator TOTP MFA (PR-10). One row per admin, created at enrollment.
+// The TOTP secret is stored AES-256-GCM encrypted (see
+// src/services/admin-mfa.service.ts); only the ciphertext is persisted, never
+// the plaintext secret. enabledAt is null while enrollment is pending (the
+// admin has a secret + QR code but has not yet verified a first code).
+// lastVerifiedAt records the last successful TOTP/recovery verification;
+// the auth guard requires it to be after the session's issued-at time, so
+// each new session must verify MFA again (same pattern as PR-09's
+// passwordChangedAt). lastUsedStep is the TOTP time step of the last accepted
+// code, for replay protection: a code from the same or an earlier step is
+// rejected.
+model AdminMfa {
+  id              String    @id @default(cuid())
+  userId          String    @unique
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  secretEncrypted Bytes
+  enabledAt       DateTime?
+  lastVerifiedAt  DateTime?
+  lastUsedStep    Int       @default(0)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  recoveryCodes   AdminMfaRecoveryCode[]
+}
+
+// One-time recovery codes for admin MFA (PR-10). Only the SHA-256 hash is
+// stored; the raw code is shown to the admin once at generation and never
+// persisted or logged. A code is single-use: usedAt is set atomically on
+// redemption (guarded by usedAt null), and regeneration deletes all previous
+// codes.
+model AdminMfaRecoveryCode {
+  id         String    @id @default(cuid())
+  mfaId      String
+  mfa        AdminMfa  @relation(fields: [mfaId], references: [id], onDelete: Cascade)
+  codeHash   String    @unique
+  usedAt     DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([mfaId])
 }
 
 // Email outbox (PR-09 security-review fix). Password reset emails are sent

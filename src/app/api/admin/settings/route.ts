@@ -1,12 +1,12 @@
 // Admin: store settings save (FR-44, FR-51, BR-15 — existing orders keep their snapshots).
 import { saveSettings } from "@/services/settings.service";
 import { settingsSchema } from "@/lib/validation";
-import { requireAdmin } from "@/lib/auth-guard";
+import { requireAdminMfaVerified } from "@/lib/auth-guard";
 import { parseBody, jsonOk, handleRoute } from "@/lib/api";
 
 export async function PUT(request: Request) {
   return handleRoute(async () => {
-    await requireAdmin();
+    await requireAdminMfaVerified();
     const parsed = await parseBody(request, settingsSchema);
     if (parsed.error) return parsed.error;
     const d = parsed.data;
