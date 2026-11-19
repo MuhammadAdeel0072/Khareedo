@@ -32,18 +32,47 @@
 // - /api/webhooks/safepay — Safepay posts cross-origin; its own HMAC
 //   signature is the authentication for that route.
 // - /api/csp-report — browser violation reports; rate-limited globally.
-// - /api/auth/* — NextAuth's own CSRF token protects its sign-in flows
-//   (including the Google OAuth callback, which is a GET anyway).
+// - The NextAuth handler ONLY (src/app/api/auth/[...nextauth]) — NextAuth
+//   validates its own CSRF token on its sign-in flows (including the
+//   Google OAuth callback, which is a GET anyway). The exemption is the
+//   handler's exact paths plus its two provider-segmented prefixes, never
+//   a broad /api/auth/ prefix: the application's own endpoints under
+//   /api/auth/* — /api/auth/forgot-password, /api/auth/reset-password and
+//   /api/auth/resend-verification — are NOT exempt and are CSRF-checked
+//   like any other API route. A future custom route under /api/auth/*
+//   is therefore protected by default; only a real NextAuth path is added
+//   here, deliberately, if the handler ever grows one.
 import type { NextRequest } from "next/server";
 
 const STATE_CHANGING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 const CSRF_EXEMPT_PATHS = ["/api/webhooks/safepay", "/api/csp-report"] as const;
-const CSRF_EXEMPT_PREFIXES = ["/api/auth/"] as const;
+
+// Exact paths served by the NextAuth handler (src/app/api/auth/[...nextauth]).
+// Most are GET-only in practice (session, csrf, providers, error,
+// verify-request); signin/signout are the handler's pages. Listed exactly —
+// never as a prefix — so a future custom route under /api/auth/* is
+// CSRF-checked by default.
+const NEXTAUTH_EXEMPT_PATHS = [
+  "/api/auth/session",
+  "/api/auth/csrf",
+  "/api/auth/providers",
+  "/api/auth/error",
+  "/api/auth/verify-request",
+  "/api/auth/signin",
+  "/api/auth/signout",
+] as const;
+
+// Provider-segmented paths served by the NextAuth handler: the credentials
+// sign-in POST goes to /api/auth/callback/<provider>, OAuth providers
+// redirect back there, and /api/auth/signin/<provider> serves a provider's
+// sign-in page. NextAuth validates its own CSRF token on these flows.
+const NEXTAUTH_EXEMPT_PREFIXES = ["/api/auth/callback/", "/api/auth/signin/"] as const;
 
 export function isCsrfExemptPath(pathname: string): boolean {
   if ((CSRF_EXEMPT_PATHS as readonly string[]).includes(pathname)) return true;
-  return CSRF_EXEMPT_PREFIXES.some((prefix) => pathname.startsWith(prefix));
+  if ((NEXTAUTH_EXEMPT_PATHS as readonly string[]).includes(pathname)) return true;
+  return NEXTAUTH_EXEMPT_PREFIXES.some((prefix) => pathname.startsWith(prefix));
 }
 
 function originOf(value: string | null): string | null {
