@@ -129,6 +129,78 @@ test.describe("registered customer journey", () => {
     await expect(page.getByText("Cash on Delivery").first()).toBeVisible();
   });
 
+  test("saved default address + Online Payment reaches Confirm Order without a delivery-details bounce", async ({ page }) => {
+    // Regression: a selected saved address (which carries no email — the
+    // Address model has none) used to fail frontend validation at Confirm
+    // Order and bounce the customer back to the Address step with
+    // "Please complete your delivery details first.", even though Review
+    // displayed the address correctly. The contact email belongs to the
+    // customer (session email), not the address. This test follows the exact
+    // reported journey: saved default address → Delivery → Online Payment →
+    // Review → Confirm Order, and asserts no delivery-details bounce.
+    await customerLogin(page);
+
+    await page.goto("/product/casio-mens-analog-watch");
+    await page.getByRole("button", { name: /add to cart/i }).first().click();
+    await expect(page.getByText("Added to cart")).toBeVisible({ timeout: 10000 });
+
+    await page.goto("/checkout");
+    // Ensure a saved address exists. When none exists the new-address form
+    // shows; filling it saves the address and selects it as the default.
+    if (await page.getByLabel("Full Name").isVisible().catch(() => false)) {
+      await page.getByLabel("Full Name").fill("Ali Hassan");
+      await page.getByLabel("Phone Number").fill("0321 5556677");
+      await page.getByLabel("Street Address").fill("Test House 99, E2E Lane");
+      await page.getByLabel("City").fill("Lahore");
+      await page.getByRole("button", { name: /continue to delivery/i }).click();
+      // Back to the Address step: the saved address is now listed, marked
+      // Default, and selected.
+      await page.getByRole("button", { name: /back/i }).click();
+    }
+    // The first saved address is selected (Default badge visible).
+    await expect(page.getByText("Default").first()).toBeVisible();
+    await page.getByRole("button", { name: /continue to delivery/i }).click();
+
+    // Step 2: delivery (standard pre-selected) → payment
+    await page.getByRole("button", { name: /continue to payment/i }).click();
+
+    // Step 3: prefer Online Payment (Sandbox) when the sandbox is
+    // configured; otherwise COD. The saved-address validation bug is
+    // payment-method-independent — it fires before any payment call — so
+    // either path exercises the fix.
+    const onlineRadio = page.getByRole("radio", { name: /online payment/i });
+    const useOnline = await onlineRadio.isVisible().catch(() => false);
+    if (useOnline) {
+      await onlineRadio.click();
+    } else {
+      await page.getByRole("radio", { name: /cash on delivery/i }).click();
+    }
+    await page.getByRole("button", { name: /review order/i }).click();
+
+    // Step 4: Review shows the saved address; Confirm Order must NOT bounce
+    // back to the Address step with the delivery-details error.
+    await expect(page.getByText("Test House 99, E2E Lane")).toBeVisible();
+    await page.getByRole("button", { name: /confirm order/i }).click();
+
+    // The regression: no delivery-details bounce, and we are not back on the
+    // Address step.
+    await expect(page.getByText("Please complete your delivery details first")).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "Shipping Address" })).toHaveCount(0);
+
+    if (useOnline) {
+      // Online Payment starts the Safepay sandbox attempt (navigation away
+      // from /checkout) — or, if the sandbox is only partly configured, a
+      // payment error toast — but never the delivery-details bounce.
+      await page.waitForURL((url) => !url.toString().includes("/checkout"), { timeout: 15000 }).catch(() => undefined);
+      await expect(page.getByText("Please complete your delivery details first")).toHaveCount(0);
+    } else {
+      // COD completes the order (and is cleaned up by afterAll).
+      await expect(page.getByText("Order Confirmed!")).toBeVisible({ timeout: 15000 });
+      const reference = await page.locator("text=/^KH\\d{11,13}$/").first().innerText();
+      placedOrderReferences.push(reference.trim());
+    }
+  });
+
   test("cannot place a bank-transfer order through the API (PR-04, D-02)", async ({ page }) => {
     await customerLogin(page);
 
