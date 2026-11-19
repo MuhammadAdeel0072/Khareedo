@@ -22,21 +22,17 @@
 // and `process.on("uncaughtException", …)` would replace the default
 // termination behaviour. This hook never swallows, recovers from, or changes
 // the exit behaviour of an uncaught exception.
+//
+// The monitor registration lives in src/instrumentation-node.ts and is
+// imported dynamically below, only in the Node.js runtime. The Edge Runtime
+// compiler statically flags `process.on` as unsupported even behind a
+// runtime guard, so it must not appear in this file.
 import { captureError } from "@/lib/error-monitoring";
-
-let processMonitorRegistered = false;
-
-function registerProcessErrorMonitor() {
-  if (processMonitorRegistered) return;
-  processMonitorRegistered = true;
-  process.on("uncaughtExceptionMonitor", (error) => {
-    captureError(error, { operation: "process-uncaught-exception" });
-  });
-}
 
 export async function register() {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
   if (process.env.NEXT_PHASE === "phase-production-build") return;
+  const { registerProcessErrorMonitor } = await import("@/instrumentation-node");
   registerProcessErrorMonitor();
   if (process.env.PAYMENT_MAINTENANCE_WORKER === "off") return;
   try {
