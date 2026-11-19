@@ -20,7 +20,14 @@ export default async function AdminLayout({ children }: { children: React.ReactN
   // an admin whose session has not verified MFA is sent to verify. The MFA
   // pages live outside this layout so they stay reachable.
   if (!user.mfaEnabledAt) redirect("/admin/mfa/setup");
-  if (!isMfaVerifiedForSession(user.mfaLastVerifiedAt, session?.iat)) {
+  if (
+    !isMfaVerifiedForSession(
+      user.mfaLastVerifiedAt,
+      session?.iat,
+      user.mfaLastVerifiedSessionId,
+      user.sessionSid
+    )
+  ) {
     redirect("/admin/mfa/verify");
   }
 

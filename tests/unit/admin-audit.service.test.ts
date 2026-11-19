@@ -79,11 +79,39 @@ describe("sanitizeAuditMetadata", () => {
 
 describe("adminAuditContext", () => {
   it("builds the context from a request and the authenticated admin", () => {
+    // A trusted proxy is configured, so the forwarded header is honoured.
+    process.env.TRUSTED_PROXY_IPS = "203.0.113.1";
+    try {
+      const request = new Request("https://example.com/api/admin/orders/1/status", {
+        headers: {
+          "x-forwarded-for": "203.0.113.10",
+          "user-agent": "Mozilla/5.0 (test)",
+        },
+      });
+      const context = adminAuditContext(request, {
+        id: "admin-1",
+        email: "admin@example.com",
+        role: "ADMIN",
+        mfaEnabledAt: null,
+        mfaLastVerifiedAt: null,
+        mfaLastVerifiedSessionId: null,
+        sessionSid: "session-aaa",
+      });
+      expect(context.adminUserId).toBe("admin-1");
+      expect(context.ipAddress).toBe("203.0.113.10");
+      expect(context.userAgent).toBe("Mozilla/5.0 (test)");
+      expect(typeof context.requestId).toBe("string");
+    } finally {
+      delete process.env.TRUSTED_PROXY_IPS;
+    }
+  });
+
+  it("ignores a spoofable forwarded header when no trusted proxy is configured", () => {
+    // Fail-safe (Phase 2, area G): without TRUSTED_PROXY_IPS, X-Forwarded-For
+    // is client-controlled and must not reach the audit log as a real IP.
+    delete process.env.TRUSTED_PROXY_IPS;
     const request = new Request("https://example.com/api/admin/orders/1/status", {
-      headers: {
-        "x-forwarded-for": "203.0.113.10",
-        "user-agent": "Mozilla/5.0 (test)",
-      },
+      headers: { "x-forwarded-for": "203.0.113.10" },
     });
     const context = adminAuditContext(request, {
       id: "admin-1",
@@ -91,11 +119,10 @@ describe("adminAuditContext", () => {
       role: "ADMIN",
       mfaEnabledAt: null,
       mfaLastVerifiedAt: null,
+      mfaLastVerifiedSessionId: null,
+      sessionSid: "session-aaa",
     });
-    expect(context.adminUserId).toBe("admin-1");
-    expect(context.ipAddress).toBe("203.0.113.10");
-    expect(context.userAgent).toBe("Mozilla/5.0 (test)");
-    expect(typeof context.requestId).toBe("string");
+    expect(context.ipAddress).toBe("unknown");
   });
 
   it("falls back to unknown IP and no user-agent when headers are absent", () => {
@@ -106,6 +133,8 @@ describe("adminAuditContext", () => {
       role: "ADMIN",
       mfaEnabledAt: null,
       mfaLastVerifiedAt: null,
+      mfaLastVerifiedSessionId: null,
+      sessionSid: "session-aaa",
     });
     expect(context.ipAddress).toBe("unknown");
     expect(context.userAgent).toBeUndefined();

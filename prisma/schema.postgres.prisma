@@ -111,6 +111,11 @@ model AdminMfa {
   pendingSecretEncrypted Bytes?
   enabledAt       DateTime?
   lastVerifiedAt  DateTime?
+  // Session the admin last verified MFA in (Phase 2, area B — M-4). The
+  // guard requires this to equal the current session's `sid` claim, so a
+  // verification in one session cannot authorize a different (possibly
+  // stolen) session. NULL means never verified in a bound session.
+  lastVerifiedSessionId String?
   lastUsedStep    Int       @default(0)
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt

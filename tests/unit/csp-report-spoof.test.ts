@@ -49,10 +49,15 @@ describe("spoofed X-Forwarded-For headers", () => {
 
   beforeEach(() => {
     warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // These tests simulate a deployment behind a trusted proxy, so the
+    // forwarded headers are honoured as distinct client IPs (Phase 2,
+    // area G) and the global cap is the backstop against spoofing.
+    process.env.TRUSTED_PROXY_IPS = "10.0.0.1";
   });
 
   afterEach(() => {
     warnSpy.mockRestore();
+    delete process.env.TRUSTED_PROXY_IPS;
   });
 
   it("a single spoofed IP still hits the per-IP cap", async () => {
@@ -101,5 +106,25 @@ describe("spoofed X-Forwarded-For headers", () => {
     expect(
       (await POST(requestFrom("203.0.113.8, 198.51.100.9"))).status,
     ).toBe(204);
+  });
+
+  it("without a trusted proxy, rotating spoofed IPs share one bucket", async () => {
+    // Fail-safe (Phase 2, area G): with TRUSTED_PROXY_IPS unset, the
+    // forwarded header is client-controlled and ignored, so every request
+    // lands in the single "unknown" bucket — spoofing cannot even get past
+    // the per-IP cap, let alone reach the global one.
+    delete process.env.TRUSTED_PROXY_IPS;
+    const POST = await freshPost();
+    let accepted = 0;
+    let limited = 0;
+    for (let i = 0; i < CSP_REPORT_GLOBAL_LIMIT + 100; i++) {
+      const spoofed = `10.0.${Math.floor(i / 256)}.${i % 256}`;
+      const res = await POST(requestFrom(spoofed));
+      if (res.status === 204) accepted++;
+      else if (res.status === 429) limited++;
+      else throw new Error(`unexpected status ${res.status}`);
+    }
+    expect(accepted).toBe(CSP_REPORT_PER_IP_LIMIT);
+    expect(limited).toBe(CSP_REPORT_GLOBAL_LIMIT + 100 - CSP_REPORT_PER_IP_LIMIT);
   });
 });

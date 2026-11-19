@@ -10,6 +10,7 @@
 // MFA with password + code. Customer authentication is unaffected: the
 // guard returns MFA-free sessions for customers.
 import { describe, expect, it, beforeAll, afterAll, vi } from "vitest";
+import { randomUUID } from "node:crypto";
 import bcrypt from "bcryptjs";
 import { assertDisposableTestDatabase } from "../helpers/disposable-sqlite.mjs";
 import { totpCodeForStep, totpTimeStep } from "@/lib/totp";
@@ -34,6 +35,7 @@ import {
   getAdminMfaStatus,
   MfaAlreadyEnabledError,
   regenerateAdminMfaRecoveryCodes,
+  isMfaVerifiedForSession,
   startAdminMfaEnrollment,
   startAdminMfaReplacement,
   verifyAdminMfaForSession,
@@ -43,6 +45,12 @@ import {
 // exercise the real Prisma layer and never use the application's configured
 // database.
 assertDisposableTestDatabase();
+
+// A fresh session id for each verification/activation, so each call
+// simulates a distinct admin session (the sid binding, Phase 2 area B).
+function freshSessionSid() {
+  return randomUUID();
+}
 
 const ADMIN_PASSWORD = "admin-mfa-test-password";
 let adminId = "";
@@ -96,10 +104,14 @@ describe("admin MFA lifecycle (integration)", () => {
     });
 
     // 2. Activate with a valid first code: MFA is enabled, 10 recovery codes
-    // are issued, and only their hashes are stored.
+    // are issued, and only their hashes are stored. The activation happens
+    // in this admin's session, so it binds the verification to that
+    // session's id — step 3 verifies the SAME session, which is why the
+    // short-circuit below is allowed to fire.
     const step = totpTimeStep();
     const firstCode = totpCodeForStep(enrollment.manualKey, step);
-    const recoveryCodes = await activateAdminMfa({ userId: adminId, code: firstCode });
+    const sessionSid = freshSessionSid();
+    const recoveryCodes = await activateAdminMfa({ userId: adminId, code: firstCode, sessionSid });
     expect(recoveryCodes).toHaveLength(10);
     mfa = await db.adminMfa.findUnique({ where: { userId: adminId } });
     expect(mfa!.enabledAt).not.toBeNull();
@@ -114,10 +126,15 @@ describe("admin MFA lifecycle (integration)", () => {
     expect(status.unusedRecoveryCodes).toBe(10);
 
     // 3. Verify a TOTP code for a session issued before verification.
+    // This is the SAME session that activated (same sid), so the
+    // verification recorded at activation already covers it — the call
+    // short-circuits to "verified" without consuming a code. (A different
+    // sid here would force a fresh code check, and the current step's code
+    // was already consumed by the activation.)
     const sessionIat = Math.floor(Date.now() / 1000) - 60;
     const verifyStep = totpTimeStep();
     const verifyCode = totpCodeForStep(enrollment.manualKey, verifyStep);
-    const verified = await verifyAdminMfaForSession({ userId: adminId, code: verifyCode, sessionIat });
+    const verified = await verifyAdminMfaForSession({ userId: adminId, code: verifyCode, sessionIat, sessionSid });
     expect(verified).toBe("verified");
     mfa = await db.adminMfa.findUnique({ where: { userId: adminId } });
     expect(mfa!.lastVerifiedAt).not.toBeNull();
@@ -127,19 +144,19 @@ describe("admin MFA lifecycle (integration)", () => {
     // first verification, so it is not MFA-verified) must present a fresh
     // code; the replayed code is rejected because its time step was used.
     const newSessionIat = Math.floor(Date.now() / 1000) + 3600;
-    const replayed = await verifyAdminMfaForSession({ userId: adminId, code: verifyCode, sessionIat: newSessionIat });
+    const replayed = await verifyAdminMfaForSession({ userId: adminId, code: verifyCode, sessionIat: newSessionIat, sessionSid: freshSessionSid() });
     expect(replayed).toBe("invalid");
 
     // 5. A recovery code works once, then is consumed. A fresh session (not
     // yet verified) is used so the code is actually checked and consumed.
     const recoveryCode = recoveryCodes![0];
-    const recovered = await verifyAdminMfaForSession({ userId: adminId, code: recoveryCode, sessionIat: newSessionIat });
+    const recovered = await verifyAdminMfaForSession({ userId: adminId, code: recoveryCode, sessionIat: newSessionIat, sessionSid: freshSessionSid() });
     expect(recovered).toBe("verified");
     const consumed = await db.adminMfaRecoveryCode.findMany({
       where: { mfaId: mfa!.id, usedAt: { not: null } },
     });
     expect(consumed).toHaveLength(1);
-    const reused = await verifyAdminMfaForSession({ userId: adminId, code: recoveryCode, sessionIat: newSessionIat });
+    const reused = await verifyAdminMfaForSession({ userId: adminId, code: recoveryCode, sessionIat: newSessionIat, sessionSid: freshSessionSid() });
     expect(reused).toBe("invalid");
 
     // 6. Regeneration invalidates the old codes and issues fresh ones.
@@ -150,12 +167,14 @@ describe("admin MFA lifecycle (integration)", () => {
       userId: adminId,
       code: recoveryCodes![1],
       sessionIat: newSessionIat,
+      sessionSid: freshSessionSid(),
     });
     expect(oldCodeStillWorks).toBe("invalid");
     const freshCodeWorks = await verifyAdminMfaForSession({
       userId: adminId,
       code: freshCodes![0],
       sessionIat: newSessionIat,
+      sessionSid: freshSessionSid(),
     });
     expect(freshCodeWorks).toBe("verified");
 
@@ -173,7 +192,7 @@ describe("admin MFA lifecycle (integration)", () => {
 
   it("activation rejects an invalid first code and leaves MFA disabled", async () => {
     await startAdminMfaEnrollment({ userId: adminId, email: adminEmail });
-    const codes = await activateAdminMfa({ userId: adminId, code: "000000" });
+    const codes = await activateAdminMfa({ userId: adminId, code: "000000", sessionSid: freshSessionSid() });
     expect(codes).toBeNull();
     const mfa = await db.adminMfa.findUnique({ where: { userId: adminId } });
     expect(mfa!.enabledAt).toBeNull();
@@ -190,6 +209,7 @@ describe("admin MFA replacement (P1 fix)", () => {
     const recoveryCodes = await activateAdminMfa({
       userId: adminId,
       code: totpCodeForStep(enrollment.manualKey, step),
+      sessionSid: freshSessionSid(),
     });
     expect(recoveryCodes).toHaveLength(10);
     return { secret: enrollment.manualKey, recoveryCodes: recoveryCodes! };
@@ -213,7 +233,7 @@ describe("admin MFA replacement (P1 fix)", () => {
     expect(status.unusedRecoveryCodes).toBe(10);
     // The active secret verifies for a fresh session.
     const code = totpCodeForStep(secret, totpTimeStep() + 1);
-    expect(await verifyAdminMfaForSession({ userId: adminId, code, sessionIat: freshSessionIat() })).toBe(
+    expect(await verifyAdminMfaForSession({ userId: adminId, code, sessionIat: freshSessionIat(), sessionSid: freshSessionSid() })).toBe(
       "verified"
     );
     expect(recoveryCodes).toHaveLength(10);
@@ -289,12 +309,14 @@ describe("admin MFA replacement (P1 fix)", () => {
       userId: adminId,
       code: totpCodeForStep(secret, totpTimeStep() + 1),
       sessionIat: freshSessionIat(),
+      sessionSid: freshSessionSid(),
     });
     expect(stillValid).toBe("verified");
     const codeStillWorks = await verifyAdminMfaForSession({
       userId: adminId,
       code: recoveryCodes[0],
       sessionIat: freshSessionIat(),
+      sessionSid: freshSessionSid(),
     });
     expect(codeStillWorks).toBe("verified");
     await cleanupMfa();
@@ -328,6 +350,7 @@ describe("admin MFA replacement (P1 fix)", () => {
     const newCodes = await activateAdminMfa({
       userId: adminId,
       code: totpCodeForStep(replacement!.manualKey, totpTimeStep()),
+      sessionSid: freshSessionSid(),
     });
     expect(newCodes).toHaveLength(10);
     mfa = await db.adminMfa.findUnique({ where: { userId: adminId } });
@@ -339,18 +362,21 @@ describe("admin MFA replacement (P1 fix)", () => {
       userId: adminId,
       code: totpCodeForStep(replacement!.manualKey, totpTimeStep() + 1),
       sessionIat: freshSessionIat(),
+      sessionSid: freshSessionSid(),
     });
     expect(newWorks).toBe("verified");
     const oldSecretWorks = await verifyAdminMfaForSession({
       userId: adminId,
       code: totpCodeForStep(oldSecret, totpTimeStep() + 1),
       sessionIat: freshSessionIat(),
+      sessionSid: freshSessionSid(),
     });
     expect(oldSecretWorks).toBe("invalid");
     const oldCodeWorks = await verifyAdminMfaForSession({
       userId: adminId,
       code: oldCodes[1],
       sessionIat: freshSessionIat(),
+      sessionSid: freshSessionSid(),
     });
     expect(oldCodeWorks).toBe("invalid");
     await cleanupMfa();
@@ -364,6 +390,7 @@ describe("admin MFA replacement (P1 fix)", () => {
     const result = await activateAdminMfa({
       userId: adminId,
       code: totpCodeForStep(secret, totpTimeStep() + 1),
+      sessionSid: freshSessionSid(),
     });
     expect(result).toBeNull();
     const status = await getAdminMfaStatus(adminId);
@@ -373,6 +400,7 @@ describe("admin MFA replacement (P1 fix)", () => {
       userId: adminId,
       code: recoveryCodes[0],
       sessionIat: freshSessionIat(),
+      sessionSid: freshSessionSid(),
     });
     expect(codeStillWorks).toBe("verified");
     await cleanupMfa();
@@ -394,7 +422,7 @@ describe("admin MFA enrollment/activation races (TOCTOU fix)", () => {
     const firstCode = totpCodeForStep(enrollment.manualKey, totpTimeStep());
     const [enrollResult, activateResult] = await Promise.allSettled([
       startAdminMfaEnrollment({ userId: adminId, email: adminEmail }),
-      activateAdminMfa({ userId: adminId, code: firstCode }),
+      activateAdminMfa({ userId: adminId, code: firstCode, sessionSid: freshSessionSid() }),
     ]);
     const key = Buffer.from(TEST_KEY, "base64");
     const mfa = await db.adminMfa.findUnique({ where: { userId: adminId } });
@@ -431,7 +459,7 @@ describe("admin MFA enrollment/activation races (TOCTOU fix)", () => {
     const firstCode = totpCodeForStep(first.manualKey, totpTimeStep());
     const second = await startAdminMfaEnrollment({ userId: adminId, email: adminEmail });
     expect(second.manualKey).not.toBe(first.manualKey);
-    const codes = await activateAdminMfa({ userId: adminId, code: firstCode });
+    const codes = await activateAdminMfa({ userId: adminId, code: firstCode, sessionSid: freshSessionSid() });
     expect(codes).toBeNull();
     const mfa = await db.adminMfa.findUnique({ where: { userId: adminId } });
     expect(mfa!.enabledAt).toBeNull();
@@ -441,6 +469,7 @@ describe("admin MFA enrollment/activation races (TOCTOU fix)", () => {
     const secondCodes = await activateAdminMfa({
       userId: adminId,
       code: totpCodeForStep(second.manualKey, totpTimeStep()),
+      sessionSid: freshSessionSid(),
     });
     expect(secondCodes).toHaveLength(10);
     await cleanupMfa();
@@ -477,7 +506,7 @@ describe("admin MFA enrollment/activation races (TOCTOU fix)", () => {
     const firstCode = totpCodeForStep(enrollment.manualKey, totpTimeStep());
     const [enrollResult, activateResult] = await Promise.allSettled([
       startAdminMfaEnrollment({ userId: adminId, email: adminEmail }),
-      activateAdminMfa({ userId: adminId, code: firstCode }),
+      activateAdminMfa({ userId: adminId, code: firstCode, sessionSid: freshSessionSid() }),
     ]);
     if (activateResult.status === "fulfilled" && activateResult.value !== null) {
       expect(enrollResult.status).toBe("rejected");
@@ -489,6 +518,7 @@ describe("admin MFA enrollment/activation races (TOCTOU fix)", () => {
         userId: adminId,
         code: codes[0],
         sessionIat: Math.floor(Date.now() / 1000) + 3600,
+        sessionSid: freshSessionSid(),
       });
       expect(verified).toBe("verified");
       const status = await getAdminMfaStatus(adminId);
@@ -512,6 +542,7 @@ describe("admin MFA activation rollback (recovery-code atomicity)", () => {
     const recoveryCodes = await activateAdminMfa({
       userId: adminId,
       code: totpCodeForStep(enrollment.manualKey, step),
+      sessionSid: freshSessionSid(),
     });
     expect(recoveryCodes).toHaveLength(10);
     return { secret: enrollment.manualKey, recoveryCodes: recoveryCodes! };
@@ -549,7 +580,7 @@ describe("admin MFA activation rollback (recovery-code atomicity)", () => {
     const code = totpCodeForStep(enrollment.manualKey, totpTimeStep());
     await installFailingRecoveryCodeInsert();
     try {
-      await expect(activateAdminMfa({ userId: adminId, code })).rejects.toThrow();
+      await expect(activateAdminMfa({ userId: adminId, code, sessionSid: freshSessionSid() })).rejects.toThrow();
     } finally {
       await removeFailingRecoveryCodeInsert();
     }
@@ -567,6 +598,7 @@ describe("admin MFA activation rollback (recovery-code atomicity)", () => {
     const recovered = await activateAdminMfa({
       userId: adminId,
       code: totpCodeForStep(enrollment.manualKey, totpTimeStep()),
+      sessionSid: freshSessionSid(),
     });
     expect(recovered).toHaveLength(10);
     await cleanupMfa();
@@ -585,7 +617,7 @@ describe("admin MFA activation rollback (recovery-code atomicity)", () => {
     const newCode = totpCodeForStep(replacement!.manualKey, totpTimeStep());
     await installFailingRecoveryCodeInsert();
     try {
-      await expect(activateAdminMfa({ userId: adminId, code: newCode })).rejects.toThrow();
+      await expect(activateAdminMfa({ userId: adminId, code: newCode, sessionSid: freshSessionSid() })).rejects.toThrow();
     } finally {
       await removeFailingRecoveryCodeInsert();
     }
@@ -611,8 +643,91 @@ describe("admin MFA activation rollback (recovery-code atomicity)", () => {
       userId: adminId,
       code: oldCodes[1],
       sessionIat: freshSessionIat(),
+      sessionSid: freshSessionSid(),
     });
     expect(verified).toBe("verified");
+    await cleanupMfa();
+  });
+});
+
+describe("admin MFA session binding (Phase 2 area B)", () => {
+  async function enableMfa() {
+    const enrollment = await startAdminMfaEnrollment({ userId: adminId, email: adminEmail });
+    const step = totpTimeStep();
+    const recoveryCodes = await activateAdminMfa({
+      userId: adminId,
+      code: totpCodeForStep(enrollment.manualKey, step),
+      sessionSid: "session-aaa",
+    });
+    expect(recoveryCodes).toHaveLength(10);
+    return { secret: enrollment.manualKey, recoveryCodes: recoveryCodes! };
+  }
+
+  async function cleanupMfa() {
+    await db.adminMfaRecoveryCode.deleteMany({ where: { mfa: { userId: adminId } } });
+    await db.adminMfa.deleteMany({ where: { userId: adminId } });
+  }
+
+  it("verification in one session does not verify a different session (M-4)", async () => {
+    // The old check bound verification to the user account: a token stolen
+    // before the victim verified MFA became valid once the victim verified
+    // in their own session. The sid binding closes that hole.
+    const { secret } = await enableMfa();
+    const sessionIat = Math.floor(Date.now() / 1000) - 60;
+    const verified = await verifyAdminMfaForSession({
+      userId: adminId,
+      code: totpCodeForStep(secret, totpTimeStep() + 1),
+      sessionIat,
+      sessionSid: "session-aaa",
+    });
+    expect(verified).toBe("verified");
+
+    const mfa = await db.adminMfa.findUnique({ where: { userId: adminId } });
+    expect(mfa!.lastVerifiedAt).not.toBeNull();
+    expect(mfa!.lastVerifiedSessionId).toBe("session-aaa");
+
+    // The verifying session is verified; a different session is not.
+    expect(isMfaVerifiedForSession(mfa!.lastVerifiedAt, sessionIat, mfa!.lastVerifiedSessionId, "session-aaa")).toBe(true);
+    expect(isMfaVerifiedForSession(mfa!.lastVerifiedAt, sessionIat, mfa!.lastVerifiedSessionId, "session-bbb")).toBe(false);
+    await cleanupMfa();
+  });
+
+  it("verification without a session id fails closed (legacy pre-sid session)", async () => {
+    const { secret } = await enableMfa();
+    const before = await db.adminMfa.findUnique({ where: { userId: adminId } });
+    // Activation binds the activating session; the no-sid verify must not
+    // change that binding or the verification timestamp.
+    expect(before!.lastVerifiedSessionId).toBe("session-aaa");
+    expect(before!.lastVerifiedAt).not.toBeNull();
+    const code = totpCodeForStep(secret, totpTimeStep() + 1);
+    // The code is valid, but there is no session to bind it to: the
+    // verification must not succeed. The admin signs out and signs in
+    // again, which mints a sid.
+    const result = await verifyAdminMfaForSession({
+      userId: adminId,
+      code,
+      sessionIat: Math.floor(Date.now() / 1000) - 60,
+      sessionSid: undefined,
+    });
+    expect(result).toBe("invalid");
+    const mfa = await db.adminMfa.findUnique({ where: { userId: adminId } });
+    expect(mfa!.lastVerifiedAt).toEqual(before!.lastVerifiedAt);
+    expect(mfa!.lastVerifiedSessionId).toBe("session-aaa");
+    await cleanupMfa();
+  });
+
+  it("activation binds the activating session", async () => {
+    const enrollment = await startAdminMfaEnrollment({ userId: adminId, email: adminEmail });
+    const codes = await activateAdminMfa({
+      userId: adminId,
+      code: totpCodeForStep(enrollment.manualKey, totpTimeStep()),
+      sessionSid: "session-aaa",
+    });
+    expect(codes).toHaveLength(10);
+    const mfa = await db.adminMfa.findUnique({ where: { userId: adminId } });
+    expect(mfa!.enabledAt).not.toBeNull();
+    expect(mfa!.lastVerifiedSessionId).toBe("session-aaa");
+    expect(mfa!.lastVerifiedAt).not.toBeNull();
     await cleanupMfa();
   });
 });

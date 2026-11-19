@@ -33,10 +33,22 @@ export async function POST(request: Request) {
       });
     }
     const session = await getRequestSession();
+    // Sessions issued before the sid change carry no session id: the
+    // verification cannot be bound to a session, so it fails closed here
+    // with a clear message instead of a wrong-code error. The admin signs
+    // out and signs in again, which mints a sid.
+    if (!session?.sid) {
+      return jsonError(
+        "Your session was created before a security update. Please sign out and sign in again, then verify.",
+        401,
+        { code: "SESSION_REBIND_REQUIRED" }
+      );
+    }
     const result = await verifyAdminMfaForSession({
       userId: user.id,
       code: parsed.data.code,
       sessionIat: session?.iat,
+      sessionSid: session.sid,
     });
     if (result === "verified") {
       return jsonOk({ message: "Multi-factor authentication verified." });

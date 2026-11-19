@@ -7,6 +7,7 @@ import {
   removeCartItem,
   applyCartItemUpdate,
 } from "@/services/cart.service";
+import { rateLimit, clientIp } from "@/lib/rate-limit";
 import { parseBody, jsonError, jsonOk, handleRoute } from "@/lib/api";
 import { withPerformanceTiming } from "@/lib/performance-timing";
 
@@ -33,8 +34,24 @@ function cartPayload(details: Awaited<ReturnType<typeof getCartDetails>>) {
   };
 }
 
-export async function GET() {
+// Cart reads and writes are cheap per request but unbounded in aggregate:
+// a flood of cart mutations is a free DB burn, and a guest cart is keyed by
+// an unguessable cookie, so a per-IP cap is the only cheap backstop.
+// 60/min per client IP across all cart methods (Phase 2, area A). Returns
+// a 429 response when the caller is over budget, else null.
+function checkCartRateLimit(request: Request) {
+  const ip = clientIp(request.headers);
+  const limit = rateLimit(`cart:${ip}`, 60, 60 * 1000);
+  if (limit.ok) return null;
+  return jsonError(`Too many requests. Please try again in ${limit.retryAfterSec}s.`, 429, undefined, {
+    headers: { "Retry-After": String(limit.retryAfterSec) },
+  });
+}
+
+export async function GET(request: Request) {
   return handleRoute(async () => {
+    const limited = checkCartRateLimit(request);
+    if (limited) return limited;
     const details = await getCartDetails();
     return jsonOk(cartPayload(details));
   });
@@ -42,6 +59,8 @@ export async function GET() {
 
 export async function POST(request: Request) {
   return withPerformanceTiming("api.cart.add", () => handleRoute(async () => {
+    const limited = checkCartRateLimit(request);
+    if (limited) return limited;
     const parsed = await parseBody(request, addSchema);
     if (parsed.error) return parsed.error;
     const { productId, quantity } = parsed.data;
@@ -56,6 +75,8 @@ export async function POST(request: Request) {
 
 export async function PATCH(request: Request) {
   return handleRoute(async () => {
+    const limited = checkCartRateLimit(request);
+    if (limited) return limited;
     const parsed = await parseBody(request, updateSchema);
     if (parsed.error) return parsed.error;
     const { itemId, quantity, giftWrap } = parsed.data;
@@ -71,6 +92,8 @@ export async function PATCH(request: Request) {
 
 export async function DELETE(request: Request) {
   return handleRoute(async () => {
+    const limited = checkCartRateLimit(request);
+    if (limited) return limited;
     const parsed = await parseBody(request, removeSchema);
     if (parsed.error) return parsed.error;
     try {

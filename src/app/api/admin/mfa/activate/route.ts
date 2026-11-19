@@ -15,7 +15,7 @@
 // the recovery-codes endpoint.
 // Rate-limited per admin (5/15min) and per IP (10/15min).
 import { z } from "zod";
-import { requireAdmin } from "@/lib/auth-guard";
+import { getRequestSession, requireAdmin } from "@/lib/auth-guard";
 import { clientIp, rateLimit } from "@/lib/rate-limit";
 import { handleRoute, jsonError, jsonOk, parseBody } from "@/lib/api";
 import { adminAuditContext } from "@/services/admin-audit.service";
@@ -42,10 +42,15 @@ export async function POST(request: Request) {
       });
     }
     try {
+      const session = await getRequestSession();
       const recoveryCodes = await activateAdminMfa({
         userId: user.id,
         code: parsed.data.code,
         audit: adminAuditContext(request, user),
+        // Binds the activating session when it carries a sid (Phase 2,
+        // area B). Undefined for pre-sid sessions: activation still
+        // succeeds, and the admin re-verifies after their next sign-in.
+        sessionSid: session?.sid,
       });
       if (recoveryCodes === null) {
         return jsonError("That code is not valid. Check your authenticator app and try again.", 400);

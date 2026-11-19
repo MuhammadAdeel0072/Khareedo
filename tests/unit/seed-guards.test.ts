@@ -54,11 +54,49 @@ describe("checkSeedTarget", () => {
     for (const url of [
       "postgresql://postgres:postgres@localhost:5432/postgres",
       "postgres://db.example.supabase.co:5432/postgres",
-      "dev.db",
     ]) {
       const result = checkSeedTarget(env({ DATABASE_URL: url }));
       expect(result.ok).toBe(false);
       if (!result.ok) expect(result.reason).toMatch(/file:/);
+    }
+    // A bare path is not a URL at all, so it is refused as unparseable
+    // rather than as the wrong scheme.
+    const bare = checkSeedTarget(env({ DATABASE_URL: "dev.db" }));
+    expect(bare.ok).toBe(false);
+    if (!bare.ok) expect(bare.reason).toMatch(/not a valid URL/);
+  });
+
+  it("accepts the local file: forms the app actually uses", () => {
+    // .env.example uses file:../db/custom.db; dev uses file:./dev.db.
+    for (const url of [
+      "file:./dev.db",
+      "file:../db/custom.db",
+      "file:/tmp/khareedo-test.db",
+      "file:///tmp/khareedo-test.db",
+      "file:dev.db",
+    ]) {
+      expect(checkSeedTarget(env({ DATABASE_URL: url }))).toEqual({ ok: true });
+    }
+  });
+
+  it("refuses exotic file: forms (Phase 2, area E, F-1 / D-2)", () => {
+    // The old check was a bare startsWith("file:"); these all pass that
+    // test but are not local SQLite files. The strict check mirrors the
+    // destructive-operation guard (scripts/db-target-guards.mjs).
+    for (const url of [
+      "file://server/share/dev.db", // hostname authority
+      "file://localhost/tmp/dev.db", // localhost authority
+      "file:./dev.db?mode=ro", // query string
+      "file:./dev.db#section", // fragment
+      "file:./dev%zz.db", // malformed percent-encoding
+      "file:", // no path at all
+      "file:/", // a directory, not a file
+      "file:./dir/", // a directory, not a file
+      "file:////server/share/dev.db", // UNC-style network path
+      "file:.\\..\\dev.db", // backslashes / Windows network path
+    ]) {
+      const result = checkSeedTarget(env({ DATABASE_URL: url }));
+      expect(result.ok).toBe(false);
     }
   });
 });

@@ -30,13 +30,15 @@ export function LoginForm({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const providerErrorMessage =
-    providerError === "OAuthAccountNotLinked"
-      ? "An account already uses this email. Sign in with email and password; Google accounts are not linked automatically."
-      : providerError === "GoogleEmailNotVerified"
-        ? "Google did not confirm this email address. Try another sign-in method."
-        : providerError
-          ? "Google sign-in was cancelled or could not be completed. Please try again."
-          : null;
+    providerError === "TooManyLoginAttempts"
+      ? "Too many sign-in attempts. Please try again in a few minutes."
+      : providerError === "OAuthAccountNotLinked"
+        ? "An account already uses this email. Sign in with email and password; Google accounts are not linked automatically."
+        : providerError === "GoogleEmailNotVerified"
+          ? "Google did not confirm this email address. Try another sign-in method."
+          : providerError
+            ? "Google sign-in was cancelled or could not be completed. Please try again."
+            : null;
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -49,7 +51,14 @@ export function LoginForm({
         redirect: false,
       });
       if (!res?.ok) {
-        setError("Incorrect email or password. Please try again.");
+        // NextAuth surfaces a thrown authorize error as res.error; the
+        // login limiter throws "TooManyLoginAttempts" when the failed-login
+        // budget is exhausted (see src/lib/login-rate-limit.ts).
+        setError(
+          res?.error === "TooManyLoginAttempts"
+            ? "Too many sign-in attempts. Please try again in a few minutes."
+            : "Incorrect email or password. Please try again."
+        );
         return;
       }
       toast.success("Welcome back!");

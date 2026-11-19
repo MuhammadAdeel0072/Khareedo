@@ -4,6 +4,7 @@ import { cache } from "react";
 import { db } from "@/lib/db";
 import { cookies } from "next/headers";
 import { GUEST_CART_COOKIE, newGuestCartKey } from "@/lib/whatsapp";
+import { isHttpsDeployment } from "@/lib/site-url";
 import { getSessionUser } from "@/lib/auth-guard";
 import type { CartItemDetail } from "@/types/cart";
 import {
@@ -84,6 +85,12 @@ async function resolveCartImpl(create: boolean): Promise<{ id: string; isGuest: 
   });
   store.set(GUEST_CART_COOKIE, newKey, {
     httpOnly: true,
+    // Secure over HTTPS deployments (Phase 2, area F — H-3-G1, guest-cart
+    // half): the cookie is a bearer token for the guest cart, and without
+    // Secure it would travel in the clear on an HTTPS site. Over plain
+    // HTTP (dev/preview) Secure would silently break the guest cart, so
+    // the flag follows the deployment signal, like the session cookie.
+    secure: isHttpsDeployment(),
     sameSite: "lax",
     path: "/",
     maxAge: 60 * 60 * 24 * 30,

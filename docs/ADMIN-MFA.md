@@ -11,10 +11,14 @@ Authy) or a one-time recovery code.
 - **Stolen passwords.** An attacker with an admin's password but without
   their authenticator (or a recovery code) cannot reach the admin panel or
   any admin API route.
-- **Stolen sessions.** MFA is verified per session: the guard requires the
-  verification to have happened after the session was issued, so each new
-  login must verify MFA again. A session cookie stolen before MFA was
-  verified does not grant admin access.
+- **Stolen sessions.** MFA is verified per session, bound to the session's
+  id (see "Session binding" below): the guard requires the verification
+  to have happened after the session was issued AND in that same session,
+  so each new login must verify MFA again. A session cookie stolen before
+  MFA was verified does not grant admin access — and, since Phase 2, it
+  cannot become valid when the victim verifies in their own session
+  either, because the verification is recorded against the victim's
+  session id, not the attacker's.
 - **Replayed codes.** A TOTP code is accepted only for a time step strictly
   greater than the last accepted step, so a code cannot be reused within
   its 30-second window — even concurrently, because the step claim is an
@@ -127,6 +131,39 @@ invalidation. Since PR-25, `session.iat` is the session's *original*
 issuance time (the custom JWT encoder preserves it across refreshes), so
 an MFA verification correctly lasts for the session's lifetime instead of
 being undone by a token refresh.
+
+### Session binding (Phase 2, M-4 fix)
+
+The timestamp check alone did not bind a verification to a session: a
+JWT stolen *before* the victim verified MFA became valid the moment the
+victim verified in their own session, because the check only compared
+one per-user timestamp. That hole is closed by binding the verification
+to the session id:
+
+- At sign-in, the JWT callback mints a `sid` claim (a random UUID,
+  `src/lib/auth.ts`). A custom claim is used because NextAuth's encoder
+  overwrites `jti` with a fresh UUID on every encode — a `jti`-based
+  binding would silently break (see the Phase 2 reassessment). The
+  `sid` survives re-encoding because PR-25's custom encoder preserves
+  all claims.
+- Verification and activation record `AdminMfa.lastVerifiedSessionId`
+  (migration `20261119000004_admin_mfa_session_binding`, additive,
+  nullable).
+- The guard (`isMfaVerifiedForSession`, `src/lib/auth-guard.ts`) requires
+  `lastVerifiedAt > session.iat` **and** `lastVerifiedSessionId ===
+  session.sid`. It fails closed when any value is missing.
+- Sessions created before this deploy carry no `sid`, so every admin
+  re-verifies MFA once after signing in again (bounded by the 7-day
+  session lifetime). A session with no `sid` that reaches the verify
+  endpoint gets 401 `SESSION_REBIND_REQUIRED` ("sign out and sign in
+  again") instead of a misleading "wrong code".
+- The same-second edge case is closed as a side effect: two sessions
+  created in the same second have different sids, so one session's
+  verification can never cover the other.
+- Disablement does not go through the session-verification path: it
+  checks the submitted code as a fresh proof of possession
+  (`consumeValidAdminMfaCode`), because the session is already verified
+  there and the short-circuit would accept without checking the code.
 
 ### TOTP
 
@@ -242,40 +279,43 @@ record break-glass resets in the operator's own log.)
 - `tests/unit/admin-mfa-totp.test.ts` (8): RFC 6238 test vectors,
   6-digit codes, base32 round-trip, secret generation, the ±1-step window,
   expired codes, invalid codes/secrets.
-- `tests/unit/admin-mfa-service.test.ts` (20): key loading/validation,
+- `tests/unit/admin-mfa-service.test.ts` (27): key loading/validation,
   secret encryption + tamper detection, recovery-code format/hashing,
   status, enrollment (encrypted storage, QR + key), enrollment failing
-  closed without the key, activation (valid/invalid/replayed first code),
-  session verification (valid/replayed TOTP, recovery-code single use,
-  unknown code, not-enrolled), regeneration (old codes invalidated),
+  closed without the key, activation (valid/invalid/replayed first code,
+  rollback on recovery-code failure, session binding), session
+  verification (valid/replayed TOTP, recovery-code single use,
+  unknown code, not-enrolled, fails closed without a sid, records the
+  session id), regeneration (old codes invalidated),
   disablement (correct/wrong password, wrong code).
-- `tests/unit/admin-mfa-guard.test.ts` (8): `isMfaVerifiedForSession`
-  (before/after/at the session issued-at, missing values),
+- `tests/unit/admin-mfa-guard.test.ts` (11): `isMfaVerifiedForSession`
+  (before/after/at the session issued-at, missing values, verification in
+  a different session, legacy session without a sid, same-second session),
   `requireAdminMfaVerified` (verified admin passes, unenrolled → 403
   MFA_ENROLLMENT_REQUIRED, enrolled-but-not-activated → 403, enabled-but-
   unverified → 401 MFA_VERIFICATION_REQUIRED, customer → 403 admin-only,
   unauthenticated → 401).
-- `tests/unit/integration.admin-mfa.test.ts` (2): full lifecycle against
+- `tests/unit/integration.admin-mfa.test.ts` (17): full lifecycle against
   the disposable SQLite DB — enroll, activate, verify, replay rejection,
   recovery-code single use, regeneration, disablement; activation with an
-  invalid first code leaves MFA disabled.
+  invalid first code leaves MFA disabled; session binding (verification
+  in one session does not verify another, no-sid verification fails
+  closed, activation binds the activating session).
 
 ## Limitations
 
-- **Same-second session edge case.** The guard compares `lastVerifiedAt`
-  (millisecond timestamp) against the session's issued-at time
-  (`session.iat`, second granularity). If a new session is created in the
-  exact same second an admin verifies MFA, it is considered verified
-  without re-verifying. Exploiting this requires knowing the admin's
-  password and timing a login to the exact second of their verification,
-  which is not observable to an attacker — practically unexploitable, but
-  a future hardening step is a per-session JWT id (`jti`) recorded at
-  verification time.
+- **Same-second session edge case — closed in Phase 2.** The guard used
+  to compare `lastVerifiedAt` (millisecond timestamp) against the
+  session's issued-at time (`session.iat`, second granularity), so a new
+  session created in the exact same second as a verification was
+  considered verified. The session-id binding (above) closes this: two
+  sessions created in the same second have different sids.
 - **In-memory rate limiting.** MFA rate limits use the same in-memory
   limiter as the rest of the app. They do not share state across instances
   (see PR-11, shared rate limiting, deferred until Q-01/Q-02 resolve).
-  Per-IP limiting relies on X-Forwarded-For, which is client-controlled
-  unless a trusted proxy overwrites it (same caveat as PR-05).
+  Per-IP limiting relies on forwarded headers only when a trusted proxy
+  is configured (`TRUSTED_PROXY_IPS`); otherwise all clients share one
+  bucket (see `docs/DEPLOYMENT.md`).
 - **No TOTP backup / multiple devices.** An admin has one active TOTP
   secret. Re-enrollment replaces it. Recovery codes are the only fallback.
 - **Key rotation requires re-enrollment.** Rotating
@@ -285,6 +325,9 @@ record break-glass resets in the operator's own log.)
   to sign in after deployment must complete setup. The break-glass
   procedure above covers a lost authenticator.
 - **NextAuth v4 JWTs are not revocable.** MFA verification is bound to the
-  session via `lastVerifiedAt` vs `session.iat`; a stolen session cookie
+  session via `lastVerifiedAt` vs `session.iat` **and** the session id
+  (`lastVerifiedSessionId` vs `session.sid`); a stolen session cookie
   from *after* MFA was verified is usable until the 7-day JWT expires
-  (the same as any session-based auth).
+  (the same as any session-based auth). A stolen cookie from *before*
+  verification is not usable, and cannot become usable when the victim
+  verifies — the binding is per session.

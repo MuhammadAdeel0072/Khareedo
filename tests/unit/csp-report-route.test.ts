@@ -78,10 +78,14 @@ describe("POST /api/csp-report", () => {
 
   beforeEach(() => {
     warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // The tests simulate a deployment behind a trusted proxy, so each
+    // test's distinct forwarded IP gets its own bucket (Phase 2, area G).
+    process.env.TRUSTED_PROXY_IPS = "10.0.0.1";
   });
 
   afterEach(() => {
     warnSpy.mockRestore();
+    delete process.env.TRUSTED_PROXY_IPS;
   });
 
   it("answers 204 and logs one sanitised line for a valid report", async () => {

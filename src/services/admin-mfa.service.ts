@@ -19,11 +19,20 @@
 // replayed within its 30-second window — even concurrently, because the
 // update is guarded by lastUsedStep < step.
 //
-// Session binding: a successful verification sets lastVerifiedAt. The auth
-// guard requires lastVerifiedAt to be after the session's issued-at time
-// (session.iat), so each new login must verify MFA again — the same pattern
-// as PR-09's passwordChangedAt. A stolen session cookie from before MFA
-// was verified cannot be used to reach the admin panel.
+// Session binding (Phase 2, area B — M-4): a successful verification sets
+// lastVerifiedAt AND lastVerifiedSessionId (the current session's `sid`
+// claim, minted once at sign-in). The auth guard requires lastVerifiedAt
+// to be after the session's issued-at time AND lastVerifiedSessionId to
+// equal the session's `sid`, so each new login must verify MFA again —
+// the same pattern as PR-09's passwordChangedAt — and a verification
+// performed in one session cannot authorize a different session. A stolen
+// session cookie from before MFA was verified cannot be used to reach the
+// admin panel, and neither can a session stolen after the victim verified
+// in their own session. (An earlier version of this comment claimed the
+// timestamp check alone provided that protection; it did not — the binding
+// is what provides it.) Sessions issued before the `sid` change carry no
+// sid; the guard fails closed for them and the admin re-verifies once
+// after signing in again.
 import "server-only";
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import QRCode from "qrcode";
@@ -402,6 +411,13 @@ export async function activateAdminMfa(input: {
   userId: string;
   code: string;
   audit?: AdminAuditContext;
+  // Session the activation is performed in (Phase 2, area B). Stored as
+  // lastVerifiedSessionId so the activating session is MFA-verified
+  // immediately. Undefined for sessions issued before the `sid` change:
+  // activation still succeeds (MFA is enabled, which is the security
+  // property), but the session is not bound — the guard fails closed and
+  // the admin re-verifies after their next sign-in.
+  sessionSid: string | undefined;
 }): Promise<string[] | null> {
   const key = requireMfaKey();
   const mfa = await db.adminMfa.findUnique({ where: { userId: input.userId } });
@@ -442,6 +458,7 @@ export async function activateAdminMfa(input: {
           secretEncrypted: pendingBytes,
           pendingSecretEncrypted: null,
           lastVerifiedAt: now,
+          lastVerifiedSessionId: input.sessionSid ?? null,
           lastUsedStep: step,
         },
       });
@@ -474,7 +491,7 @@ export async function activateAdminMfa(input: {
   return db.$transaction(async (tx) => {
     const claimed = await tx.adminMfa.updateMany({
       where: { id: mfa.id, secretEncrypted: pendingBytes, enabledAt: null, lastUsedStep: { lt: step } },
-      data: { enabledAt: now, lastVerifiedAt: now, lastUsedStep: step },
+      data: { enabledAt: now, lastVerifiedAt: now, lastVerifiedSessionId: input.sessionSid ?? null, lastUsedStep: step },
     });
     if (claimed.count !== 1) return null;
     const codes = await createRecoveryCodes(mfa.id, tx);
@@ -497,14 +514,70 @@ export type MfaVerificationResult = "verified" | "invalid" | "not-enrolled" | "u
 
 /**
  * Verify a TOTP code (or a recovery code) for the current session. On
- * success, records lastVerifiedAt so the auth guard accepts this session.
- * A recovery code is single-use: it is consumed atomically and cannot be
- * used again. Returns "verified" only when the session is now MFA-verified.
+ * success, records lastVerifiedAt AND lastVerifiedSessionId so the auth
+ * guard accepts this session (and only this session). A recovery code is
+ * single-use: it is consumed atomically and cannot be used again. Returns
+ * "verified" only when the session is now MFA-verified. When the session
+ * carries no `sid` (issued before the sid change), verification cannot be
+ * bound to a session and returns "invalid" — the admin must sign out and
+ * sign in again, which mints a sid. The verify route turns that case into
+ * a clear message instead of a wrong-code error.
  */
+/**
+ * Validate a TOTP code or a recovery code against the stored MFA state and
+ * consume it: a matching recovery code is marked used atomically, and a
+ * valid TOTP code advances lastUsedStep (guarded, so the same code cannot
+ * be accepted twice). Does NOT record a verification — callers decide what
+ * a valid code means. Used by the session-verification path (which then
+ * records lastVerifiedAt + lastVerifiedSessionId) and by disablement
+ * (which only needs a fresh proof of possession before deleting the
+ * enrollment, and must check the code even when the session is already
+ * verified — so it cannot go through the session path's short-circuit).
+ */
+async function consumeValidAdminMfaCode(
+  mfa: {
+    id: string;
+    secretEncrypted: Uint8Array;
+    lastUsedStep: number;
+    recoveryCodes: { id: string; codeHash: string }[];
+  },
+  code: string,
+  key: Buffer
+): Promise<boolean> {
+  const clean = code.trim();
+  // Recovery codes are tried first: they are 11 chars (10 + hyphen), while
+  // TOTP codes are exactly 6 digits.
+  if (clean.length === 11) {
+    const codeHash = hashRecoveryCode(clean);
+    const match = mfa.recoveryCodes.find((c) => c.codeHash === codeHash);
+    if (!match) return false;
+    const consumed = await db.adminMfaRecoveryCode.updateMany({
+      where: { id: match.id, usedAt: null },
+      data: { usedAt: new Date() },
+    });
+    return consumed.count === 1;
+  }
+
+  let secret: string;
+  try {
+    secret = decryptTotpSecret(mfa.secretEncrypted, key);
+  } catch {
+    return false;
+  }
+  const step = verifyTotpCode(secret, clean);
+  if (step === null || step <= mfa.lastUsedStep) return false;
+  const claimed = await db.adminMfa.updateMany({
+    where: { id: mfa.id, lastUsedStep: { lt: step } },
+    data: { lastUsedStep: step },
+  });
+  return claimed.count === 1;
+}
+
 export async function verifyAdminMfaForSession(input: {
   userId: string;
   code: string;
   sessionIat: number | undefined;
+  sessionSid: string | undefined;
 }): Promise<MfaVerificationResult> {
   const key = loadAdminMfaEncryptionKey();
   if (!key) return "unavailable";
@@ -514,52 +587,48 @@ export async function verifyAdminMfaForSession(input: {
   });
   if (!mfa || !mfa.enabledAt) return "not-enrolled";
   // Already verified for this session: do not consume another code.
-  if (isMfaVerifiedForSession(mfa.lastVerifiedAt, input.sessionIat)) return "verified";
-
-  const clean = input.code.trim();
-  // Recovery codes are tried first: they are 11 chars (10 + hyphen), while
-  // TOTP codes are exactly 6 digits.
-  if (clean.length === 11) {
-    const codeHash = hashRecoveryCode(clean);
-    const match = mfa.recoveryCodes.find((c) => c.codeHash === codeHash);
-    if (match) {
-      const consumed = await db.adminMfaRecoveryCode.updateMany({
-        where: { id: match.id, usedAt: null },
-        data: { usedAt: new Date() },
-      });
-      if (consumed.count === 1) {
-        await db.adminMfa.update({
-          where: { id: mfa.id },
-          data: { lastVerifiedAt: new Date() },
-        });
-        return "verified";
-      }
-    }
-    return "invalid";
+  if (
+    isMfaVerifiedForSession(
+      mfa.lastVerifiedAt,
+      input.sessionIat,
+      mfa.lastVerifiedSessionId,
+      input.sessionSid
+    )
+  ) {
+    return "verified";
   }
+  // No session id to bind to (pre-sid token): fail closed. Binding the
+  // verification to "no session" would let the guard accept any session,
+  // which is exactly the hole the binding closes.
+  if (!input.sessionSid) return "invalid";
 
-  let secret: string;
-  try {
-    secret = decryptTotpSecret(mfa.secretEncrypted, key);
-  } catch {
-    return "invalid";
-  }
-  const step = verifyTotpCode(secret, clean);
-  if (step === null || step <= mfa.lastUsedStep) return "invalid";
-  const claimed = await db.adminMfa.updateMany({
-    where: { id: mfa.id, lastUsedStep: { lt: step } },
-    data: { lastVerifiedAt: new Date(), lastUsedStep: step },
+  const valid = await consumeValidAdminMfaCode(mfa, input.code, key);
+  if (!valid) return "invalid";
+  await db.adminMfa.update({
+    where: { id: mfa.id },
+    data: { lastVerifiedAt: new Date(), lastVerifiedSessionId: input.sessionSid },
   });
-  return claimed.count === 1 ? "verified" : "invalid";
+  return "verified";
 }
 
-/** Pure helper: is MFA verified for a session issued at `iat` (seconds)? */
+/**
+ * Pure helper: is MFA verified for a session issued at `iat` (seconds)?
+ * Mirrors the guard's copy in src/lib/auth-guard.ts — keep the two in
+ * sync. Requires the verification timestamp to be after the session's
+ * issued-at time AND the verification to be bound to this exact session
+ * (lastVerifiedSessionId === sessionSid). Fails closed when any value is
+ * missing.
+ */
 export function isMfaVerifiedForSession(
   lastVerifiedAt: Date | null,
-  iat: number | undefined
+  iat: number | undefined,
+  lastVerifiedSessionId: string | null | undefined,
+  sessionSid: string | undefined
 ): boolean {
   if (!lastVerifiedAt || typeof iat !== "number") return false;
-  return lastVerifiedAt.getTime() > iat * 1000;
+  if (lastVerifiedAt.getTime() <= iat * 1000) return false;
+  if (!lastVerifiedSessionId || !sessionSid) return false;
+  return lastVerifiedSessionId === sessionSid;
 }
 
 /**
@@ -609,17 +678,20 @@ export async function disableAdminMfa(input: {
   if (!user?.passwordHash) return false;
   const passwordValid = await bcrypt.compare(input.password, user.passwordHash);
   if (!passwordValid) return false;
-  const mfa = await db.adminMfa.findUnique({ where: { userId: input.userId }, select: { id: true, enabledAt: true } });
-  if (!mfa || !mfa.enabledAt) return false;
-  // The code must be valid before anything is deleted: verify it through
-  // the session path (which consumes a recovery code or records the step),
-  // then delete. A failed verification leaves MFA untouched.
-  const verification = await verifyAdminMfaForSession({
-    userId: input.userId,
-    code: input.code,
-    sessionIat: undefined,
+  const mfa = await db.adminMfa.findUnique({
+    where: { userId: input.userId },
+    include: { recoveryCodes: { where: { usedAt: null }, select: { id: true, codeHash: true } } },
   });
-  if (verification !== "verified") return false;
+  if (!mfa || !mfa.enabledAt) return false;
+  // The code must be valid before anything is deleted. It is checked as a
+  // fresh proof of possession (consumeValidAdminMfaCode), NOT through the
+  // session-verification path: the session is already verified here, so
+  // that path's short-circuit would accept without checking the code at
+  // all — and disablement must always re-authenticate with a code.
+  const key = loadAdminMfaEncryptionKey();
+  if (!key) return false;
+  const codeValid = await consumeValidAdminMfaCode(mfa, input.code, key);
+  if (!codeValid) return false;
   await db.adminMfa.delete({ where: { id: mfa.id } });
   if (input.audit) {
     await recordAdminAuditBestEffort(input.audit, {

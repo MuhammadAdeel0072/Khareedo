@@ -9,11 +9,16 @@ import { Loader2, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { safeCallbackUrl } from "@/lib/auth-client";
 
 export function MfaVerifyForm() {
   const router = useRouter();
   const params = useSearchParams();
-  const callbackUrl = params.get("callbackUrl") ?? "/admin";
+  // The callbackUrl comes from the query string, so it must be validated:
+  // an unvalidated value here was an open redirect (Phase 2, area C —
+  // /admin/mfa/verify?callbackUrl=https://evil.example.com would have
+  // sent the admin away after a successful verification).
+  const callbackUrl = safeCallbackUrl(params.get("callbackUrl"), "/admin");
   const [code, setCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
