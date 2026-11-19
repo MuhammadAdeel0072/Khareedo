@@ -211,6 +211,10 @@ export const authOptions: NextAuthOptions = {
         session.user.id = token.sub as string;
         session.user.role = (token.role as string) ?? "CUSTOMER";
       }
+      // Expose the JWT issued-at so the auth guard can invalidate sessions
+      // issued before a password change (PR-09). NextAuth v4 JWTs are not
+      // revocable, so this is how a reset signs out existing sessions.
+      if (typeof token.iat === "number") session.iat = token.iat;
       return session;
     },
   },

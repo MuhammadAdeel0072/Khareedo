@@ -107,6 +107,34 @@ export function isEmailDeliveryConfigured() {
   }
 }
 
+/** Send a password reset email (PR-09). Mirrors sendVerificationEmail: the
+ * reset link carries the raw token once; only its SHA-256 hash is stored.
+ * The link expires in 1 hour. Throws EmailDeliveryNotConfiguredError when
+ * SMTP is not configured. */
+export async function sendPasswordResetEmail(input: {
+  email: string;
+  name: string | null;
+  token: string;
+}) {
+  const config = smtpConfiguration();
+  const siteUrl = process.env.NEXTAUTH_URL;
+  if (!siteUrl) throw new EmailDeliveryNotConfiguredError();
+
+  const resetUrl = new URL("/reset-password", siteUrl);
+  resetUrl.searchParams.set("token", input.token);
+  const greeting = input.name ? `Hello ${escapeHtml(input.name)},` : "Hello,";
+  const link = escapeHtml(resetUrl.toString());
+
+  const transporter = getTransporter(config);
+  await transporter.sendMail({
+    from: config.from,
+    to: input.email,
+    subject: "Reset your Khareedo password",
+    text: `${input.name ? `Hello ${input.name},\n\n` : "Hello,\n\n"}Reset your Khareedo password by opening this link: ${resetUrl.toString()}\n\nThis link expires in 1 hour and can only be used once. If you did not request a password reset, you can ignore this email — your password will not change.`,
+    html: `<p>${greeting}</p><p>Reset your Khareedo password:</p><p><a href="${link}">Reset password</a></p><p>This link expires in 1 hour and can only be used once. If you did not request a password reset, you can ignore this email — your password will not change.</p>`,
+  });
+}
+
 /** Send an operator alert email (error monitoring). Reuses the same SMTP
  * configuration and pooled transporter as verification mail. The caller is
  * responsible for keeping the subject/body free of customer data, payment

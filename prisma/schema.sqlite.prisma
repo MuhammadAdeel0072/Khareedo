@@ -28,6 +28,10 @@ model User {
   image         String?
   role          String    @default("CUSTOMER") // CUSTOMER | ADMIN (see user_roles in Supabase SQL)
   emailVerified DateTime?
+  // Set whenever the password is changed (reset or admin action). The auth
+  // guard invalidates JWT sessions issued at or before this timestamp, since
+  // NextAuth v4 JWTs are not revocable (PR-09).
+  passwordChangedAt DateTime?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
@@ -37,6 +41,7 @@ model User {
   wishlistItems WishlistItem[]
   oauthAccounts OAuthAccount[]
   verificationTokens VerificationToken[]
+  passwordResetTokens PasswordResetToken[]
 
   @@index([role, createdAt])
 }
@@ -62,6 +67,24 @@ model VerificationToken {
   expiresAt DateTime
   consumedAt DateTime?
   createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// Password reset tokens (PR-09). Kept separate from VerificationToken so a
+// verification token can never be redeemed as a reset token (and vice versa).
+// Same pattern: only the SHA-256 hash is stored; the raw token is emailed
+// once and never persisted. Single-use (consumedAt) and expiring.
+model PasswordResetToken {
+  id         String    @id @default(cuid())
+  tokenHash  String    @unique
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  email      String
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
 
   @@index([userId])
   @@index([expiresAt])
