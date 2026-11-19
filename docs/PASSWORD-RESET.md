@@ -150,15 +150,36 @@ email is sent asynchronously" above).
 (one sweep; exported so tests and operators can invoke delivery directly),
 and `startEmailOutboxWorker()` (in-process 60-second sweep, single-flight,
 unref'd timer, started from `src/instrumentation.ts` alongside the payment
-maintenance worker and sharing its `PAYMENT_MAINTENANCE_WORKER=off`
-opt-out). The worker performs the account lookup (`findUserByEmail`) for
-each row, so database lookup failures are worker concerns that never reach
-the HTTP response. Rows are claimed atomically (conditional update on status +
+maintenance worker). Rows are claimed atomically (conditional update on status +
 nextAttemptAt) so two instances racing on the same row cannot both
 deliver it. The worker never logs tokens, email bodies, or customer data
-— only the outbox row id and the error name. A serverless deploy should
-use an external scheduler to invoke `deliverPendingOutboxEmails` instead
-of the in-process worker.
+— only the outbox row id and the error name.
+
+## Worker configuration
+
+Each in-process worker has its **own** opt-out environment variable, and
+they are independent — disabling one must never silently disable the other:
+
+- `PAYMENT_MAINTENANCE_WORKER=off` disables only the payment maintenance
+  worker. It does **not** disable the email outbox worker. (This was a
+  real bug in the first version of this PR: the instrumentation hook
+  returned early on this setting, which silently stopped password-reset
+  delivery too.)
+- `EMAIL_OUTBOX_WORKER=off` disables only the email outbox worker. It does
+  **not** disable the payment maintenance worker.
+- With neither set, both workers start in the normal Node.js server
+  runtime. Neither worker starts outside the Node.js runtime (e.g. Edge)
+  or during the production build phase.
+
+**Serverless deploys:** the in-process workers do not run there. Set the
+corresponding opt-out (`EMAIL_OUTBOX_WORKER=off` for the email worker,
+`PAYMENT_MAINTENANCE_WORKER=off` for the payment worker) and use an
+external scheduler to invoke delivery instead: call
+`deliverPendingOutboxEmails(batch)` for password-reset emails (and `POST
+/api/admin/payments/maintenance` for payment maintenance). If the email
+worker is disabled and no scheduler is configured, enqueued reset emails
+simply wait in the outbox — they are not lost, but they are not delivered
+until a sweep runs.
 
 ## What is NOT covered
 
@@ -180,11 +201,20 @@ of the in-process worker.
 - `tests/unit/password-reset-routes.test.ts` (11): uniform responses,
   no 503 for any address (the route never checks SMTP), 422/429
   behaviour, per-IP and per-email rate limiting.
-- `tests/unit/email-outbox.test.ts` (7): delivery looks the account up,
+- `tests/unit/email-outbox.test.ts` (9): delivery looks the account up,
   creates a hashed token and sends the email; unknown and OAuth-only
   addresses are silently discarded without sending; SMTP failure retries
   with backoff and keeps the row pending; max attempts marks FAILED and
-  captures an error; rows not yet due are not delivered.
+  captures an error; rows not yet due are not delivered; the worker
+  registers at most once per process and honours its own
+  `EMAIL_OUTBOX_WORKER=off` opt-out, which is independent of
+  `PAYMENT_MAINTENANCE_WORKER`.
+- `tests/unit/instrumentation-workers.test.ts` (6): the instrumentation
+  hook starts both workers when neither opt-out is set; disabling payment
+  maintenance does not prevent the email outbox worker from starting;
+  disabling the email worker does not prevent the payment worker from
+  starting; disabling both starts neither; neither starts outside the
+  Node.js runtime or during the production build phase.
 - `tests/unit/auth-guard-password-change.test.ts` (5): the
   session-invalidation comparison (before/after/exact-moment, missing
   values).

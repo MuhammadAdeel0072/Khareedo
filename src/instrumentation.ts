@@ -6,8 +6,17 @@
 // them, which left successfully paid checkouts PENDING whenever Safepay could not
 // deliver a webhook (e.g. any non-public origin).
 //
-// Set PAYMENT_MAINTENANCE_WORKER=off to disable (recommended for serverless deploys,
-// where an external cron should call POST /api/admin/payments/maintenance instead).
+// It also starts the email outbox worker (PR-09), which delivers password
+// reset emails enqueued by the forgot-password endpoint.
+//
+// Each worker has its OWN opt-out, and they are independent: disabling one
+// must never silently disable the other.
+// - Set PAYMENT_MAINTENANCE_WORKER=off to disable the payment worker
+//   (recommended for serverless deploys, where an external cron should call
+//   POST /api/admin/payments/maintenance instead).
+// - Set EMAIL_OUTBOX_WORKER=off to disable the email outbox worker (for
+//   serverless deploys, where an external scheduler should call
+//   deliverPendingOutboxEmails instead).
 //
 // This hook also registers process-level error capture through
 // `uncaughtExceptionMonitor` (src/lib/error-monitoring.ts). A monitor
@@ -34,23 +43,30 @@ export async function register() {
   if (process.env.NEXT_PHASE === "phase-production-build") return;
   const { registerProcessErrorMonitor } = await import("@/instrumentation-node");
   registerProcessErrorMonitor();
-  if (process.env.PAYMENT_MAINTENANCE_WORKER === "off") return;
-  try {
-    const { startPaymentMaintenanceWorker } = await import("@/services/payment-maintenance-worker.service");
-    startPaymentMaintenanceWorker();
-  } catch (error) {
-    // Server startup must never depend on the worker; the next sweep would retry.
-    captureError(error, { operation: "payment-maintenance-worker-start" });
+
+  // Payment maintenance worker. Its opt-out (PAYMENT_MAINTENANCE_WORKER=off)
+  // guards ONLY this worker: it must never prevent the email outbox worker
+  // below from starting.
+  if (process.env.PAYMENT_MAINTENANCE_WORKER !== "off") {
+    try {
+      const { startPaymentMaintenanceWorker } = await import("@/services/payment-maintenance-worker.service");
+      startPaymentMaintenanceWorker();
+    } catch (error) {
+      // Server startup must never depend on the worker; the next sweep would retry.
+      captureError(error, { operation: "payment-maintenance-worker-start" });
+    }
   }
+
   // Email outbox worker (PR-09): delivers password reset emails enqueued by
-  // the forgot-password endpoint. Shares the same opt-out as the payment
-  // worker — a serverless deploy should use an external cron/scheduler to
-  // call deliverPendingOutboxEmails instead. Server startup must never
-  // depend on it.
-  try {
-    const { startEmailOutboxWorker } = await import("@/services/email-outbox.service");
-    startEmailOutboxWorker();
-  } catch (error) {
-    captureError(error, { operation: "email-outbox-worker-start" });
+  // the forgot-password endpoint. It has its OWN opt-out,
+  // EMAIL_OUTBOX_WORKER=off — disabling payment maintenance does not disable
+  // it. Server startup must never depend on it.
+  if (process.env.EMAIL_OUTBOX_WORKER !== "off") {
+    try {
+      const { startEmailOutboxWorker } = await import("@/services/email-outbox.service");
+      startEmailOutboxWorker();
+    } catch (error) {
+      captureError(error, { operation: "email-outbox-worker-start" });
+    }
   }
 }

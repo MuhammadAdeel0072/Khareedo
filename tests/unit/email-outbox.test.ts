@@ -33,6 +33,7 @@ import {
   EMAIL_OUTBOX_MAX_ATTEMPTS,
   deliverPendingOutboxEmails,
   enqueuePasswordResetEmail,
+  startEmailOutboxWorker,
 } from "@/services/email-outbox.service";
 import { hashPasswordResetToken } from "@/services/password-reset.service";
 
@@ -202,5 +203,61 @@ describe("email outbox delivery", () => {
         email: "customer@example.com",
       },
     });
+  });
+
+  it("registers at most one worker per process and honours its own opt-out", () => {
+    const registry = globalThis as Record<symbol, unknown>;
+    const key = Symbol.for("khareedo.email-outbox-worker");
+    const previous = process.env.EMAIL_OUTBOX_WORKER;
+    const previousWorker = registry[key];
+    delete registry[key];
+    try {
+      // Its own opt-out disables it, independent of payment maintenance.
+      process.env.EMAIL_OUTBOX_WORKER = "off";
+      expect(() => startEmailOutboxWorker()).not.toThrow();
+      expect(registry[key]).toBeUndefined();
+
+      process.env.EMAIL_OUTBOX_WORKER = "on";
+      startEmailOutboxWorker();
+      const first = registry[key];
+      expect(first).toBeDefined();
+      startEmailOutboxWorker();
+      expect(registry[key]).toBe(first); // second call reused the registered worker
+      if (first && typeof first === "object" && "stop" in first) {
+        (first as { stop(): void }).stop();
+      }
+    } finally {
+      delete registry[key];
+      registry[key] = previousWorker;
+      if (previous === undefined) delete process.env.EMAIL_OUTBOX_WORKER;
+      else process.env.EMAIL_OUTBOX_WORKER = previous;
+    }
+  });
+
+  it("its own opt-out is independent of the payment maintenance opt-out", () => {
+    const registry = globalThis as Record<symbol, unknown>;
+    const key = Symbol.for("khareedo.email-outbox-worker");
+    const previousEmail = process.env.EMAIL_OUTBOX_WORKER;
+    const previousPayment = process.env.PAYMENT_MAINTENANCE_WORKER;
+    const previousWorker = registry[key];
+    delete registry[key];
+    try {
+      // Disabling payment maintenance must NOT disable the email worker.
+      process.env.PAYMENT_MAINTENANCE_WORKER = "off";
+      delete process.env.EMAIL_OUTBOX_WORKER;
+      startEmailOutboxWorker();
+      expect(registry[key]).toBeDefined();
+      const worker = registry[key];
+      if (worker && typeof worker === "object" && "stop" in worker) {
+        (worker as { stop(): void }).stop();
+      }
+    } finally {
+      delete registry[key];
+      registry[key] = previousWorker;
+      if (previousEmail === undefined) delete process.env.EMAIL_OUTBOX_WORKER;
+      else process.env.EMAIL_OUTBOX_WORKER = previousEmail;
+      if (previousPayment === undefined) delete process.env.PAYMENT_MAINTENANCE_WORKER;
+      else process.env.PAYMENT_MAINTENANCE_WORKER = previousPayment;
+    }
   });
 });

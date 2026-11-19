@@ -249,9 +249,20 @@ export function createEmailOutboxWorker(options: {
   };
 }
 
+const EMAIL_OUTBOX_WORKER_REGISTRY_KEY = Symbol.for("khareedo.email-outbox-worker");
+
+/** Wires the outbox delivery sweep and starts the worker exactly once per server process. */
 export function startEmailOutboxWorker(options: {
   intervalMs?: number;
   initialDelayMs?: number;
 } = {}): void {
-  createEmailOutboxWorker(options).start();
+  // The email outbox worker has its OWN opt-out (EMAIL_OUTBOX_WORKER=off),
+  // independent of PAYMENT_MAINTENANCE_WORKER: disabling payment
+  // maintenance must not silently disable password-reset email delivery.
+  if (process.env.EMAIL_OUTBOX_WORKER === "off") return;
+  const registry = globalThis as Record<symbol, unknown>;
+  if (registry[EMAIL_OUTBOX_WORKER_REGISTRY_KEY]) return;
+  const worker = createEmailOutboxWorker(options);
+  registry[EMAIL_OUTBOX_WORKER_REGISTRY_KEY] = worker;
+  worker.start();
 }
