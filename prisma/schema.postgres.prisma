@@ -24,6 +24,10 @@ model User {
   image         String?
   role          String    @default("CUSTOMER") // CUSTOMER | ADMIN (see user_roles in Supabase SQL)
   emailVerified DateTime?
+  // Set whenever the password is changed (reset or admin action). The auth
+  // guard invalidates JWT sessions issued at or before this timestamp, since
+  // NextAuth v4 JWTs are not revocable (PR-09).
+  passwordChangedAt DateTime?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
@@ -33,6 +37,7 @@ model User {
   wishlistItems WishlistItem[]
   oauthAccounts OAuthAccount[]
   verificationTokens VerificationToken[]
+  passwordResetTokens PasswordResetToken[]
 
   @@index([role, createdAt])
 }
@@ -61,6 +66,51 @@ model VerificationToken {
 
   @@index([userId])
   @@index([expiresAt])
+}
+
+// Password reset tokens (PR-09). Kept separate from VerificationToken so a
+// verification token can never be redeemed as a reset token (and vice versa).
+// Same pattern: only the SHA-256 hash is stored; the raw token is emailed
+// once and never persisted. Single-use (consumedAt) and expiring.
+model PasswordResetToken {
+  id         String    @id @default(cuid())
+  tokenHash  String    @unique
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  email      String
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// Email outbox (PR-09 security-review fix). Password reset emails are sent
+// asynchronously by a background worker, never synchronously from the
+// forgot-password endpoint — so the endpoint's observable behaviour (status,
+// body, timing) is identical whether or not an account exists, and SMTP
+// failures can never reveal account existence. The raw reset token is NOT
+// stored here: the worker generates it when it delivers the email, so the
+// token only ever exists in the worker's memory and in the email itself.
+// The row carries only the submitted email address — no userId, no name, no
+// account lookup result — so the row itself cannot encode whether an
+// account exists. The worker performs the account lookup after the HTTP
+// request has returned and silently discards unknown and OAuth-only
+// addresses.
+model EmailOutbox {
+  id            String    @id @default(cuid())
+  type          String // "PASSWORD_RESET"
+  email         String
+  status        String    @default("PENDING") // PENDING | FAILED
+  attempts      Int       @default(0)
+  nextAttemptAt DateTime  @default(now())
+  lastError     String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([status, nextAttemptAt])
+  @@index([createdAt])
 }
 
 model Address {

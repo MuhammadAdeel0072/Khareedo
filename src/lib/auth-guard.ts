@@ -12,6 +12,21 @@ export interface SessionUser {
   role: string;
 }
 
+/**
+ * Decide whether a JWT session is invalidated by a password change (PR-09).
+ * NextAuth v4 JWTs are not revocable, so a reset records passwordChangedAt
+ * and any session issued at or before that moment is rejected. `iat` is the
+ * JWT issued-at time in seconds; passwordChangedAt is a Date. When either
+ * value is missing the check cannot apply and the session stays valid.
+ */
+export function isSessionInvalidatedByPasswordChange(
+  passwordChangedAt: Date | null,
+  iat: number | undefined
+): boolean {
+  if (!passwordChangedAt || typeof iat !== "number") return false;
+  return passwordChangedAt.getTime() >= iat * 1000;
+}
+
 const readRequestSession = cache(async () => getServerSession(authOptions));
 
 const readRequestUser = cache(async (): Promise<SessionUser | null> => {
@@ -20,9 +35,16 @@ const readRequestUser = cache(async (): Promise<SessionUser | null> => {
   // Re-verify role from DB (protects against stale JWT role claims)
   const user = await db.user.findUnique({
     where: { id: session.user.id },
-    select: { id: true, email: true, name: true, role: true },
+    select: { id: true, email: true, name: true, role: true, passwordChangedAt: true },
   });
   if (!user) return null;
+  // Invalidate sessions issued at or before a password change (PR-09). The
+  // user must sign in again with the new password. When the session carries
+  // no issued-at time (pre-PR-09 token), the check cannot apply and the
+  // session stays valid — the token still expires on its own 7-day maxAge.
+  if (isSessionInvalidatedByPasswordChange(user.passwordChangedAt, session.iat)) {
+    return null;
+  }
   return { id: user.id, email: user.email, name: user.name, role: user.role };
 });
 

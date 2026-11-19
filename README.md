@@ -15,7 +15,7 @@ Database migrations for **Supabase PostgreSQL** ship in `prisma/migrations/` (ap
 | Storefront | Homepage (hero banners, category circles, promos, featured/new products), listing with search + category/price/stock filters + sorting + pagination, product details with gallery, ratings, related products |
 | Cart & checkout | Persistent carts for guests (cookie session) & customers, server-side pricing at every step, coupons, gift wrapping, delivery options, 4-step checkout, idempotent order placement |
 | Orders | Unique order references, confirmation page, status tracking, customer order history; order tracking requires sign-in + ownership |
-| Accounts | Email/password + Google-ready auth, profile, address book with defaults, wishlist |
+| Accounts | Email/password + Google-ready auth, profile, address book with defaults, wishlist, password reset ([docs/PASSWORD-RESET.md](docs/PASSWORD-RESET.md)) |
 | Admin | Dashboard (real DB stats + charts), products CRUD + upload, categories, inventory with validation, order status state machine, customers, banners, coupons, promotions, reports, store settings — everything configurable without code changes |
 | Integrations | WhatsApp deep links (header, float button, product & cart inquiries — clearly NOT orders), Google OAuth boundary, payments table + disabled toggle until a provider is chosen |
 | Security | Route guard (proxy) + per-route + service-layer authorization, ownership checks, rate limiting on register/checkout, zod validation everywhere, bcrypt password hashing, idempotency keys, no client-trusted prices, security response headers + report-only CSP ([docs/SECURITY-HEADERS.md](docs/SECURITY-HEADERS.md)) |
