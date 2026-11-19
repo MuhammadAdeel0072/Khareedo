@@ -97,12 +97,17 @@ model PasswordResetToken {
 // each new session must verify MFA again (same pattern as PR-09's
 // passwordChangedAt). lastUsedStep is the TOTP time step of the last accepted
 // code, for replay protection: a code from the same or an earlier step is
-// rejected.
+// rejected. pendingSecretEncrypted holds a replacement secret while a
+// replacement enrollment is in progress (PR-10 security fix): the ACTIVE
+// secret stays in secretEncrypted until the replacement is verified, so a
+// failed or abandoned replacement never disables MFA or invalidates the
+// active secret or recovery codes.
 model AdminMfa {
   id              String    @id @default(cuid())
   userId          String    @unique
   user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   secretEncrypted Bytes
+  pendingSecretEncrypted Bytes?
   enabledAt       DateTime?
   lastVerifiedAt  DateTime?
   lastUsedStep    Int       @default(0)

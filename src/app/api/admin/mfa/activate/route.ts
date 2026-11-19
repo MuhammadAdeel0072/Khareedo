@@ -1,9 +1,18 @@
-// Admin MFA activation (PR-10). Verifies the first TOTP code from the
-// enrolled secret and, on success, enables MFA and returns the recovery
-// codes — shown to the admin once, never stored or logged. The codes are
-// the admin's only fallback if they lose their authenticator, so the UI
-// must require the admin to confirm they saved them. A failed code does not
-// enable MFA and does not consume anything.
+// Admin MFA activation (PR-10). Verifies a TOTP code and, on success,
+// enables MFA and returns the recovery codes — shown to the admin once,
+// never stored or logged. The codes are the admin's only fallback if they
+// lose their authenticator, so the UI must require the admin to confirm
+// they saved them. A failed code does not enable MFA and does not consume
+// anything.
+//
+// Two cases (P1 fix): first-time activation (enables a pending enrollment)
+// and replacement activation (a pending replacement secret was started via
+// POST /api/admin/mfa/replace after password + current-code
+// reauthentication; success atomically swaps the new secret in and rotates
+// the recovery codes, keeping MFA enabled). Activating an already-active
+// MFA with no pending replacement returns 400 — it must not regenerate
+// recovery codes, which would bypass the requireAdminMfaVerified gate of
+// the recovery-codes endpoint.
 // Rate-limited per admin (5/15min) and per IP (10/15min).
 import { z } from "zod";
 import { requireAdmin } from "@/lib/auth-guard";

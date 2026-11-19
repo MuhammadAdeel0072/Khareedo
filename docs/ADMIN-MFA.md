@@ -39,9 +39,38 @@ orders, and Safepay flows are unchanged.
    success, enables MFA and returns 10 recovery codes. The codes are shown
    **once**; the admin must confirm they saved them before continuing.
 
-Re-enrollment (starting setup again while MFA is enabled) replaces the
-secret and discards previous recovery codes; the admin must verify a code
-from the new secret to re-enable MFA.
+Re-enrollment is first-time only. Starting setup again while MFA is
+already enabled is refused (403, `MFA_ALREADY_ENABLED`): a password-only
+session must never be able to replace an active enrollment (P1 fix — a
+stolen admin password alone could previously take over MFA by
+re-enrolling). To change authenticators, an admin uses the replacement
+flow below.
+
+### Replacing an authenticator (active MFA)
+
+1. The admin is signed in with an MFA-verified session and opens
+   `/admin/mfa/setup` → "Replace authenticator".
+2. The admin enters their current password AND a code from the current
+   authenticator (or a recovery code). The server verifies both
+   (`POST /api/admin/mfa/replace`, `requireAdminMfaVerified` + fresh
+   reauthentication).
+3. On success the server generates a new secret and stores it as a
+   **pending** replacement (`pendingSecretEncrypted`); the active secret,
+   `enabledAt`, `lastVerifiedAt`, and recovery codes are all preserved.
+   The new QR code and manual key are returned.
+4. The admin scans the new QR code and verifies a code from the new
+   authenticator (`POST /api/admin/mfa/activate`). Success atomically
+   swaps the pending secret into place (in a transaction with the
+   recovery-code rotation), keeps MFA enabled, and invalidates the old
+   recovery codes, issuing a fresh set shown once.
+5. A failed or abandoned replacement changes nothing: the active secret
+   and recovery codes keep working, and the pending secret is simply
+   ignored (starting another replacement overwrites it).
+
+Activating an already-active MFA with no pending replacement returns
+400: activation must not regenerate recovery codes on an active
+enrollment, which would bypass the `requireAdminMfaVerified` gate of the
+recovery-codes endpoint.
 
 ### Login with MFA
 
@@ -167,7 +196,7 @@ record break-glass resets in the operator's own log.)
   `isMfaVerifiedForSession()`, `MfaRequiredError`.
 - `src/lib/api.ts` — `handleRoute` includes the MFA error code in the
   response so the frontend can redirect to setup or verify.
-- `src/app/api/admin/mfa/` — `status` (GET), `setup`, `activate`,
+- `src/app/api/admin/mfa/` — `status` (GET), `setup`, `replace`, `activate`,
   `verify`, `recovery-codes`, `disable` (POST).
 - `src/app/admin/mfa/setup/page.tsx`, `src/app/admin/mfa/verify/page.tsx`
   — MFA pages (outside the admin panel layout so they stay reachable).

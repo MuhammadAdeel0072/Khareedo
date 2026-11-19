@@ -141,6 +141,7 @@ describe("admin MFA service", () => {
       id: "mfa-1",
       userId: ADMIN_ID,
       secretEncrypted: encryptTotpSecret(secret, key),
+      pendingSecretEncrypted: null,
       enabledAt: null,
       lastUsedStep: 0,
     });
@@ -171,6 +172,7 @@ describe("admin MFA service", () => {
       id: "mfa-1",
       userId: ADMIN_ID,
       secretEncrypted: encryptTotpSecret(secret, key),
+      pendingSecretEncrypted: null,
       enabledAt: null,
       lastUsedStep: 0,
     });
@@ -190,6 +192,7 @@ describe("admin MFA service", () => {
       id: "mfa-1",
       userId: ADMIN_ID,
       secretEncrypted: encryptTotpSecret(secret, key),
+      pendingSecretEncrypted: null,
       enabledAt: null,
       lastUsedStep: step, // this step was already used
     });
@@ -209,6 +212,7 @@ describe("admin MFA service", () => {
       id: "mfa-1",
       userId: ADMIN_ID,
       secretEncrypted: encryptTotpSecret(secret, key),
+      pendingSecretEncrypted: null,
       enabledAt: new Date("2026-11-19T09:00:00.000Z"),
       lastVerifiedAt: null,
       lastUsedStep: 0,
@@ -232,6 +236,7 @@ describe("admin MFA service", () => {
       id: "mfa-1",
       userId: ADMIN_ID,
       secretEncrypted: encryptTotpSecret(secret, key),
+      pendingSecretEncrypted: null,
       enabledAt: new Date("2026-11-19T09:00:00.000Z"),
       lastVerifiedAt: null,
       lastUsedStep: step, // already used
@@ -255,6 +260,7 @@ describe("admin MFA service", () => {
       id: "mfa-1",
       userId: ADMIN_ID,
       secretEncrypted: encryptTotpSecret(secret, key),
+      pendingSecretEncrypted: null,
       enabledAt: new Date("2026-11-19T09:00:00.000Z"),
       lastVerifiedAt: null,
       lastUsedStep: 0,
@@ -282,6 +288,7 @@ describe("admin MFA service", () => {
       id: "mfa-1",
       userId: ADMIN_ID,
       secretEncrypted: encryptTotpSecret(secret, key),
+      pendingSecretEncrypted: null,
       enabledAt: new Date("2026-11-19T09:00:00.000Z"),
       lastVerifiedAt: null,
       lastUsedStep: 0,
@@ -350,6 +357,7 @@ describe("admin MFA service", () => {
       id: "mfa-1",
       userId: ADMIN_ID,
       secretEncrypted: encryptTotpSecret(secret, key),
+      pendingSecretEncrypted: null,
       enabledAt: new Date("2026-11-19T09:00:00.000Z"),
       lastVerifiedAt: null,
       lastUsedStep: 0,
@@ -384,6 +392,7 @@ describe("admin MFA service", () => {
       id: "mfa-1",
       userId: ADMIN_ID,
       secretEncrypted: encryptTotpSecret(secret, key),
+      pendingSecretEncrypted: null,
       enabledAt: new Date("2026-11-19T09:00:00.000Z"),
       lastVerifiedAt: null,
       lastUsedStep: 0,

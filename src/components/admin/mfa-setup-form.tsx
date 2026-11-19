@@ -1,10 +1,13 @@
 "use client";
 
-// Admin MFA setup — enrollment, activation, recovery codes, disablement (PR-10).
-// Steps: (1) start enrollment (QR code + manual key), (2) verify the first
-// TOTP code to activate, (3) save the recovery codes (shown once). When MFA
-// is already enabled this form shows status and offers recovery-code
-// regeneration and disablement (both require reauthentication).
+// Admin MFA setup — enrollment, activation, replacement, recovery codes,
+// disablement (PR-10). Steps: (1) start enrollment (QR code + manual key),
+// (2) verify the first TOTP code to activate, (3) save the recovery codes
+// (shown once). When MFA is already enabled this form shows status and
+// offers recovery-code regeneration, authenticator replacement (requires
+// the current password and a code from the current authenticator; the old
+// authenticator keeps working until the new one is verified), and
+// disablement (requires reauthentication).
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
@@ -49,6 +52,13 @@ export function MfaSetupForm({ initialStatus }: { initialStatus: MfaStatus }) {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  // Replacement flow (active MFA only): reauthentication inputs and the new
+  // pending secret's QR code. The old authenticator keeps working until
+  // the new one is verified via activate.
+  const [replacePassword, setReplacePassword] = useState("");
+  const [replaceCode, setReplaceCode] = useState("");
+  const [replacementQr, setReplacementQr] = useState<string | null>(null);
+  const [replacementKey, setReplacementKey] = useState<string | null>(null);
 
   async function loadStatus() {
     setLoading(true);
@@ -86,6 +96,10 @@ export function MfaSetupForm({ initialStatus }: { initialStatus: MfaStatus }) {
       const data = await api<{ recoveryCodes: string[] }>("/api/admin/mfa/activate", { code });
       setRecoveryCodes(data.recoveryCodes);
       setSavedRecoveryCodes(false);
+      setReplacementQr(null);
+      setReplacementKey(null);
+      setReplacePassword("");
+      setReplaceCode("");
       await loadStatus();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not activate MFA.");
@@ -125,6 +139,26 @@ export function MfaSetupForm({ initialStatus }: { initialStatus: MfaStatus }) {
       await loadStatus();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not disable MFA.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function startReplacement(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setNotice(null);
+    setBusy(true);
+    try {
+      const data = await api<{ qrCodeDataUrl: string; manualKey: string }>("/api/admin/mfa/replace", {
+        password: replacePassword,
+        code: replaceCode,
+      });
+      setReplacementQr(data.qrCodeDataUrl);
+      setReplacementKey(data.manualKey);
+      setCode("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not start replacement.");
     } finally {
       setBusy(false);
     }
@@ -202,6 +236,92 @@ export function MfaSetupForm({ initialStatus }: { initialStatus: MfaStatus }) {
           <p className="mt-2 text-xs text-muted-foreground">
             Regenerating invalidates all previous recovery codes immediately.
           </p>
+        </div>
+        <div className="rounded-2xl border bg-card p-6 shadow-sm">
+          <h2 className="text-lg font-bold">Replace authenticator</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Moving to a new phone or authenticator app? Enter your current password and a code from your current
+            authenticator (or a recovery code). Your current authenticator keeps working until the new one is
+            verified, and your recovery codes stay valid until then.
+          </p>
+          {!replacementQr ? (
+            <form onSubmit={startReplacement} className="mt-4 space-y-4" noValidate>
+              <div>
+                <Label htmlFor="mfa-replace-password">Current password</Label>
+                <Input
+                  id="mfa-replace-password"
+                  type="password"
+                  value={replacePassword}
+                  onChange={(e) => setReplacePassword(e.target.value)}
+                  autoComplete="current-password"
+                  required
+                  className="mt-1.5 h-11"
+                />
+              </div>
+              <div>
+                <Label htmlFor="mfa-replace-code">Current authenticator code or recovery code</Label>
+                <Input
+                  id="mfa-replace-code"
+                  type="text"
+                  inputMode="numeric"
+                  value={replaceCode}
+                  onChange={(e) => setReplaceCode(e.target.value)}
+                  placeholder="123456 or XXXX-XXXXX"
+                  autoComplete="one-time-code"
+                  required
+                  className="mt-1.5 h-11"
+                />
+              </div>
+              <Button type="submit" className="h-11 w-full" disabled={busy}>
+                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : "Start replacement — show new QR code"}
+              </Button>
+            </form>
+          ) : (
+            <div className="mt-4">
+              <div className="flex justify-center rounded-xl bg-white p-4">
+                <Image src={replacementQr} alt="Replacement MFA setup QR code" width={220} height={220} />
+              </div>
+              <p className="mt-4 text-sm text-muted-foreground">
+                Or enter this key manually in your new authenticator app:
+              </p>
+              <code className="mt-1 block break-all rounded-lg bg-muted p-3 font-mono text-sm">
+                {replacementKey}
+              </code>
+              <form onSubmit={activate} className="mt-4 space-y-4" noValidate>
+                <div>
+                  <Label htmlFor="mfa-replace-activate-code">6-digit code from your new authenticator app</Label>
+                  <Input
+                    id="mfa-replace-activate-code"
+                    type="text"
+                    inputMode="numeric"
+                    value={code}
+                    onChange={(e) => setCode(e.target.value.replace(/[^0-9]/g, "").slice(0, 6))}
+                    placeholder="123456"
+                    autoComplete="one-time-code"
+                    required
+                    className="mt-1.5 h-11"
+                  />
+                </div>
+                <Button type="submit" className="h-11 w-full" disabled={busy || code.length !== 6}>
+                  {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : "Verify and switch to new authenticator"}
+                </Button>
+              </form>
+              <Button
+                variant="ghost"
+                className="mt-2 h-11 w-full"
+                disabled={busy}
+                onClick={() => {
+                  setReplacementQr(null);
+                  setReplacementKey(null);
+                  setReplacePassword("");
+                  setReplaceCode("");
+                  setNotice("Replacement abandoned. Your current authenticator and recovery codes still work.");
+                }}
+              >
+                Cancel replacement
+              </Button>
+            </div>
+          )}
         </div>
         <div className="rounded-2xl border bg-card p-6 shadow-sm">
           <h2 className="text-lg font-bold">Disable MFA</h2>

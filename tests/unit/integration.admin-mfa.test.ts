@@ -32,8 +32,10 @@ import {
   decryptTotpSecret,
   disableAdminMfa,
   getAdminMfaStatus,
+  MfaAlreadyEnabledError,
   regenerateAdminMfaRecoveryCodes,
   startAdminMfaEnrollment,
+  startAdminMfaReplacement,
   verifyAdminMfaForSession,
 } from "@/services/admin-mfa.service";
 
@@ -177,5 +179,202 @@ describe("admin MFA lifecycle (integration)", () => {
     expect(mfa!.enabledAt).toBeNull();
     // Clean up so the next test starts fresh.
     await db.adminMfa.delete({ where: { id: mfa!.id } });
+  });
+});
+
+describe("admin MFA replacement (P1 fix)", () => {
+  // Enroll + activate, returning the active secret and recovery codes.
+  async function enableMfa() {
+    const enrollment = await startAdminMfaEnrollment({ userId: adminId, email: adminEmail });
+    const step = totpTimeStep();
+    const recoveryCodes = await activateAdminMfa({
+      userId: adminId,
+      code: totpCodeForStep(enrollment.manualKey, step),
+    });
+    expect(recoveryCodes).toHaveLength(10);
+    return { secret: enrollment.manualKey, recoveryCodes: recoveryCodes! };
+  }
+
+  async function cleanupMfa() {
+    await db.adminMfaRecoveryCode.deleteMany({ where: { mfa: { userId: adminId } } });
+    await db.adminMfa.deleteMany({ where: { userId: adminId } });
+  }
+
+  // A fresh session issued in the future, so verifyAdminMfaForSession
+  // actually checks the code instead of short-circuiting.
+  function freshSessionIat() {
+    return Math.floor(Date.now() / 1000) + 3600;
+  }
+
+  it("first-time enrollment continues to work", async () => {
+    const { secret, recoveryCodes } = await enableMfa();
+    const status = await getAdminMfaStatus(adminId);
+    expect(status.enabled).toBe(true);
+    expect(status.unusedRecoveryCodes).toBe(10);
+    // The active secret verifies for a fresh session.
+    const code = totpCodeForStep(secret, totpTimeStep() + 1);
+    expect(await verifyAdminMfaForSession({ userId: adminId, code, sessionIat: freshSessionIat() })).toBe(
+      "verified"
+    );
+    expect(recoveryCodes).toHaveLength(10);
+    await cleanupMfa();
+  });
+
+  it("setup refuses to replace an active enrollment (password-only session cannot take over MFA)", async () => {
+    await enableMfa();
+    // startAdminMfaEnrollment is the service behind POST /api/admin/mfa/setup,
+    // which uses requireAdmin (role only, no MFA check). It must refuse.
+    await expect(startAdminMfaEnrollment({ userId: adminId, email: adminEmail })).rejects.toBeInstanceOf(
+      MfaAlreadyEnabledError
+    );
+    // Nothing changed: MFA is still enabled with the same secret.
+    const status = await getAdminMfaStatus(adminId);
+    expect(status.enabled).toBe(true);
+    await cleanupMfa();
+  });
+
+  it("replacement requires the current password and a valid current code", async () => {
+    const { secret, recoveryCodes } = await enableMfa();
+    const currentCode = totpCodeForStep(secret, totpTimeStep() + 1);
+    // Wrong password.
+    expect(
+      await startAdminMfaReplacement({
+        userId: adminId,
+        email: adminEmail,
+        password: "wrong-password",
+        code: currentCode,
+      })
+    ).toBeNull();
+    // Wrong code.
+    expect(
+      await startAdminMfaReplacement({
+        userId: adminId,
+        email: adminEmail,
+        password: ADMIN_PASSWORD,
+        code: "000000",
+      })
+    ).toBeNull();
+    // No pending replacement was created by either failure.
+    const mfa = await db.adminMfa.findUnique({ where: { userId: adminId } });
+    expect(mfa!.pendingSecretEncrypted).toBeNull();
+    expect(mfa!.enabledAt).not.toBeNull();
+    expect(recoveryCodes).toHaveLength(10);
+    await cleanupMfa();
+  });
+
+  it("rejected replacement attempts leave MFA enabled and recovery codes valid", async () => {
+    const { secret, recoveryCodes } = await enableMfa();
+    const currentCode = totpCodeForStep(secret, totpTimeStep() + 1);
+    await startAdminMfaReplacement({
+      userId: adminId,
+      email: adminEmail,
+      password: "wrong-password",
+      code: currentCode,
+    });
+    await startAdminMfaReplacement({
+      userId: adminId,
+      email: adminEmail,
+      password: ADMIN_PASSWORD,
+      code: "000000",
+    });
+    await expect(startAdminMfaEnrollment({ userId: adminId, email: adminEmail })).rejects.toBeInstanceOf(
+      MfaAlreadyEnabledError
+    );
+    // MFA is still enabled, the active secret still verifies, and an old
+    // recovery code still works.
+    const status = await getAdminMfaStatus(adminId);
+    expect(status.enabled).toBe(true);
+    expect(status.unusedRecoveryCodes).toBe(10);
+    const stillValid = await verifyAdminMfaForSession({
+      userId: adminId,
+      code: totpCodeForStep(secret, totpTimeStep() + 1),
+      sessionIat: freshSessionIat(),
+    });
+    expect(stillValid).toBe("verified");
+    const codeStillWorks = await verifyAdminMfaForSession({
+      userId: adminId,
+      code: recoveryCodes[0],
+      sessionIat: freshSessionIat(),
+    });
+    expect(codeStillWorks).toBe("verified");
+    await cleanupMfa();
+  });
+
+  it("a successful authorized replacement swaps the secret and invalidates old recovery codes", async () => {
+    const { secret: oldSecret, recoveryCodes: oldCodes } = await enableMfa();
+    // Start the replacement with the password and a recovery code (the
+    // current-code proof). The active secret stays in place.
+    const replacement = await startAdminMfaReplacement({
+      userId: adminId,
+      email: adminEmail,
+      password: ADMIN_PASSWORD,
+      code: oldCodes[0],
+    });
+    expect(replacement).not.toBeNull();
+    expect(replacement!.manualKey).toMatch(/^[A-Z2-7]{32}$/);
+    expect(replacement!.manualKey).not.toBe(oldSecret);
+    let mfa = await db.adminMfa.findUnique({ where: { userId: adminId } });
+    expect(mfa!.enabledAt).not.toBeNull();
+    expect(mfa!.pendingSecretEncrypted).not.toBeNull();
+    // The active secret is untouched while the replacement is pending.
+    const key = Buffer.from(TEST_KEY, "base64");
+    expect(decryptTotpSecret(mfa!.secretEncrypted, key)).toBe(oldSecret);
+    // The old recovery codes are still valid while the replacement is pending
+    // (one was consumed as the replacement proof, the rest remain).
+    expect((await getAdminMfaStatus(adminId)).unusedRecoveryCodes).toBe(9);
+
+    // Activate with a code from the NEW secret: the swap is atomic, MFA
+    // stays enabled, and the old recovery codes are invalidated.
+    const newCodes = await activateAdminMfa({
+      userId: adminId,
+      code: totpCodeForStep(replacement!.manualKey, totpTimeStep()),
+    });
+    expect(newCodes).toHaveLength(10);
+    mfa = await db.adminMfa.findUnique({ where: { userId: adminId } });
+    expect(mfa!.enabledAt).not.toBeNull();
+    expect(mfa!.pendingSecretEncrypted).toBeNull();
+    expect(decryptTotpSecret(mfa!.secretEncrypted, key)).toBe(replacement!.manualKey);
+    // The new secret verifies; the old secret and old recovery codes do not.
+    const newWorks = await verifyAdminMfaForSession({
+      userId: adminId,
+      code: totpCodeForStep(replacement!.manualKey, totpTimeStep() + 1),
+      sessionIat: freshSessionIat(),
+    });
+    expect(newWorks).toBe("verified");
+    const oldSecretWorks = await verifyAdminMfaForSession({
+      userId: adminId,
+      code: totpCodeForStep(oldSecret, totpTimeStep() + 1),
+      sessionIat: freshSessionIat(),
+    });
+    expect(oldSecretWorks).toBe("invalid");
+    const oldCodeWorks = await verifyAdminMfaForSession({
+      userId: adminId,
+      code: oldCodes[1],
+      sessionIat: freshSessionIat(),
+    });
+    expect(oldCodeWorks).toBe("invalid");
+    await cleanupMfa();
+  });
+
+  it("activation of an already-active MFA without a pending replacement is rejected", async () => {
+    const { secret, recoveryCodes } = await enableMfa();
+    // A valid code from the active secret must NOT re-activate (and must
+    // not regenerate recovery codes — that would bypass the
+    // requireAdminMfaVerified gate of the recovery-codes endpoint).
+    const result = await activateAdminMfa({
+      userId: adminId,
+      code: totpCodeForStep(secret, totpTimeStep() + 1),
+    });
+    expect(result).toBeNull();
+    const status = await getAdminMfaStatus(adminId);
+    expect(status.enabled).toBe(true);
+    expect(status.unusedRecoveryCodes).toBe(10);
+    const codeStillWorks = await verifyAdminMfaForSession({
+      userId: adminId,
+      code: recoveryCodes[0],
+      sessionIat: freshSessionIat(),
+    });
+    expect(codeStillWorks).toBe("verified");
+    await cleanupMfa();
   });
 });

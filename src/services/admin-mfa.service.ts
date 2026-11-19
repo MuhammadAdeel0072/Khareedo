@@ -49,6 +49,15 @@ export class MfaNotEnrolledError extends Error {
   }
 }
 
+export class MfaAlreadyEnabledError extends Error {
+  constructor(
+    message = "Administrator MFA is already enabled. Use the replacement flow to change authenticators."
+  ) {
+    super(message);
+    this.name = "MfaAlreadyEnabledError";
+  }
+}
+
 /** Load the MFA encryption key (32 bytes, base64) or null when unconfigured. */
 export function loadAdminMfaEncryptionKey(
   env: Readonly<Record<string, string | undefined>> = process.env
@@ -147,11 +156,16 @@ export async function getAdminMfaStatus(userId: string): Promise<AdminMfaStatus>
 }
 
 /**
- * Start (or restart) MFA enrollment. Generates a fresh secret, encrypts and
- * stores it (replacing any pending enrollment), and returns the QR code data
- * URL plus the manual setup key. MFA is NOT enabled until the admin verifies
- * a first code via activateAdminMfa. Throws MfaUnavailableError when the
- * encryption key is not configured.
+ * Start (or restart) FIRST-TIME MFA enrollment. Generates a fresh secret,
+ * encrypts and stores it (replacing any pending enrollment), and returns
+ * the QR code data URL plus the manual setup key. MFA is NOT enabled until
+ * the admin verifies a first code via activateAdminMfa. Throws
+ * MfaAlreadyEnabledError when MFA is already active: the initial setup
+ * endpoint must NEVER replace an active enrollment (P1 fix) — a
+ * password-only session must not be able to take over MFA. Active
+ * enrollment changes go through startAdminMfaReplacement, which requires
+ * the current password and a valid current code. Throws
+ * MfaUnavailableError when the encryption key is not configured.
  */
 export async function startAdminMfaEnrollment(input: { userId: string; email: string }): Promise<{
   qrCodeDataUrl: string;
@@ -159,6 +173,13 @@ export async function startAdminMfaEnrollment(input: { userId: string; email: st
   otpauthUrl: string;
 }> {
   const key = requireMfaKey();
+  // Refuse to touch an active enrollment. A pending (never-enabled)
+  // enrollment may be restarted; there is no active secret to protect.
+  const existing = await db.adminMfa.findUnique({
+    where: { userId: input.userId },
+    select: { enabledAt: true },
+  });
+  if (existing?.enabledAt) throw new MfaAlreadyEnabledError();
   const secret = generateTotpSecret();
   const otpauthUrl = totpAuthUrl({ issuer: MFA_ISSUER, account: input.email, secret });
   const qrCodeDataUrl = await QRCode.toDataURL(otpauthUrl, { errorCorrectionLevel: "M", margin: 2 });
@@ -167,42 +188,175 @@ export async function startAdminMfaEnrollment(input: { userId: string; email: st
     create: {
       userId: input.userId,
       secretEncrypted: encryptTotpSecret(secret, key),
+      pendingSecretEncrypted: null,
       enabledAt: null,
       lastVerifiedAt: null,
       lastUsedStep: 0,
     },
     update: {
       secretEncrypted: encryptTotpSecret(secret, key),
+      pendingSecretEncrypted: null,
       enabledAt: null,
       lastVerifiedAt: null,
       lastUsedStep: 0,
     },
   });
-  // Re-enrollment discards any previous recovery codes: they belonged to the
-  // old secret and must not survive a secret change.
+  // A fresh first-time enrollment has no recovery codes yet (they are
+  // issued at activation). Any stale codes from a previous enrollment are
+  // discarded here; the active enrollment (if any) is untouched because
+  // the guard above already rejected it.
   const mfa = await db.adminMfa.findUnique({ where: { userId: input.userId }, select: { id: true } });
   if (mfa) await db.adminMfaRecoveryCode.deleteMany({ where: { mfaId: mfa.id } });
   return { qrCodeDataUrl, manualKey: secret, otpauthUrl };
 }
 
 /**
- * Activate MFA after enrollment: verify the first TOTP code, mark MFA
- * enabled, and generate the recovery codes (returned once, never stored).
- * Returns null when the code is invalid, expired, or a replay.
+ * Verify a TOTP code or recovery code against the ACTIVE MFA secret, for
+ * reauthentication flows (replacement enrollment). This is a fresh check:
+ * it does not short-circuit on an already-verified session, and it does
+ * not set lastVerifiedAt. A TOTP code is checked only (lastUsedStep is
+ * not advanced — the step counter belongs to the secret being replaced,
+ * and advancing it would reject the replacement activation code from the
+ * same 30-second window). A recovery code is single-use and is consumed
+ * on success. Returns false when MFA is not active or the code is wrong.
+ */
+export async function verifyActiveMfaCode(input: { userId: string; code: string }): Promise<boolean> {
+  const key = loadAdminMfaEncryptionKey();
+  if (!key) return false;
+  const mfa = await db.adminMfa.findUnique({
+    where: { userId: input.userId },
+    include: { recoveryCodes: { where: { usedAt: null }, select: { id: true, codeHash: true } } },
+  });
+  if (!mfa || !mfa.enabledAt) return false;
+  const clean = input.code.trim();
+  if (clean.length === 11) {
+    const codeHash = hashRecoveryCode(clean);
+    const match = mfa.recoveryCodes.find((c) => c.codeHash === codeHash);
+    if (!match) return false;
+    const consumed = await db.adminMfaRecoveryCode.updateMany({
+      where: { id: match.id, usedAt: null },
+      data: { usedAt: new Date() },
+    });
+    return consumed.count === 1;
+  }
+  let secret: string;
+  try {
+    secret = decryptTotpSecret(mfa.secretEncrypted, key);
+  } catch {
+    return false;
+  }
+  const step = verifyTotpCode(secret, clean);
+  if (step === null || step <= mfa.lastUsedStep) return false;
+  return true;
+}
+
+/**
+ * Start a REPLACEMENT enrollment for an already-active MFA. Requires the
+ * admin's current password AND a valid current TOTP code or recovery code
+ * (fresh reauthentication). On success, generates a new secret and stores
+ * it as a PENDING replacement (pendingSecretEncrypted); the ACTIVE secret,
+ * enabledAt, lastVerifiedAt, and recovery codes are all preserved, so a
+ * failed or abandoned replacement never disables MFA or invalidates the
+ * active secret or codes. The replacement is completed by verifying a code
+ * from the new secret via activateAdminMfa, which atomically swaps it in.
+ * Returns null when MFA is not active, the password is wrong, or the
+ * current code is invalid. Throws MfaUnavailableError when the encryption
+ * key is not configured.
+ */
+export async function startAdminMfaReplacement(input: {
+  userId: string;
+  email: string;
+  password: string;
+  code: string;
+}): Promise<{ qrCodeDataUrl: string; manualKey: string; otpauthUrl: string } | null> {
+  const key = requireMfaKey();
+  const mfa = await db.adminMfa.findUnique({
+    where: { userId: input.userId },
+    select: { id: true, enabledAt: true },
+  });
+  if (!mfa || !mfa.enabledAt) return null;
+  const user = await db.user.findUnique({ where: { id: input.userId }, select: { passwordHash: true } });
+  if (!user?.passwordHash) return null;
+  const passwordValid = await bcrypt.compare(input.password, user.passwordHash);
+  if (!passwordValid) return null;
+  const codeValid = await verifyActiveMfaCode({ userId: input.userId, code: input.code });
+  if (!codeValid) return null;
+  const secret = generateTotpSecret();
+  const otpauthUrl = totpAuthUrl({ issuer: MFA_ISSUER, account: input.email, secret });
+  const qrCodeDataUrl = await QRCode.toDataURL(otpauthUrl, { errorCorrectionLevel: "M", margin: 2 });
+  await db.adminMfa.update({
+    where: { id: mfa.id },
+    data: { pendingSecretEncrypted: encryptTotpSecret(secret, key) },
+  });
+  return { qrCodeDataUrl, manualKey: secret, otpauthUrl };
+}
+
+/**
+ * Activate MFA after enrollment: verify a TOTP code against the pending
+ * secret, mark MFA enabled, and generate the recovery codes (returned once,
+ * never stored). Returns null when the code is invalid, expired, or a
+ * replay.
+ *
+ * Two cases (P1 fix):
+ * - First-time enrollment: no pending replacement and enabledAt is null.
+ *   The code is verified against secretEncrypted; success sets enabledAt.
+ * - Replacement enrollment: pendingSecretEncrypted is set (started via
+ *   startAdminMfaReplacement after password + current-code reauthentication).
+ *   The code is verified against the PENDING secret; success atomically
+ *   swaps it into secretEncrypted (in a transaction with the recovery-code
+ *   rotation), keeps enabledAt (MFA stays enabled), and invalidates the
+ *   old recovery codes. The active secret is never touched until the
+ *   replacement code verifies, so a failed or abandoned replacement leaves
+ *   the active MFA fully intact.
+ * - MFA already active with no pending replacement: returns null. This
+ *   closes a bypass where activate could otherwise regenerate recovery
+ *   codes on an active enrollment without the requireAdminMfaVerified
+ *   gate of the recovery-codes endpoint.
  */
 export async function activateAdminMfa(input: { userId: string; code: string }): Promise<string[] | null> {
   const key = requireMfaKey();
   const mfa = await db.adminMfa.findUnique({ where: { userId: input.userId } });
   if (!mfa) return null;
+  const isReplacement = mfa.pendingSecretEncrypted !== null;
+  if (!isReplacement && mfa.enabledAt) return null;
+  const pendingBytes = isReplacement ? mfa.pendingSecretEncrypted : mfa.secretEncrypted;
+  if (pendingBytes === null) return null;
   let secret: string;
   try {
-    secret = decryptTotpSecret(mfa.secretEncrypted, key);
+    secret = decryptTotpSecret(pendingBytes, key);
   } catch {
     return null;
   }
   const step = verifyTotpCode(secret, input.code);
-  if (step === null || step <= mfa.lastUsedStep) return null;
+  if (step === null) return null;
+  // Replay check applies only to first-time activation: lastUsedStep
+  // belongs to the secret being replaced, so comparing a new secret's step
+  // against it would wrongly reject a valid code from the same 30-second
+  // window. The replacement swap resets the counter to this step instead.
+  if (!isReplacement && step <= mfa.lastUsedStep) return null;
   const now = new Date();
+  if (isReplacement) {
+    // Atomic swap: the new secret becomes active, the pending slot is
+    // cleared, MFA stays enabled, and the old recovery codes are rotated.
+    // The pendingSecretEncrypted guard makes the swap single-flight: the
+    // first activation clears the slot, so a concurrent one matches nothing.
+    const swapped = await db.$transaction(async (tx) => {
+      const claimed = await tx.adminMfa.updateMany({
+        where: { id: mfa.id, pendingSecretEncrypted: { not: null } },
+        data: {
+          secretEncrypted: pendingBytes,
+          pendingSecretEncrypted: null,
+          lastVerifiedAt: now,
+          lastUsedStep: step,
+        },
+      });
+      if (claimed.count !== 1) return false;
+      await tx.adminMfaRecoveryCode.deleteMany({ where: { mfaId: mfa.id } });
+      return true;
+    });
+    if (!swapped) return null;
+    return createRecoveryCodes(mfa.id);
+  }
   const claimed = await db.adminMfa.updateMany({
     where: { id: mfa.id, lastUsedStep: { lt: step } },
     data: { enabledAt: now, lastVerifiedAt: now, lastUsedStep: step },

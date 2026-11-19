@@ -11,6 +11,7 @@ CREATE TABLE "AdminMfa" (
   "id" TEXT NOT NULL,
   "userId" TEXT NOT NULL,
   "secretEncrypted" BYTEA NOT NULL,
+  "pendingSecretEncrypted" BYTEA,
   "enabledAt" TIMESTAMP(3),
   "lastVerifiedAt" TIMESTAMP(3),
   "lastUsedStep" INTEGER NOT NULL DEFAULT 0,
