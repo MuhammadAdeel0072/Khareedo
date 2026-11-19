@@ -503,3 +503,116 @@ describe("admin MFA enrollment/activation races (TOCTOU fix)", () => {
     await cleanupMfa();
   });
 });
+
+describe("admin MFA activation rollback (recovery-code atomicity)", () => {
+  // Enroll + activate, returning the active secret and recovery codes.
+  async function enableMfa() {
+    const enrollment = await startAdminMfaEnrollment({ userId: adminId, email: adminEmail });
+    const step = totpTimeStep();
+    const recoveryCodes = await activateAdminMfa({
+      userId: adminId,
+      code: totpCodeForStep(enrollment.manualKey, step),
+    });
+    expect(recoveryCodes).toHaveLength(10);
+    return { secret: enrollment.manualKey, recoveryCodes: recoveryCodes! };
+  }
+
+  async function cleanupMfa() {
+    await db.adminMfaRecoveryCode.deleteMany({ where: { mfa: { userId: adminId } } });
+    await db.adminMfa.deleteMany({ where: { userId: adminId } });
+  }
+
+  // A fresh session issued in the future, so verifyAdminMfaForSession
+  // actually checks the code instead of short-circuiting.
+  function freshSessionIat() {
+    return Math.floor(Date.now() / 1000) + 3600;
+  }
+
+  // Force every INSERT into AdminMfaRecoveryCode to fail, so the
+  // createMany inside an activation transaction throws and the
+  // transaction rolls back. This is a real database failure (a SQLite
+  // trigger), not a mock: it proves the transaction — not application
+  // code — undoes the enablement/swap. The trigger is removed in a
+  // finally block, so it cannot leak into other tests sharing this DB.
+  async function installFailingRecoveryCodeInsert() {
+    await db.$executeRawUnsafe(
+      `CREATE TRIGGER fail_recovery_code_insert BEFORE INSERT ON "AdminMfaRecoveryCode" BEGIN SELECT RAISE(ABORT, 'forced recovery-code insert failure'); END`
+    );
+  }
+
+  async function removeFailingRecoveryCodeInsert() {
+    await db.$executeRawUnsafe(`DROP TRIGGER IF EXISTS fail_recovery_code_insert`);
+  }
+
+  it("failed recovery-code creation rolls back first-time activation", async () => {
+    const enrollment = await startAdminMfaEnrollment({ userId: adminId, email: adminEmail });
+    const code = totpCodeForStep(enrollment.manualKey, totpTimeStep());
+    await installFailingRecoveryCodeInsert();
+    try {
+      await expect(activateAdminMfa({ userId: adminId, code })).rejects.toThrow();
+    } finally {
+      await removeFailingRecoveryCodeInsert();
+    }
+    // The transaction rolled back: MFA is still disabled, the pending
+    // secret is unchanged, and no recovery codes exist.
+    const mfa = await db.adminMfa.findUnique({ where: { userId: adminId } });
+    expect(mfa).not.toBeNull();
+    expect(mfa!.enabledAt).toBeNull();
+    const key = Buffer.from(TEST_KEY, "base64");
+    expect(decryptTotpSecret(mfa!.secretEncrypted, key)).toBe(enrollment.manualKey);
+    const codes = await db.adminMfaRecoveryCode.findMany({ where: { mfaId: mfa!.id } });
+    expect(codes).toHaveLength(0);
+    // The pending enrollment is still usable: activation succeeds once
+    // the database recovers, so the admin is not locked out.
+    const recovered = await activateAdminMfa({
+      userId: adminId,
+      code: totpCodeForStep(enrollment.manualKey, totpTimeStep()),
+    });
+    expect(recovered).toHaveLength(10);
+    await cleanupMfa();
+  });
+
+  it("failed recovery-code creation rolls back replacement activation", async () => {
+    const { secret: oldSecret, recoveryCodes: oldCodes } = await enableMfa();
+    // Start a replacement, proving it with one old recovery code.
+    const replacement = await startAdminMfaReplacement({
+      userId: adminId,
+      email: adminEmail,
+      password: ADMIN_PASSWORD,
+      code: oldCodes[0],
+    });
+    expect(replacement).not.toBeNull();
+    const newCode = totpCodeForStep(replacement!.manualKey, totpTimeStep());
+    await installFailingRecoveryCodeInsert();
+    try {
+      await expect(activateAdminMfa({ userId: adminId, code: newCode })).rejects.toThrow();
+    } finally {
+      await removeFailingRecoveryCodeInsert();
+    }
+    // The transaction rolled back: the old secret is still active, MFA
+    // is still enabled, the pending replacement is still pending, and
+    // the old recovery codes are unchanged.
+    const mfa = await db.adminMfa.findUnique({ where: { userId: adminId } });
+    expect(mfa).not.toBeNull();
+    expect(mfa!.enabledAt).not.toBeNull();
+    const key = Buffer.from(TEST_KEY, "base64");
+    expect(decryptTotpSecret(mfa!.secretEncrypted, key)).toBe(oldSecret);
+    expect(mfa!.pendingSecretEncrypted).not.toBeNull();
+    expect(decryptTotpSecret(mfa!.pendingSecretEncrypted!, key)).toBe(replacement!.manualKey);
+    const remaining = await db.adminMfaRecoveryCode.findMany({
+      where: { mfaId: mfa!.id },
+      select: { usedAt: true },
+    });
+    // 9 unused codes remain (one was consumed as the replacement proof).
+    expect(remaining.filter((c) => c.usedAt === null)).toHaveLength(9);
+    expect(remaining).toHaveLength(10);
+    // An old recovery code still verifies for a fresh session.
+    const verified = await verifyAdminMfaForSession({
+      userId: adminId,
+      code: oldCodes[1],
+      sessionIat: freshSessionIat(),
+    });
+    expect(verified).toBe("verified");
+    await cleanupMfa();
+  });
+});
