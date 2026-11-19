@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { requireAdmin } from "@/lib/auth-guard";
+import { requireAdminMfaVerified } from "@/lib/auth-guard";
 import { handleRoute, jsonError, jsonOk, parseBody } from "@/lib/api";
 import { clientIp, rateLimit } from "@/lib/rate-limit";
 import { fetchRemoteImage } from "@/lib/remote-image-import";
@@ -14,7 +14,7 @@ const importSchema = z.object({
 
 export async function POST(request: Request) {
   return handleRoute(async () => {
-    await requireAdmin();
+    await requireAdminMfaVerified();
 
     const limit = rateLimit(`product-image-import:${clientIp(request.headers)}`, 10, 60_000);
     if (!limit.ok) {

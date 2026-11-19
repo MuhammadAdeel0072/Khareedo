@@ -1,7 +1,7 @@
 // Admin: coupon update / delete (D-06).
 import { db } from "@/lib/db";
 import { couponSchema } from "@/lib/validation";
-import { requireAdmin } from "@/lib/auth-guard";
+import { requireAdminMfaVerified } from "@/lib/auth-guard";
 import { parseBody, jsonError, jsonOk, handleRoute } from "@/lib/api";
 import { adminUpdateCoupon, adminDeleteCoupon } from "@/services/promotions.service";
 import { ReservationWriteConflict } from "@/services/reservation-writes";
@@ -10,7 +10,7 @@ type Ctx = { params: Promise<{ id: string }> };
 
 export async function PUT(request: Request, ctx: Ctx) {
   return handleRoute(async () => {
-    await requireAdmin();
+    await requireAdminMfaVerified();
     const { id } = await ctx.params;
     const parsed = await parseBody(request, couponSchema);
     if (parsed.error) return parsed.error;
@@ -28,7 +28,7 @@ export async function PUT(request: Request, ctx: Ctx) {
 
 export async function DELETE(_request: Request, ctx: Ctx) {
   return handleRoute(async () => {
-    await requireAdmin();
+    await requireAdminMfaVerified();
     const { id } = await ctx.params;
     try { await adminDeleteCoupon(id); } catch (error) {
       if (error instanceof ReservationWriteConflict) return jsonError(error.message, 409);

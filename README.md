@@ -18,7 +18,7 @@ Database migrations for **Supabase PostgreSQL** ship in `prisma/migrations/` (ap
 | Accounts | Email/password + Google-ready auth, profile, address book with defaults, wishlist, password reset ([docs/PASSWORD-RESET.md](docs/PASSWORD-RESET.md)) |
 | Admin | Dashboard (real DB stats + charts), products CRUD + upload, categories, inventory with validation, order status state machine, customers, banners, coupons, promotions, reports, store settings — everything configurable without code changes |
 | Integrations | WhatsApp deep links (header, float button, product & cart inquiries — clearly NOT orders), Google OAuth boundary, payments table + disabled toggle until a provider is chosen |
-| Security | Route guard (proxy) + per-route + service-layer authorization, ownership checks, rate limiting on register/checkout, zod validation everywhere, bcrypt password hashing, idempotency keys, no client-trusted prices, security response headers + report-only CSP ([docs/SECURITY-HEADERS.md](docs/SECURITY-HEADERS.md)) |
+| Security | Route guard (proxy) + per-route + service-layer authorization, ownership checks, rate limiting on register/checkout, zod validation everywhere, bcrypt password hashing, idempotency keys, no client-trusted prices, security response headers + report-only CSP ([docs/SECURITY-HEADERS.md](docs/SECURITY-HEADERS.md)), admin TOTP MFA ([docs/ADMIN-MFA.md](docs/ADMIN-MFA.md)) |
 | Tests | 33 Vitest unit/integration tests (pricing engine, validation, idempotency constraint, stock guard, cancellation restore) + Playwright e2e suites for guest/customer/admin journeys |
 
 ## Quick start (sandbox/demo)

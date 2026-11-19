@@ -1,7 +1,7 @@
 // API route helpers — consistent JSON responses, auth guards, error handling.
 import { NextResponse } from "next/server";
 import { ZodError, type ZodSchema } from "zod";
-import { AuthError } from "@/lib/auth-guard";
+import { AuthError, MfaRequiredError } from "@/lib/auth-guard";
 import { captureError } from "@/lib/error-monitoring";
 import { getPerformanceRequestId } from "@/lib/performance-timing";
 
@@ -44,6 +44,9 @@ export async function parseBody<T>(
  * src/lib/error-monitoring.ts) instead of being logged raw. */
 export function handleRoute(fn: () => Promise<Response>): Promise<Response> {
   return fn().catch((e) => {
+    if (e instanceof MfaRequiredError) {
+      return jsonError(e.message, e.status, { code: e.code });
+    }
     if (e instanceof AuthError) return jsonError(e.message, e.status);
     captureError(e, { operation: "api-route", requestId: getPerformanceRequestId() });
     return jsonError("Something went wrong. Please try again.", 500);

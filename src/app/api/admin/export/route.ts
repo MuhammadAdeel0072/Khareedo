@@ -1,6 +1,6 @@
 // Admin exports — Excel (.xlsx) and PDF downloads (server-generated, admin-only).
 // GET /api/admin/export?type=reports|products|orders|customers&format=xlsx|pdf
-import { requireAdmin } from "@/lib/auth-guard";
+import { requireAdminMfaVerified } from "@/lib/auth-guard";
 import { jsonError, handleRoute } from "@/lib/api";
 import { buildWorkbook } from "@/lib/export/excel";
 import { buildPdfReport } from "@/lib/export/pdf";
@@ -43,7 +43,7 @@ function binaryResponse(buf: Buffer, mime: string, filename: string): Response {
 
 export async function GET(request: Request) {
   return handleRoute(async () => {
-    await requireAdmin();
+    await requireAdminMfaVerified();
 
     const { searchParams } = new URL(request.url);
     const type = searchParams.get("type") ?? "";

@@ -1,7 +1,7 @@
 // Admin: bulk product import from an Excel (.xlsx) file (FR-39 companion).
 // POST /api/admin/import/products  — multipart/form-data, field "file".
 import ExcelJS from "exceljs";
-import { requireAdmin } from "@/lib/auth-guard";
+import { requireAdminMfaVerified } from "@/lib/auth-guard";
 import { jsonError, jsonOk, handleRoute } from "@/lib/api";
 import { parseProductsSheet, IMPORT_MAX_ROWS, type SheetRow } from "@/lib/import/products";
 import { adminCreateProduct } from "@/services/products.service";
@@ -14,7 +14,7 @@ const MAX_FILE_BYTES = 2 * 1024 * 1024; // 2 MB
 
 export async function POST(request: Request) {
   return handleRoute(async () => {
-    await requireAdmin();
+    await requireAdminMfaVerified();
 
     let form: FormData;
     try {

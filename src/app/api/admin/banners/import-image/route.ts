@@ -12,7 +12,7 @@
 //   (loopback / private / CGNAT / link-local incl. cloud metadata / reserved)
 // - every redirect hop re-validated (max 3), size capped mid-stream,
 //   10s timeout, content-type AND magic-byte verification, SVG rejected
-import { requireAdmin } from "@/lib/auth-guard";
+import { requireAdminMfaVerified } from "@/lib/auth-guard";
 import { handleRoute, jsonError, jsonOk, parseBody } from "@/lib/api";
 import { rateLimit, clientIp } from "@/lib/rate-limit";
 import { z } from "zod";
@@ -28,7 +28,7 @@ const importSchema = z.object({
 
 export async function POST(request: Request) {
   return handleRoute(async () => {
-    await requireAdmin();
+    await requireAdminMfaVerified();
 
     const ip = clientIp(request.headers);
     const limit = rateLimit(`banner-import:${ip}`, 10, 60_000);

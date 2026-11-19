@@ -1,7 +1,7 @@
 // Admin: coupon create (D-06 confirmed rules).
 import { db } from "@/lib/db";
 import { couponSchema } from "@/lib/validation";
-import { requireAdmin } from "@/lib/auth-guard";
+import { requireAdminMfaVerified } from "@/lib/auth-guard";
 import { parseBody, jsonError, jsonOk, handleRoute } from "@/lib/api";
 
 function toDates(d: { startsAt?: string; expiresAt?: string }) {
@@ -13,7 +13,7 @@ function toDates(d: { startsAt?: string; expiresAt?: string }) {
 
 export async function POST(request: Request) {
   return handleRoute(async () => {
-    await requireAdmin();
+    await requireAdminMfaVerified();
     const parsed = await parseBody(request, couponSchema);
     if (parsed.error) return parsed.error;
     const d = parsed.data;

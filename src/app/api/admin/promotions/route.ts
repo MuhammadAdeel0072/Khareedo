@@ -1,12 +1,12 @@
 // Admin: promotion create (FR-42).
 import { db } from "@/lib/db";
 import { promotionSchema } from "@/lib/validation";
-import { requireAdmin } from "@/lib/auth-guard";
+import { requireAdminMfaVerified } from "@/lib/auth-guard";
 import { parseBody, jsonOk, handleRoute } from "@/lib/api";
 
 export async function POST(request: Request) {
   return handleRoute(async () => {
-    await requireAdmin();
+    await requireAdminMfaVerified();
     const parsed = await parseBody(request, promotionSchema);
     if (parsed.error) return parsed.error;
     const d = parsed.data;

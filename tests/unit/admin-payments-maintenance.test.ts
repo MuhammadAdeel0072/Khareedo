@@ -9,9 +9,23 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/auth-guard", () => ({
   requireAdmin: mocks.requireAdmin,
+  requireAdminMfaVerified: mocks.requireAdmin,
   AuthError: class AuthError extends Error {
     status: number;
     constructor(message: string, status = 401) { super(message); this.status = status; }
+  },
+  MfaRequiredError: class MfaRequiredError extends Error {
+    code: "MFA_ENROLLMENT_REQUIRED" | "MFA_VERIFICATION_REQUIRED";
+    status: number;
+    constructor(
+      code: "MFA_ENROLLMENT_REQUIRED" | "MFA_VERIFICATION_REQUIRED",
+      message: string,
+      status: number
+    ) {
+      super(message);
+      this.code = code;
+      this.status = status;
+    }
   },
 }));
 vi.mock("@/lib/rate-limit", () => ({ rateLimit: mocks.rateLimit }));

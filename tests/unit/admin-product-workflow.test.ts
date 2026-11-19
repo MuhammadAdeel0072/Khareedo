@@ -25,7 +25,19 @@ const mocks = vi.hoisted(() => {
 
 vi.mock("@/lib/auth-guard", () => ({
   AuthError: mocks.TestAuthError,
+  MfaRequiredError: class MfaRequiredError extends mocks.TestAuthError {
+    code: "MFA_ENROLLMENT_REQUIRED" | "MFA_VERIFICATION_REQUIRED";
+    constructor(
+      code: "MFA_ENROLLMENT_REQUIRED" | "MFA_VERIFICATION_REQUIRED",
+      message: string,
+      status: number
+    ) {
+      super(message, status);
+      this.code = code;
+    }
+  },
   requireAdmin: mocks.requireAdmin,
+  requireAdminMfaVerified: mocks.requireAdmin,
 }));
 vi.mock("@/lib/db", () => ({
   db: { category: { findUnique: mocks.categoryFindUnique } },
