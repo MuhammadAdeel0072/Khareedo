@@ -108,9 +108,17 @@ export async function resetPasswordWithToken(
       if (consumed.count !== 1) return null;
 
       const passwordHash = await bcrypt.hash(password.data, 12);
+      // Stamp passwordChangedAt AFTER the hash completes (PR-25, E-2).
+      // `now` was captured before bcrypt ran (~200 ms earlier), so a
+      // session issued while bcrypt was running — before the password
+      // actually changed — survived the reset. The stamp must reflect the
+      // moment the new password takes effect, not the moment the request
+      // started. `now` is still the reference time for the token's own
+      // consumption/expiry checks above, which is correct as-is.
+      const passwordChangedAt = new Date();
       const updated = await transaction.user.updateMany({
         where: { id: record.userId, email: record.email },
-        data: { passwordHash, passwordChangedAt: now },
+        data: { passwordHash, passwordChangedAt },
       });
       if (updated.count !== 1) throw new InvalidResetStateError();
 

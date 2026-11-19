@@ -4,7 +4,7 @@ import { cache } from "react";
 import { db } from "@/lib/db";
 import { cookies } from "next/headers";
 import { GUEST_CART_COOKIE, newGuestCartKey } from "@/lib/whatsapp";
-import { getRequestSession } from "@/lib/auth-guard";
+import { getSessionUser } from "@/lib/auth-guard";
 import type { CartItemDetail } from "@/types/cart";
 import {
   getPerformanceRequestId,
@@ -37,17 +37,20 @@ export async function resolveCart(
 }
 
 async function resolveCartImpl(create: boolean): Promise<{ id: string; isGuest: boolean } | null> {
-  // 1) try signed-in user
-  const session = await getRequestSession();
-  if (session?.user?.id) {
+  // 1) try signed-in user. This goes through getSessionUser() (PR-25), not
+  // the raw session: the guard rejects sessions invalidated by a password
+  // reset, so an invalidated session falls through to the guest path
+  // instead of reaching the user's cart.
+  const user = await getSessionUser();
+  if (user?.id) {
     const cart = await db.cart.findUnique({
-      where: { userId: session.user.id },
+      where: { userId: user.id },
       select: { id: true },
     });
     if (cart) return { id: cart.id, isGuest: false };
     if (!create) return null;
     const created = await db.cart.create({
-      data: { userId: session.user.id },
+      data: { userId: user.id },
       select: { id: true },
     });
     return { id: created.id, isGuest: false };
@@ -229,19 +232,21 @@ export const getCartDetails = cache(
 export async function getCartCount(): Promise<number> {
   const requestId = getPerformanceRequestId();
   return withPerformanceTiming("cart.count", async () => {
-    const session = await withPerformanceMeasurement(
+    // Same guard as resolveCartImpl (PR-25): an invalidated session must
+    // not reach the user's cart, including its item count.
+    const user = await withPerformanceMeasurement(
       "cart.count.session",
-      getRequestSession,
+      getSessionUser,
       requestId
     );
     const cartOwner = await withPerformanceMeasurement(
       "cart.count.owner",
       async () => {
-        const guestCartKey = session?.user?.id
+        const guestCartKey = user?.id
           ? undefined
           : (await cookies()).get(GUEST_CART_COOKIE)?.value;
-        return session?.user?.id
-          ? { kind: "user" as const, id: session.user.id }
+        return user?.id
+          ? { kind: "user" as const, id: user.id }
           : guestCartKey
             ? { kind: "guest" as const, id: guestCartKey }
             : null;

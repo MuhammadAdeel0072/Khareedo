@@ -16,6 +16,7 @@
 // used to call findUserByEmail before enqueueing, which meant the HTTP
 // request still performed account-dependent database work.
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import bcrypt from "bcryptjs";
 
 const { mockDb, mockEnqueuePasswordResetEmail, mockFindUserByEmail } = vi.hoisted(() => ({
   mockDb: { $transaction: vi.fn() },
@@ -229,6 +230,41 @@ describe("password reset tokens", () => {
     setUpResetToken();
     expect(await resetPasswordWithToken("", "NewPassword123")).toBeNull();
     expect(await resetPasswordWithToken("x".repeat(257), "NewPassword123")).toBeNull();
+  });
+
+  it("stamps passwordChangedAt after the password hash completes (PR-25, E-2)", async () => {
+    // Regression test: passwordChangedAt used to be captured in `now` BEFORE
+    // bcrypt ran, so a session issued while bcrypt was running (before the
+    // password actually changed) survived the reset. The stamp must be taken
+    // after the hash completes. A 300 ms hashing delay makes the ordering
+    // observable: with the old code the stamp lands ~300 ms before the hash
+    // finishes and this test fails; with the fix it lands after and passes.
+    const { transaction } = setUpResetToken();
+    let hashCompletedAt = 0;
+    vi.mocked(bcrypt.hash).mockImplementationOnce(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      hashCompletedAt = Date.now();
+      return "new-hashed-password";
+    });
+
+    const result = await resetPasswordWithToken("raw-reset-token", "NewPassword123");
+    expect(result).not.toBeNull();
+
+    // The mocked updateMany is declared with no parameters, so its call
+    // tuple types as empty; read the recorded call through unknown.
+    const updateManyMock = transaction.user.updateMany as unknown as {
+      mock: {
+        calls: [
+          { data: { passwordHash: string; passwordChangedAt: Date } },
+        ][];
+      };
+    };
+    expect(updateManyMock.mock.calls).toHaveLength(1);
+    const updateCall = updateManyMock.mock.calls[0][0];
+    expect(updateCall.data.passwordHash).toBe("new-hashed-password");
+    expect(updateCall.data.passwordChangedAt.getTime()).toBeGreaterThanOrEqual(
+      hashCompletedAt
+    );
   });
 
   it("an admin account requests a reset the same way as a customer (no lookup, same row)", async () => {

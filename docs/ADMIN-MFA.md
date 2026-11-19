@@ -123,7 +123,10 @@ The guard re-reads MFA state from the database on every request, alongside
 the role and `passwordChangedAt` (PR-09). It requires `lastVerifiedAt` to
 be after the session's issued-at time (`session.iat`), so each new login
 must verify MFA again — the same pattern as PR-09's password-change
-invalidation.
+invalidation. Since PR-25, `session.iat` is the session's *original*
+issuance time (the custom JWT encoder preserves it across refreshes), so
+an MFA verification correctly lasts for the session's lifetime instead of
+being undone by a token refresh.
 
 ### TOTP
 

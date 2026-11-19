@@ -120,6 +120,24 @@ rejects any session whose JWT was issued at or before that timestamp:
   compared and stays valid until its own 7-day expiry; this only affects
   tokens issued before this change deployed.
 
+**The `iat` must be the original issuance time (PR-25).** NextAuth v4's
+default `jwt.encode` stamped a fresh `iat`/`exp` on every encode, so
+`GET /api/auth/session` re-issued a token with fresh timestamps and a
+password reset could not kill it (the re-encoded `iat` landed after
+`passwordChangedAt`). `auth.ts` now wires a custom encoder
+(`src/lib/session-token.ts`, Node built-in `crypto` only, no new
+dependency) that preserves the original `iat`/`exp` when re-encoding an
+existing token and stamps fresh values only at sign-in. A session can
+therefore never be extended past its original expiry, and the invalidation
+check above holds for refreshed tokens too. The same preserved `iat` is
+what the admin MFA guard compares `lastVerifiedAt` against.
+
+**`passwordChangedAt` is stamped after the password hash (PR-25, E-2).**
+The timestamp used to be captured before `bcrypt.hash` ran, so a session
+issued while bcrypt was running — before the password actually changed —
+survived the reset. It is now captured immediately after the hash
+completes, inside the same transaction.
+
 ## Rate limiting
 
 - `POST /api/auth/forgot-password`: 10 requests / 15 min per IP, plus
