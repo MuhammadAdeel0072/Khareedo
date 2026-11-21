@@ -18,7 +18,14 @@ export default async function CheckoutPage() {
   const user = await getSessionUser();
   if (!user) redirect("/login?callbackUrl=%2Fcheckout&reason=checkout");
 
-  await mergeGuestCart(user.id);
+  // Phase 3, H-7: the merge now reports what was merged and what was
+  // skipped (and why) so the flow can tell the customer; the mock in
+  // checkout-auth-page.test.ts resolves undefined, so fall back to empty.
+  const mergeSummary = (await mergeGuestCart(user.id)) ?? {
+    merged: [],
+    skipped: [],
+    cookieCleared: false,
+  };
   // Cart details depend on the merge above; settings and addresses do not —
   // fetch all three in one batch instead of two sequential stages.
   const [cart, settings, savedAddressRows] = await Promise.all([
@@ -52,8 +59,22 @@ export default async function CheckoutPage() {
         </p>
       </div>
 
+      {/* Phase 3, M-13: lines dropped on this load are named, not silently lost. */}
+      {(cart.removed ?? []).length > 0 && (
+        <div className="mb-4 rounded-xl border border-warning/40 bg-warning/5 p-4" role="status">
+          <p className="text-sm font-semibold">
+            {(cart.removed ?? []).length} item{(cart.removed ?? []).length === 1 ? "" : "s"} removed from your cart
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {(cart.removed ?? []).map((line) => line.name).join(", ")} {(cart.removed ?? []).length === 1 ? "is" : "are"} no
+            longer available.
+          </p>
+        </div>
+      )}
+
       <CheckoutFlow
         cart={cart}
+        mergeSummary={mergeSummary}
         user={{ id: user.id, name: user.name, email: user.email }}
         savedAddresses={savedAddresses}
         initialName={user.name ?? ""}

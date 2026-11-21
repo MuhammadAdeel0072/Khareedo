@@ -1,4 +1,5 @@
 // Pure checkout delivery-details validation (FR-19, BR-02).
+import { PROVINCES } from "./validation";
 //
 // The delivery ADDRESS carries no email: the Address model has no email
 // column, `checkoutAddressSchema` has no email field, and the checkout page
@@ -25,6 +26,9 @@ export interface CheckoutAddressInput {
 }
 
 // Address fields only — mirrors `checkoutAddressSchema` (no email).
+// Covers every address field the form renders (Phase 3, chunk 12
+// follow-up B: province and postalCode were missing, so a bad province
+// failed silently while the other fields highlighted).
 export function addressFieldErrors(a: CheckoutAddressInput): Record<string, string> {
   const errors: Record<string, string> = {};
   if (a.fullName.trim().length < 2) errors.fullName = "Recipient name is required";
@@ -32,6 +36,10 @@ export function addressFieldErrors(a: CheckoutAddressInput): Record<string, stri
     errors.phone = "Enter a valid phone (e.g. 0300 1234567)";
   if (a.line1.trim().length < 5) errors.line1 = "Please enter the full street address";
   if (a.city.trim().length < 2) errors.city = "City is required";
+  if (!PROVINCES.includes(a.province as (typeof PROVINCES)[number]))
+    errors.province = "Please select a province";
+  if (a.postalCode && !/^[0-9]{1,5}$/.test(a.postalCode.trim()))
+    errors.postalCode = "Postal code must be digits";
   return errors;
 }
 

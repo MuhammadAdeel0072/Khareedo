@@ -2,6 +2,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => {
   const tx = {
+    category: {
+      findUnique: vi.fn(),
+    },
     product: {
       create: vi.fn(),
       update: vi.fn(),
@@ -16,6 +19,7 @@ const mocks = vi.hoisted(() => {
   const db = {
     product: {
       findFirst: vi.fn(),
+      findUnique: vi.fn(),
     },
     $transaction: vi.fn(),
   };
@@ -52,8 +56,8 @@ const input: ProductWriteInput = {
   comparePrice: 3000,
   status: "PUBLISHED",
   isFeatured: true,
-  rating: 4.5,
-  reviewCount: 12,
+  // No rating / reviewCount: they are calculated from APPROVED reviews
+  // only and are not part of a product write.
   tags: "test, camera",
   images: orderedImages,
   stock: 7,
@@ -64,6 +68,10 @@ describe("product image persistence", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.db.product.findFirst.mockResolvedValue(null);
+    // The update path reads the current image set first (orphan cleanup),
+    // and create/update guard the category inside the transaction.
+    mocks.db.product.findUnique.mockResolvedValue({ images: [] });
+    mocks.tx.category.findUnique.mockResolvedValue({ isActive: true });
     mocks.db.$transaction.mockImplementation(
       async (operation: (tx: typeof mocks.tx) => Promise<unknown>) =>
         operation(mocks.tx)
@@ -109,6 +117,16 @@ describe("product image persistence", () => {
     });
   });
 
+  it("creates a new product with zero rating and review count", async () => {
+    await adminCreateProduct(input);
+
+    expect(mocks.tx.product.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ rating: 0, reviewCount: 0 }),
+      })
+    );
+  });
+
   it("replaces the edit image set in primary-first order", async () => {
     await adminUpdateProduct("product-1", {
       ...input,
@@ -131,5 +149,19 @@ describe("product image persistence", () => {
         }),
       })
     );
+  });
+
+  it("never writes rating or reviewCount on update, so calculated values survive an edit", async () => {
+    await adminUpdateProduct("product-1", {
+      ...input,
+      images: [orderedImages[1], orderedImages[0]],
+    });
+
+    const updateCall = mocks.tx.product.update.mock.calls[0]?.[0] as
+      | { data?: Record<string, unknown> }
+      | undefined;
+    expect(updateCall?.data).toBeDefined();
+    expect(updateCall?.data).not.toHaveProperty("rating");
+    expect(updateCall?.data).not.toHaveProperty("reviewCount");
   });
 });

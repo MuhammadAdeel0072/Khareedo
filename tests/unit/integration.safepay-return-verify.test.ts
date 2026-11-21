@@ -62,7 +62,7 @@ async function fixture(options: { coupon?: boolean; state?: string } = {}) {
   const identity = createHash("sha256").update(JSON.stringify(
     ["SAFEPAY", config.environment, config.merchantAccountRef, trackerToken])).digest("hex");
   // Model the real reserved flow: the hold already reduced sellable stock.
-  await db.inventory.update({ where: { productId: product.id }, data: { quantity: { decrement: 1 } } });
+  await db.inventory.updateMany({ where: { productId: product.id, variantId: null }, data: { quantity: { decrement: 1 } } });
   const order = await db.$transaction(async tx => {
     const order = await tx.order.create({ data: {
       reference: "SFP-" + randomUUID(), idempotencyKey: randomUUID(), isGuest: false,
@@ -84,7 +84,7 @@ async function fixture(options: { coupon?: boolean; state?: string } = {}) {
       } },
     }, include: { items: true, payments: true } });
     await tx.inventoryReservation.create({ data: {
-      orderItemId: order.items[0].id, inventoryId: product.inventory!.id, quantity: 1,
+      orderItemId: order.items[0].id, inventoryId: product.inventory.find((r) => r.variantId === null)!.id, quantity: 1,
     } });
     if (options.coupon) {
       const coupon = await tx.coupon.create({ data: {
@@ -157,6 +157,10 @@ async function readReturnSnapshot(trackerToken: string, owner: ReturnType<typeof
 }
 
 afterAll(async () => {
+  // Chunk 7-final: return-path settlement now enqueues customer emails in
+  // the outbox. Remove this file's rows so later suites' small outbox
+  // sweeps are not starved by leftovers.
+  await db.emailOutbox.deleteMany({ where: { email: "synthetic@example.invalid" } });
   // Evidence rows restrict-delete their source/final webhook events: remove them first.
   await db.paymentEvidence.deleteMany({ where: { payment: { orderId: { in: orders } } } });
   await db.paymentWebhookEvent.deleteMany({ where: { payment: { orderId: { in: orders } } } });
@@ -202,7 +206,7 @@ describe("Return-path payment verification and settlement (isolated persistence)
     // 4. Reservations consumed exactly once; coupon committed; no stock write at settlement.
     const hold = await db.inventoryReservation.findUniqueOrThrow({ where: { orderItemId: f.order.items[0].id } });
     expect(hold).toMatchObject({ state: "CONSUMED", quantity: 1 });
-    expect((await db.inventory.findUniqueOrThrow({ where: { productId: f.product.id } })).quantity).toBe(3);
+    expect((await db.inventory.findFirstOrThrow({ where: { productId: f.product.id, variantId: null } })).quantity).toBe(3);
     const coupon = await db.coupon.findFirstOrThrow({ where: { id: { in: coupons }, reservations: { some: { orderId: f.order.id } } } });
     expect(coupon).toMatchObject({ usedCount: 1, reservedCount: 0 });
 
@@ -220,7 +224,7 @@ describe("Return-path payment verification and settlement (isolated persistence)
     const items = await db.inventoryReservation.findMany({ where: { orderItem: { orderId: f.order.id } } });
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({ state: "CONSUMED" });
-    expect((await db.inventory.findUniqueOrThrow({ where: { productId: f.product.id } })).quantity).toBe(3);
+    expect((await db.inventory.findFirstOrThrow({ where: { productId: f.product.id, variantId: null } })).quantity).toBe(3);
   });
 
   it("keeps a pending provider state pending and schedules exactly one retry", async () => {
@@ -251,5 +255,28 @@ describe("Return-path payment verification and settlement (isolated persistence)
     expect(await verification.verifyPaymentNow(f.payment.id)).toEqual({ kind: "skipped", code: "BACKOFF" });
     const order = await db.order.findUniqueOrThrow({ where: { id: f.order.id } });
     expect(order).toMatchObject({ status: "PENDING", paymentStatus: "PENDING", paymentReviewStatus: "CLEAR" });
+  });
+
+  it("lists only near-expiry tracker payments for the pre-expiry check (M-26)", async () => {
+    const near = await fixture();
+    const far = await fixture();
+    // Near expires in 4 minutes (inside the 5-minute window); far in 10.
+    await db.order.update({ where: { id: near.order.id }, data: { reservationExpiresAt: new Date(Date.now() + 4 * 60_000) } });
+    const { reconciliation } = buildStack(reporterTransport("TRACKER_STARTED", 100000));
+    const due = await reconciliation.dueForPreExpiryCheck(10);
+    expect(due.map(p => p.id)).toEqual([near.payment.id]);
+    expect(far.payment.id).not.toBe(near.payment.id);
+  });
+
+  it("force-verifies a near-expiry paid tracker before its reservation closes (M-26)", async () => {
+    const f = await fixture();
+    await db.order.update({ where: { id: f.order.id }, data: { reservationExpiresAt: new Date(Date.now() + 4 * 60_000) } });
+    const { reconciliation, verification } = buildStack(reporterTransport("TRACKER_ENDED", f.total * 100));
+    const due = await reconciliation.dueForPreExpiryCheck(10);
+    expect(due.map(p => p.id)).toContain(f.payment.id);
+    const outcome = await verification.verifyPaymentNow(f.payment.id, { force: true });
+    expect(outcome).toEqual({ kind: "settled" });
+    const order = await db.order.findUniqueOrThrow({ where: { id: f.order.id } });
+    expect(order).toMatchObject({ status: "CONFIRMED", paymentStatus: "PAID" });
   });
 });

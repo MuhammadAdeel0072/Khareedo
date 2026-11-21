@@ -30,10 +30,20 @@ const DEFAULT_INTERVAL_MS = 60_000;
 const MIN_INTERVAL_MS = 15_000;
 const DEFAULT_INITIAL_DELAY_MS = 15_000;
 const SWEEP_PLAN: Array<{ action: MaintenanceAction; batch: number }> = [
+  // M-26: verify payments expiring soon BEFORE expiring anything, so a
+  // capture is settled while settlement is still possible.
+  { action: "verify_expiring_payments", batch: 10 },
   { action: "expire_reservations", batch: 10 },
   { action: "process_webhook_inbox", batch: 10 },
   { action: "reconcile_due_payments", batch: 5 },
   { action: "reconcile_refunds", batch: 5 },
+  // Email outbox retention (Phase 3 Chunk 7, M-23): one indexed deleteMany
+  // over the 30-day cutoff — usually a no-op. Runs last so payment work
+  // takes priority; the batch size is meaningless for cleanup.
+  { action: "cleanup_email_outbox", batch: 1 },
+  // Stale guest-cart pruning (Phase 3, chunk 12 follow-up B): same shape
+  // as the outbox cleanup — one bounded deleteMany, usually a no-op.
+  { action: "prune_stale_carts", batch: 1 },
 ];
 
 export function createPaymentMaintenanceWorker(runner: {

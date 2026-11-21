@@ -41,6 +41,9 @@ export function BannerImage({
       src={resolvedSrc}
       alt={alt}
       loading={eager ? "eager" : "lazy"}
+      // First hero slide is the LCP element: tell the browser to fetch it
+      // ahead of other images. The rest stay lazy (see `eager` above).
+      fetchPriority={eager ? "high" : undefined}
       decoding="async"
       // Some hotlink-blocked servers reject requests with cross-site referrers.
       referrerPolicy="no-referrer"

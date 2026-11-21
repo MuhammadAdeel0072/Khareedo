@@ -9,11 +9,16 @@ vi.mock("@/lib/db", () => ({ db: { $queryRaw: mocks.queryRaw } }));
 import { GET, buildHealthPayload, evaluateHealthStatus } from "@/app/api/health/route";
 import {
   WORKER_HEARTBEAT_STALE_AFTER_MS,
+  getOutboxWorkerHeartbeat,
   getWorkerHeartbeat,
+  recordOutboxSweepFailed,
+  recordOutboxSweepSucceeded,
+  recordOutboxWorkerStarted,
   recordSweepFailed,
   recordSweepSucceeded,
   recordWorkerStarted,
   recordWorkerStopped,
+  resetOutboxWorkerHeartbeat,
   resetWorkerHeartbeat,
 } from "@/services/worker-heartbeat";
 
@@ -33,12 +38,15 @@ describe("GET /api/health", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetWorkerHeartbeat();
+    resetOutboxWorkerHeartbeat();
     mocks.queryRaw.mockResolvedValue([{ "?column?": 1 }]);
   });
 
-  it("returns 200 ok when the database and worker are healthy", async () => {
+  it("returns 200 ok when the database and BOTH workers are healthy", async () => {
     recordWorkerStarted();
     recordSweepSucceeded();
+    recordOutboxWorkerStarted();
+    recordOutboxSweepSucceeded();
     const response = await GET();
     expect(response.status).toBe(200);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
@@ -47,6 +55,8 @@ describe("GET /api/health", () => {
     expect(body.checks.database).toMatchObject({ status: "ok" });
     expect(typeof body.checks.database.latencyMs).toBe("number");
     expect(body.checks.worker.status).toBe("healthy");
+    expect(body.checks.outbox.status).toBe("healthy");
+    expect(body.checks.outbox.staleAfterMs).toBe(WORKER_HEARTBEAT_STALE_AFTER_MS);
     expect(typeof body.timestamp).toBe("string");
   });
 
@@ -57,6 +67,51 @@ describe("GET /api/health", () => {
     expect(body.status).toBe("degraded");
     expect(body.checks.database.status).toBe("ok");
     expect(body.checks.worker.status).toBe("not_started");
+    expect(body.checks.outbox.status).toBe("not_started");
+  });
+
+  it("returns 200 degraded when the outbox worker is stale, even with a healthy payment worker", async () => {
+    // Stale proof for the outbox heartbeat: the payment worker succeeded
+    // just now, but the outbox worker's last success is older than the
+    // 180 s stale window — the endpoint must degrade, not hide behind the
+    // healthy payment worker.
+    recordWorkerStarted();
+    recordSweepSucceeded();
+    recordOutboxWorkerStarted(T0);
+    recordOutboxSweepSucceeded(T0);
+    const response = await GET();
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.status).toBe("degraded");
+    expect(body.checks.worker.status).toBe("healthy");
+    expect(body.checks.outbox.status).toBe("stale");
+    expect(body.checks.outbox.ageMs).toBeGreaterThan(WORKER_HEARTBEAT_STALE_AFTER_MS);
+  });
+
+  it("returns 200 degraded when the outbox worker never started, even with a healthy payment worker", async () => {
+    recordWorkerStarted();
+    recordSweepSucceeded();
+    const response = await GET();
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.status).toBe("degraded");
+    expect(body.checks.worker.status).toBe("healthy");
+    expect(body.checks.outbox.status).toBe("not_started");
+  });
+
+  it("returns 200 degraded when the outbox worker's last sweep failed", async () => {
+    recordWorkerStarted();
+    recordSweepSucceeded();
+    recordOutboxWorkerStarted();
+    recordOutboxSweepSucceeded();
+    recordOutboxSweepFailed("SWEEP_FAILED");
+    const response = await GET();
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.status).toBe("degraded");
+    expect(body.checks.worker.status).toBe("healthy");
+    expect(body.checks.outbox.status).toBe("failing");
+    expect(body.checks.outbox.consecutiveFailures).toBe(1);
   });
 
   it("returns 200 degraded when the worker heartbeat is stale", async () => {
@@ -150,18 +205,36 @@ describe("GET /api/health", () => {
     expect(serialised).not.toContain("stack");
   });
 
-  it("maps statuses purely: down beats degraded, healthy worker is ok", () => {
+  it("maps statuses purely: down beats degraded, both workers healthy is ok", () => {
     const healthy = getWorkerHeartbeat();
+    const outboxHealthy = getOutboxWorkerHeartbeat();
     expect(evaluateHealthStatus(true, "healthy")).toBe("ok");
+    expect(evaluateHealthStatus(true, "healthy", "healthy")).toBe("ok");
     expect(evaluateHealthStatus(true, "stale")).toBe("degraded");
     expect(evaluateHealthStatus(true, "failing")).toBe("degraded");
     expect(evaluateHealthStatus(true, "not_started")).toBe("degraded");
     expect(evaluateHealthStatus(true, "stopped")).toBe("degraded");
+    // One unhealthy worker degrades the result, whichever it is.
+    expect(evaluateHealthStatus(true, "healthy", "stale")).toBe("degraded");
+    expect(evaluateHealthStatus(true, "healthy", "failing")).toBe("degraded");
+    expect(evaluateHealthStatus(true, "healthy", "not_started")).toBe("degraded");
+    expect(evaluateHealthStatus(true, "healthy", "stopped")).toBe("degraded");
+    expect(evaluateHealthStatus(true, "stale", "stale")).toBe("degraded");
     expect(evaluateHealthStatus(false, "healthy")).toBe("down");
     expect(evaluateHealthStatus(false, "stale")).toBe("down");
+    expect(evaluateHealthStatus(false, "healthy", "healthy")).toBe("down");
     expect(healthy.status).toBe("not_started");
-    const payload = buildHealthPayload({ status: "ok", latencyMs: 3 }, healthy, T0);
+    expect(outboxHealthy.status).toBe("not_started");
+    const payload = buildHealthPayload({ status: "ok", latencyMs: 3 }, healthy, outboxHealthy, T0);
     expect(payload.status).toBe("degraded");
     expect(payload.timestamp).toBe(new Date(T0).toISOString());
+    expect(payload.checks.outbox.status).toBe("not_started");
+    const okPayload = buildHealthPayload(
+      { status: "ok", latencyMs: 3 },
+      { ...healthy, status: "healthy" },
+      { ...outboxHealthy, status: "healthy" },
+      T0,
+    );
+    expect(okPayload.status).toBe("ok");
   });
 });

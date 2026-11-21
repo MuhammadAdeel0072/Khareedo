@@ -17,6 +17,7 @@ route handler. A Sentry transport can be added later behind the same
 | Process-level failures (`src/instrumentation.ts`) | `uncaughtExceptionMonitor` listener (observe-only) | Same, operation `process-uncaught-exception` |
 | Worker start failure (`src/instrumentation.ts`) | `captureError` | Operation `payment-maintenance-worker-start` |
 | Worker sweep failure (`payment-maintenance-worker.service.ts`) | `WORKER_FAILURE` alert | Code `SWEEP_FAILED` |
+| Outbox sweep failure (`email-outbox.service.ts`, Stream F) | `WORKER_FAILURE` alert | Code `OUTBOX_SWEEP_FAILED` (distinct from `SWEEP_FAILED` so the per-kind+code throttle cannot suppress one worker's alert because of the other's) |
 | Webhook receive failure (`src/app/api/webhooks/safepay/route.ts`) | `WEBHOOK_FAILURE` alert | `PERSISTENCE_UNAVAILABLE`, `BUSY`, `QUARANTINED`, `CONFLICT` (+ event id) |
 | Blocked inbox processing (`payment-maintenance.service.ts`) | `WEBHOOK_FAILURE` alert | `INBOX_PROCESSING_BLOCKED`, count, first event id |
 | Failed refund submission (runner, `reconcile_refunds`) | `PAYMENT_FAILURE` alert | Provider code, count |

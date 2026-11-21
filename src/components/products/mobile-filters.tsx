@@ -16,10 +16,14 @@ import { ProductFilters, type FilterCategory } from "@/components/products/produ
 
 export function MobileFilters({
   categories,
+  brands = [],
+  maxPrice,
   totalResults,
   activeCount,
 }: {
   categories: FilterCategory[];
+  brands?: string[];
+  maxPrice?: number;
   totalResults: number;
   activeCount: number;
 }) {
@@ -52,7 +56,7 @@ export function MobileFilters({
           </SheetDescription>
         </SheetHeader>
         <div className="-mx-1 min-h-0 flex-1 overflow-y-auto px-1 py-4 thin-scrollbar">
-          <ProductFilters categories={categories} totalResults={totalResults} />
+          <ProductFilters categories={categories} brands={brands} maxPrice={maxPrice} totalResults={totalResults} />
         </div>
         <div className="border-t pt-3">
           <Button className="h-11 w-full text-base" onClick={() => setOpen(false)}>

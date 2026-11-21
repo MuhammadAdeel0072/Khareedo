@@ -1,5 +1,6 @@
 // Wishlist service (FR-05, customer-only feature — D-08 scope).
 import { db } from "@/lib/db";
+import { totalProductStock } from "@/services/variants.service";
 
 export interface WishlistRow {
   itemId: string;
@@ -15,8 +16,11 @@ export interface WishlistRow {
 }
 
 export async function getWishlist(userId: string): Promise<WishlistRow[]> {
+  // Availability is pushed into the WHERE (S8): only rows whose product is
+  // live (PUBLISHED, not soft-deleted) are fetched, instead of fetching
+  // every row with its product + image + inventory and filtering in memory.
   const rows = await db.wishlistItem.findMany({
-    where: { userId },
+    where: { userId, product: { status: "PUBLISHED", deletedAt: null } },
     orderBy: { createdAt: "desc" },
     include: {
       product: {
@@ -28,28 +32,27 @@ export async function getWishlist(userId: string): Promise<WishlistRow[]> {
           comparePrice: true,
           rating: true,
           reviewCount: true,
-          status: true,
-          deletedAt: true,
           images: { take: 1, orderBy: { sortOrder: "asc" }, select: { url: true } },
-          inventory: { select: { quantity: true } },
+          inventory: { select: { variantId: true, quantity: true } },
         },
       },
     },
   });
-  return rows
-    .filter((r) => r.product.status === "PUBLISHED" && !r.product.deletedAt)
-    .map((r) => ({
-      itemId: r.id,
-      productId: r.product.id,
-      name: r.product.name,
-      slug: r.product.slug,
-      price: r.product.price,
-      comparePrice: r.product.comparePrice,
-      image: r.product.images[0]?.url ?? null,
-      rating: r.product.rating,
-      reviewCount: r.product.reviewCount,
-      stock: r.product.inventory?.quantity ?? 0,
-    }));
+  return rows.map((r) => ({
+    itemId: r.id,
+    productId: r.product.id,
+    name: r.product.name,
+    slug: r.product.slug,
+    price: r.product.price,
+    comparePrice: r.product.comparePrice,
+    image: r.product.images[0]?.url ?? null,
+    rating: r.product.rating,
+    reviewCount: r.product.reviewCount,
+    // Wishlist stays product-level (Chunk 8 — D12): no per-variant
+    // wishlist. Stock is the total across the product-level row and all
+    // variant rows — the item is "in stock" while any row has stock.
+    stock: totalProductStock(r.product.inventory),
+  }));
 }
 
 export async function toggleWishlist(userId: string, productId: string): Promise<{ added: boolean }> {

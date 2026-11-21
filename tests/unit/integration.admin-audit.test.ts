@@ -71,6 +71,10 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // Chunk 7-final: the status change in this file enqueues a customer
+  // email in the outbox. Remove it so later suites' small outbox sweeps
+  // are not starved by leftovers.
+  await db.emailOutbox.deleteMany({ where: { email: "audit-order@example.invalid" } });
   await db.adminAuditLog.deleteMany({ where: { adminUserId: adminId } });
   await db.adminMfaRecoveryCode.deleteMany({ where: { mfa: { userId: adminId } } });
   await db.adminMfa.deleteMany({ where: { userId: adminId } });

@@ -42,6 +42,7 @@ import {
   generateRecoveryCode,
   getAdminMfaStatus,
   hashRecoveryCode,
+  isAdminMfaConfigured,
   loadAdminMfaEncryptionKey,
   regenerateAdminMfaRecoveryCodes,
   startAdminMfaEnrollment,
@@ -73,6 +74,15 @@ describe("admin MFA service", () => {
     expect(loadAdminMfaEncryptionKey({})).toBeNull();
     expect(loadAdminMfaEncryptionKey({ ADMIN_MFA_ENCRYPTION_KEY: "short" })).toBeNull();
     expect(loadAdminMfaEncryptionKey({ ADMIN_MFA_ENCRYPTION_KEY: "!!!not-base64!!!" })).toBeNull();
+  });
+
+  it("isAdminMfaConfigured reports only a valid 32-byte key as configured", () => {
+    expect(isAdminMfaConfigured({ ADMIN_MFA_ENCRYPTION_KEY: TEST_KEY })).toBe(true);
+    expect(isAdminMfaConfigured({})).toBe(false);
+    expect(isAdminMfaConfigured({ ADMIN_MFA_ENCRYPTION_KEY: "short" })).toBe(false);
+    expect(isAdminMfaConfigured({ ADMIN_MFA_ENCRYPTION_KEY: "!!!not-base64!!!" })).toBe(false);
+    // 16 bytes decodes fine as base64 but is not a 32-byte key.
+    expect(isAdminMfaConfigured({ ADMIN_MFA_ENCRYPTION_KEY: Buffer.alloc(16, 1).toString("base64") })).toBe(false);
   });
 
   it("encrypts and decrypts a TOTP secret, and detects tampering", () => {

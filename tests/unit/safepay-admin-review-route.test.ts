@@ -12,6 +12,8 @@ const mocks = vi.hoisted(() => {
     requireAdmin: vi.fn(),
     rateLimit: vi.fn(),
     findMany: vi.fn(),
+    paymentFindMany: vi.fn(),
+    evidenceFindMany: vi.fn(),
   };
 });
 
@@ -41,6 +43,12 @@ vi.mock("@/lib/db", () => ({
     order: {
       findMany: mocks.findMany,
     },
+    payment: {
+      findMany: mocks.paymentFindMany,
+    },
+    paymentEvidence: {
+      findMany: mocks.evidenceFindMany,
+    },
   },
 }));
 
@@ -60,6 +68,8 @@ describe("Admin Safepay financial-review queue", () => {
     });
 
     mocks.findMany.mockResolvedValue([]);
+    mocks.paymentFindMany.mockResolvedValue([]);
+    mocks.evidenceFindMany.mockResolvedValue([]);
   });
 
   it("rejects unauthenticated requests", async () => {
@@ -134,6 +144,8 @@ describe("Admin Safepay financial-review queue", () => {
       closeReason: "EXPIRED",
       closedAt: "2026-11-12T12:00:00.000Z",
       reservationExpiresAt: "2026-11-12T11:59:00.000Z",
+      investigated: false,
+      captureEvidence: false,
     });
 
     const serialized = JSON.stringify(data);
@@ -151,5 +163,48 @@ describe("Admin Safepay financial-review queue", () => {
         take: 25,
       })
     );
+  });
+
+  it("reports investigation and capture evidence per case", async () => {
+    mocks.findMany.mockResolvedValue([
+      {
+        id: "order_123",
+        reference: "KH_TEST_123",
+        status: "CANCELLED",
+        paymentStatus: "PENDING",
+        paymentReviewReason: "PROVIDER_FINALITY_UNVERIFIED",
+        checkoutCloseReason: "EXPIRED",
+        checkoutClosedAt: new Date("2026-11-12T12:00:00Z"),
+        reservationExpiresAt: new Date("2026-11-12T11:59:00Z"),
+      },
+    ]);
+    mocks.paymentFindMany.mockResolvedValue([
+      { id: "payment_1", orderId: "order_123" },
+    ]);
+    mocks.evidenceFindMany.mockResolvedValue([
+      {
+        paymentId: "payment_1",
+        source: "RECONCILIATION",
+        recordedAt: new Date("2026-11-12T12:05:00Z"),
+        observedCapturedMinor: null,
+      },
+      {
+        paymentId: "payment_1",
+        source: "RECONCILIATION",
+        recordedAt: new Date("2026-11-12T12:06:00Z"),
+        observedCapturedMinor: BigInt(230000),
+      },
+    ]);
+
+    const response = await GET();
+    const data = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(data.cases).toHaveLength(1);
+    expect(data.cases[0]).toMatchObject({
+      orderId: "order_123",
+      investigated: true,
+      captureEvidence: true,
+    });
   });
 });

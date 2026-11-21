@@ -207,6 +207,9 @@ export async function GET(request: Request) {
               { label: "Compare Price", width: 14, money: true },
               { label: "Stock", width: 8 },
               { label: "Low Stock At", width: 11 },
+              { label: "Variant", width: 18 },
+              { label: "Variant SKU", width: 18 },
+              { label: "Variant Price", width: 13, money: true },
               { label: "Status", width: 11 },
               { label: "Featured", width: 9 },
               { label: "Rating", width: 8 },
@@ -214,7 +217,8 @@ export async function GET(request: Request) {
             ],
             rows: rows.map((p) => [
               p.name, p.sku, p.category, p.brand, p.price, p.comparePrice,
-              p.stock, p.lowStockThreshold, p.status, p.featured, p.rating, p.createdAt,
+              p.stock, p.lowStockThreshold, p.variantLabel, p.variantSku, p.variantPrice,
+              p.status, p.featured, p.rating, p.createdAt,
             ]),
           },
         ]);
@@ -243,10 +247,11 @@ export async function GET(request: Request) {
     }
 
     if (type === "orders") {
-      // Mirror the list page's active search/status scope into the export.
+      // Mirror the list page's active search/status/payment scope into the export.
       const scopeQ = (searchParams.get("q") ?? "").trim().slice(0, 80) || undefined;
       const scopeStatus = (searchParams.get("status") ?? "").trim() || undefined;
-      const { orders, items } = await getOrdersExportData(1000, { q: scopeQ, status: scopeStatus });
+      const scopePaymentStatus = (searchParams.get("paymentStatus") ?? "").trim() || undefined;
+      const { orders, items } = await getOrdersExportData(1000, { q: scopeQ, status: scopeStatus, paymentStatus: scopePaymentStatus });
       if (format === "xlsx") {
         const buf = await buildWorkbook([
           {

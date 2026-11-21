@@ -11,6 +11,7 @@ import {
 } from "@/services/admin-audit.service";
 import { parseProductsSheet, IMPORT_MAX_ROWS, type SheetRow } from "@/lib/import/products";
 import { adminCreateProduct } from "@/services/products.service";
+import { createVariant } from "@/services/variants.service";
 import { db } from "@/lib/db";
 
 export const runtime = "nodejs";
@@ -81,16 +82,78 @@ export async function POST(request: Request) {
     // (Prisma `mode: "insensitive"` is not supported on SQLite).
     const [categories, existingProducts] = await Promise.all([
       db.category.findMany({ select: { id: true, name: true } }),
-      db.product.findMany({ where: { deletedAt: null }, select: { name: true } }),
+      db.product.findMany({ where: { deletedAt: null }, select: { id: true, name: true } }),
     ]);
     const categoryIdByName = new Map(categories.map((c) => [c.name.toLowerCase(), c.id]));
     const existingNames = new Set(existingProducts.map((p) => p.name.toLowerCase()));
+    const productIdByName = new Map(existingProducts.map((p) => [p.name.toLowerCase(), p.id]));
 
     let created = 0;
+    let variantsCreated = 0;
     let skipped = 0;
     let failed = 0;
 
     for (const row of parsed.rows) {
+      // ── Variant rows (Chunk 8 — D12) ──────────────────────────────────
+      // A row with Variant Label + SKU is a variant of the named product,
+      // not a second product. New product: create it (product-level stock
+      // 0 — the row's stock belongs to the variant) with the variant.
+      // Existing product: attach the variant to it instead of skipping.
+      if (row.variantLabel && row.variantSku) {
+        const variantStock = row.variantStock ?? row.stock;
+        const existingId = productIdByName.get(row.name.toLowerCase());
+        try {
+          if (existingId) {
+            await createVariant(existingId, {
+              label: row.variantLabel,
+              sku: row.variantSku,
+              priceOverride: row.variantPrice ?? null,
+              stock: variantStock,
+              lowStockThreshold: row.lowStockThreshold,
+            });
+            variantsCreated++;
+          } else {
+            const categoryId = categoryIdByName.get(row.category.toLowerCase());
+            if (!categoryId) {
+              failed++;
+              issues.push({ rowNumber: row.rowNumber, message: `Category "${row.category}" not found — create it first or fix the spelling` });
+              continue;
+            }
+            const product = await adminCreateProduct({
+              name: row.name,
+              description: row.description,
+              brand: row.brand,
+              categoryId,
+              price: row.price,
+              comparePrice: row.comparePrice ?? null,
+              status: row.status,
+              isFeatured: row.featured,
+              tags: row.tags,
+              images: row.imageUrl ? [row.imageUrl] : [],
+              stock: 0,
+              lowStockThreshold: row.lowStockThreshold,
+              variants: [{
+                label: row.variantLabel,
+                sku: row.variantSku,
+                priceOverride: row.variantPrice ?? null,
+                stock: variantStock,
+                lowStockThreshold: row.lowStockThreshold,
+              }],
+            });
+            created++;
+            variantsCreated++;
+            existingNames.add(row.name.toLowerCase());
+            productIdByName.set(row.name.toLowerCase(), product.id);
+          }
+        } catch (e) {
+          failed++;
+          issues.push({
+            rowNumber: row.rowNumber,
+            message: `Variant "${row.variantLabel}" of "${row.name}" could not be saved: ${e instanceof Error ? e.message : "unknown error"}`,
+          });
+        }
+        continue;
+      }
       if (existingNames.has(row.name.toLowerCase())) {
         skipped++;
         issues.push({ rowNumber: row.rowNumber, message: `"${row.name}" already exists in the store — skipped` });
@@ -103,7 +166,7 @@ export async function POST(request: Request) {
         continue;
       }
       try {
-        await adminCreateProduct({
+        const product = await adminCreateProduct({
           name: row.name,
           description: row.description,
           brand: row.brand,
@@ -112,8 +175,6 @@ export async function POST(request: Request) {
           comparePrice: row.comparePrice ?? null,
           status: row.status,
           isFeatured: row.featured,
-          rating: 0,
-          reviewCount: 0,
           tags: row.tags,
           images: row.imageUrl ? [row.imageUrl] : [],
           stock: row.stock,
@@ -121,6 +182,7 @@ export async function POST(request: Request) {
         });
         created++;
         existingNames.add(row.name.toLowerCase()); // guard duplicates inside the same file
+        productIdByName.set(row.name.toLowerCase(), product.id);
       } catch (e) {
         failed++;
         issues.push({
@@ -133,10 +195,11 @@ export async function POST(request: Request) {
     await recordAdminAuditBestEffort(adminAuditContext(request, admin), {
       action: ADMIN_AUDIT_ACTIONS.IMPORT_COMPLETED,
       targetType: "Product",
-      metadata: { created, skipped, failed, totalRows: parsed.rows.length },
+      metadata: { created, variantsCreated, skipped, failed, totalRows: parsed.rows.length },
     });
     return jsonOk({
       created,
+      variantsCreated,
       skipped,
       failed,
       totalRows: parsed.rows.length,

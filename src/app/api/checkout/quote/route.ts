@@ -13,7 +13,8 @@ const quoteSchema = z.object({
 
 export async function POST(request: Request) {
   return withPerformanceTiming("api.checkout.quote", () => handleRoute(async () => {
-    if (!await getSessionUser()) {
+    const sessionUser = await getSessionUser();
+    if (!sessionUser) {
       return jsonError("Please sign in to continue to checkout.", 401, { code: "AUTHENTICATION_REQUIRED" });
     }
 
@@ -29,7 +30,9 @@ export async function POST(request: Request) {
 
     const parsed = await parseBody(request, quoteSchema);
     if (parsed.error) return parsed.error;
-    const quote = await quoteOrder(parsed.data);
+    // The user id lets the quote apply the per-user coupon rules (D11/M-20)
+    // as a preview; the place-order transaction re-checks them.
+    const quote = await quoteOrder(parsed.data, sessionUser.id);
     return jsonOk({ quote });
   }));
 }

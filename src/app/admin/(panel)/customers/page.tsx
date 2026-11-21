@@ -1,4 +1,5 @@
 // Admin customers list (FR-45).
+import Link from "next/link";
 import { adminListCustomerSummaries } from "@/services/users.service";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { formatPKR, formatDate, initials } from "@/lib/utils";
@@ -7,8 +8,18 @@ import { ExportButtons } from "@/components/admin/export-buttons";
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Customers · Admin" };
 
-export default async function AdminCustomersPage() {
-  const customers = await adminListCustomerSummaries();
+export default async function AdminCustomersPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const params = await searchParams;
+  const page = Number(typeof params.page === "string" ? params.page : "1") || 1;
+  const result = await adminListCustomerSummaries({ page });
+  const customers = result.items;
+
+  const buildUrl = (p: number) =>
+    p > 1 ? `/admin/customers?page=${p}` : "/admin/customers";
 
   return (
     <div className="p-4 sm:p-6">
@@ -16,7 +27,8 @@ export default async function AdminCustomersPage() {
         <div>
           <h1 className="text-xl font-extrabold tracking-tight sm:text-2xl">Customers</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            {customers.length} registered customer{customers.length === 1 ? "" : "s"} (guest checkouts are not listed)
+            {result.total} registered customer{result.total === 1 ? "" : "s"} (guest checkouts are not listed)
+            {result.pages > 1 ? <> · showing page {result.page} of {result.pages}</> : null}
           </p>
         </div>
         <ExportButtons type="customers" formats={["xlsx"]} />
@@ -45,7 +57,9 @@ export default async function AdminCustomersPage() {
                         </AvatarFallback>
                       </Avatar>
                       <div className="min-w-0">
-                        <p className="truncate font-medium">{c.name ?? "—"}</p>
+                        <Link href={`/admin/customers/${c.id}`} className="truncate font-medium text-primary hover:underline">
+                          {c.name ?? "—"}
+                        </Link>
                         <p className="truncate text-xs text-muted-foreground">{c.email}</p>
                       </div>
                     </div>
@@ -69,6 +83,23 @@ export default async function AdminCustomersPage() {
           </tbody>
         </table>
       </div>
+
+      {result.pages > 1 && (
+        <div className="mt-4 flex justify-center gap-2">
+          {Array.from({ length: result.pages }, (_, i) => i + 1).map((p) => (
+            <Link
+              key={p}
+              href={buildUrl(p)}
+              className={`flex h-9 w-9 items-center justify-center rounded-md border text-sm font-medium ${
+                p === result.page ? "border-primary bg-primary text-primary-foreground" : "bg-card hover:bg-muted"
+              }`}
+              aria-current={p === result.page ? "page" : undefined}
+            >
+              {p}
+            </Link>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

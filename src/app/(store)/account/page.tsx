@@ -6,6 +6,7 @@ import { getUserProfile, listAddresses } from "@/services/users.service";
 import { getUserOrders } from "@/services/orders.service";
 import { getWishlistCount } from "@/services/wishlist.service";
 import { getSessionUser } from "@/lib/auth-guard";
+import { mergeGuestCartAction } from "@/actions/cart";
 import { formatPKR, formatDate } from "@/lib/utils";
 import { STATUS_BADGE_CLASSES } from "@/lib/constants";
 import { Badge } from "@/components/ui/badge";
@@ -18,7 +19,17 @@ export default async function AccountPage() {
   const user = await getSessionUser();
   if (!user) redirect("/login?callbackUrl=/account");
 
-  const [profile, orders, wishlistCount, addresses] = await Promise.all([
+  // Phase 3, H-6/D7: /account is the default post-login landing page
+  // (safeCallbackUrl falls back to /account), so merge any guest cart here:
+  // a customer who signed in with items in a guest cart then sees them on
+  // /cart without having to visit checkout first. The merge touches only
+  // the cart, so it runs in parallel with the profile/orders/wishlist/
+  // address reads — and it is awaited, so the merge is done before the
+  // customer can navigate on to /cart. No summary is shown here (this page
+  // has no cart UI); when the merge happens on /cart or /checkout instead,
+  // the summary surfaces as a notice there.
+  const [, profile, orders, wishlistCount, addresses] = await Promise.all([
+    mergeGuestCartAction(),
     getUserProfile(user.id),
     getUserOrders(user.id, 1, 4),
     getWishlistCount(user.id),

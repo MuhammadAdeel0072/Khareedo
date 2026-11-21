@@ -215,6 +215,22 @@ BEGIN
   SELECT RAISE(ABORT, 'Inventory_version_check');
 END;
 
+CREATE TRIGGER "Inventory_quantity_check_insert"
+BEFORE INSERT ON "Inventory"
+FOR EACH ROW
+WHEN (NEW."quantity" >= 0) IS NOT TRUE
+BEGIN
+  SELECT RAISE(ABORT, 'Inventory_quantity_check');
+END;
+
+CREATE TRIGGER "Inventory_quantity_check_update"
+BEFORE UPDATE ON "Inventory"
+FOR EACH ROW
+WHEN (NEW."quantity" >= 0) IS NOT TRUE
+BEGIN
+  SELECT RAISE(ABORT, 'Inventory_quantity_check');
+END;
+
 CREATE TRIGGER "Coupon_reservation_counters_check_insert"
 BEFORE INSERT ON "Coupon"
 FOR EACH ROW
@@ -534,4 +550,38 @@ BEGIN
   SELECT RAISE(ABORT, 'PaymentRefund_reconciliation_check');
 END;
 
+-- Product variants (Phase 3, Chunk 8 — D12): mirror the partial unique
+-- indexes from migration 20261120000003. Prisma's compound uniques
+-- (productId, variantId) and (cartId, productId, variantId) treat NULLs as
+-- distinct, so without these a second product-level inventory row or a
+-- second no-variant cart line would slip through in tests while Postgres
+-- rejects it.
+CREATE UNIQUE INDEX "Inventory_productId_null_variant_key" ON "Inventory"("productId") WHERE "variantId" IS NULL;
+CREATE UNIQUE INDEX "CartItem_cartId_productId_null_variant_key" ON "CartItem"("cartId", "productId") WHERE "variantId" IS NULL;
+
+-- One redemption per user per coupon (Phase 3, Chunk 11 — D11/M-20): mirror
+-- the partial unique index from migration 20261120000006. The per-user
+-- check in code is a pre-check, so without this the database would let two
+-- concurrent checkouts for one user and coupon both commit; the coupon
+-- row's usedCount CAS guards total capacity only. CANCELLED rows leave the
+-- index, so cancelling an order frees the redemption.
+CREATE UNIQUE INDEX "Order_userId_couponCode_active_idx" ON "Order"("userId", "couponCode") WHERE "couponCode" IS NOT NULL AND "status" <> 'CANCELLED';
+
+-- First-order-only coupon claim (Phase 3, R-1 — D11): mirror the partial
+-- unique index from migration 20261121000001. At most one non-cancelled
+-- order per user may carry a first-order-only coupon (Order.firstOrderCoupon
+-- set by the checkout services from Coupon.firstOrderOnly), so two
+-- concurrent first orders with DIFFERENT first-order-only coupons cannot
+-- both commit: the second order.create fails with P2002. CANCELLED rows
+-- leave the index, so cancelling an order frees the claim.
+CREATE UNIQUE INDEX "Order_userId_first_order_coupon_active_idx" ON "Order"("userId") WHERE "firstOrderCoupon" IS TRUE AND "status" <> 'CANCELLED';
+
 COMMIT;
+
+-- Case-insensitive email lookup (DB optimisation stream): mirror of the
+-- LOWER("email") expression index in migration 20261121000000. Prisma
+-- cannot express expression indexes, so it lives in raw SQL on both sides.
+-- findUserByEmail runs WHERE LOWER("email") = $1, which cannot use the
+-- @unique b-tree on "email". SQLite supports expression indexes, so the
+-- harness gets the same index shape as production Postgres.
+CREATE INDEX IF NOT EXISTS "User_email_lower_idx" ON "User" (LOWER("email"));

@@ -31,6 +31,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Separator } from "@/components/ui/separator";
 import { cn, formatPKR } from "@/lib/utils";
+import { computeDeliveryFee } from "@/lib/pricing";
+import { CHECKOUT_FETCH_TIMEOUT_MS, fetchWithTimeout } from "@/lib/fetch-with-timeout";
 import {
   availablePaymentMethods,
   defaultPaymentMethod,
@@ -40,7 +42,14 @@ import {
   addressFieldErrors,
   isValidCustomerEmail,
 } from "@/lib/checkout-validation";
-import type { CartDetails } from "@/types/cart";
+import { PROVINCES } from "@/lib/validation";
+import {
+  EXPRESS_DELIVERY_SHORT,
+  EXPRESS_DELIVERY_WINDOW,
+  STANDARD_DELIVERY_SHORT,
+  STANDARD_DELIVERY_WINDOW,
+} from "@/lib/delivery";
+import type { CartDetails, GuestCartMergeSummary } from "@/types/cart";
 import { ProductImage } from "@/components/products/product-image";
 import { WhatsAppSupportLink } from "@/components/layout/whatsapp-float";
 
@@ -55,6 +64,7 @@ interface Quote {
   total: number;
   couponError?: string;
   couponApplied?: string;
+  promotionApplied?: string;
   itemCount: number;
 }
 
@@ -85,7 +95,7 @@ export interface CheckoutConfig {
   storeName: string;
 }
 
-const STEPS = ["Cart", "Address", "Payment", "Review"] as const;
+const STEPS = ["Address", "Delivery", "Payment", "Review"] as const;
 
 const EMPTY_FORM: CheckoutAddress = {
   label: "Home",
@@ -99,18 +109,9 @@ const EMPTY_FORM: CheckoutAddress = {
   postalCode: "",
 };
 
-const PROVINCES = [
-  "Punjab",
-  "Sindh",
-  "Khyber Pakhtunkhwa",
-  "Balochistan",
-  "Gilgit-Baltistan",
-  "Azad Kashmir",
-  "Islamabad Capital Territory",
-];
-
 export function CheckoutFlow({
   cart,
+  mergeSummary,
   user,
   savedAddresses,
   config,
@@ -118,6 +119,10 @@ export function CheckoutFlow({
   initialEmail,
 }: {
   cart: CartDetails;
+  /** Guest-cart merge report from the checkout page (Phase 3, H-7) — shown
+   *  once at the top of the flow so the customer knows what was merged and
+   *  what was skipped and why. Optional: other callers render without it. */
+  mergeSummary?: GuestCartMergeSummary;
   user: { id: string; name?: string | null; email?: string | null } | null;
   savedAddresses: CheckoutAddress[];
   config: CheckoutConfig;
@@ -139,6 +144,17 @@ export function CheckoutFlow({
   const [step, setStep] = useState(1);
   const [placing, setPlacing] = useState(false);
   const [paymentAttemptInitiated, setPaymentAttemptInitiated] = useState(false);
+  // Guest-cart merge report (Phase 3, H-7): shown once at the top of the
+  // flow, dismissible. Empty summaries (nothing merged, nothing skipped)
+  // render nothing.
+  const [mergeNotice, setMergeNotice] = useState<GuestCartMergeSummary | null>(() =>
+    mergeSummary && (mergeSummary.merged.length > 0 || mergeSummary.skipped.length > 0)
+      ? mergeSummary
+      : null
+  );
+  // Step-1 "Continue" busy state (Phase 3, M-35): the address save is
+  // async — without it a double-click double-POSTs /api/account/addresses.
+  const [savingAddress, setSavingAddress] = useState(false);
   const [updatingItemId, setUpdatingItemId] = useState<string | null>(null);
   const [giftWrapPendingId, setGiftWrapPendingId] = useState<string | null>(null);
 
@@ -190,10 +206,16 @@ export function CheckoutFlow({
   const [couponInput, setCouponInput] = useState("");
   const [couponCode, setCouponCode] = useState("");
   const [quote, setQuote] = useState<Quote | null>(null);
+  // A failed quote is a state, not a stale total (Phase 3, M-36): while it
+  // is set, Confirm is disabled and the summary shows the error instead of
+  // a misleading "Rs 0".
+  const [quoteError, setQuoteError] = useState<string | null>(null);
   const [completedQuoteRequest, setCompletedQuoteRequest] = useState<string | null>(null);
 
+  // Quantities are effective (live-stock-clamped), so a line can only be
+  // unavailable when it is out of stock — never by quantity over stock.
   const purchasable = useMemo(() => cartState.items.filter((i) => !i.outOfStock), [cartState.items]);
-  const hasStockProblem = purchasable.length < cartState.items.length || cartState.items.some((i) => i.quantity > i.stock);
+  const hasStockProblem = purchasable.length < cartState.items.length;
   const wrappedUnits = useMemo(
     () => purchasable.reduce((s, i) => (i.giftWrap ? s + i.quantity : s), 0),
     [purchasable]
@@ -204,7 +226,7 @@ export function CheckoutFlow({
     if (placing || paymentAttemptInitiated || updatingItemId !== null || giftWrapPendingId !== null) return;
     setGiftWrapPendingId(itemId);
     try {
-      const res = await fetch("/api/cart", {
+      const res = await fetchWithTimeout("/api/cart", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ itemId, giftWrap: wrap }),
@@ -226,7 +248,7 @@ export function CheckoutFlow({
 
     setUpdatingItemId(itemId);
     try {
-      const res = await fetch("/api/cart", {
+      const res = await fetchWithTimeout("/api/cart", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ itemId, quantity }),
@@ -259,7 +281,10 @@ export function CheckoutFlow({
 
     async function refreshQuote() {
       try {
-        const res = await fetch("/api/checkout/quote", {
+        // 15s default deadline: a stalled quote used to hang the summary
+        // on "…" forever; a timeout now surfaces the quote-error state
+        // (Confirm disabled) instead of a stale or missing total.
+        const res = await fetchWithTimeout("/api/checkout/quote", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -268,9 +293,22 @@ export function CheckoutFlow({
           }),
         });
         const data = await res.json();
-        if (active && data.ok) setQuote(data.quote as Quote);
+        if (!active) return;
+        if (data.ok) {
+          setQuote(data.quote as Quote);
+          setQuoteError(null);
+        } else {
+          // A failed quote must never leave a stale total behind (M-36):
+          // clear it so Confirm cannot offer "Rs 0" on old numbers.
+          setQuote(null);
+          setQuoteError(data.error ?? "Could not load the order summary. Please retry.");
+        }
       } catch {
-        if (active) toast.error("Could not update the order summary. Please retry.");
+        if (active) {
+          setQuote(null);
+          setQuoteError("Could not load the order summary. Please retry.");
+          toast.error("Could not update the order summary. Please retry.");
+        }
       } finally {
         if (active) setCompletedQuoteRequest(quoteRequestKey);
       }
@@ -310,22 +348,29 @@ export function CheckoutFlow({
 
   async function saveNewAddress(): Promise<CheckoutAddress | null> {
     if (!validateAddress(form) || !validateCustomerEmail(effectiveCustomerEmail(form))) return null;
-    const res = await fetch("/api/account/addresses", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...form, isDefault: addresses.length === 0 }),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.ok) {
-      setFieldErrors(data.errors ?? {});
-      toast.error("Please correct the highlighted fields.");
+    try {
+      const res = await fetchWithTimeout("/api/account/addresses", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...form, isDefault: addresses.length === 0 }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        setFieldErrors(data.errors ?? {});
+        toast.error("Please correct the highlighted fields.");
+        return null;
+      }
+      const saved = data.address as CheckoutAddress;
+      setAddresses((prev) => [saved, ...prev]);
+      setSelectedAddressId(saved.id!);
+      setShowNewForm(false);
+      return saved;
+    } catch {
+      // A network failure is a failed save, not a saved address (M-35):
+      // callers must see null and stop, never proceed as if it persisted.
+      toast.error("Could not save your address. Please check your connection and try again.");
       return null;
     }
-    const saved = data.address as CheckoutAddress;
-    setAddresses((prev) => [saved, ...prev]);
-    setSelectedAddressId(saved.id!);
-    setShowNewForm(false);
-    return saved;
   }
 
   function activeAddress(): CheckoutAddress | null {
@@ -333,11 +378,6 @@ export function CheckoutFlow({
       return addresses.find((a) => a.id === selectedAddressId) ?? null;
     }
     return form;
-  }
-
-  async function toStep(n: number) {
-    if (n === 2 && (!validateAddress(form) || !validateCustomerEmail(effectiveCustomerEmail(form)))) return;
-    setStep(n);
   }
 
   // ─── Place order (FR-21..27) ───
@@ -355,14 +395,25 @@ export function CheckoutFlow({
     }
     setPlacing(true);
     try {
-      // Signed-in + new address → persist it first (FR-05)
+      // Signed-in + new address → persist it first (FR-05). A failed save
+      // aborts the order (M-35): the address the order would ship to was
+      // never saved, so confirming would silently ship to an unsaved form.
       if (user && selectedAddressId === "new") {
-        await saveNewAddress();
+        const saved = await saveNewAddress();
+        if (!saved) {
+          setStep(1);
+          return;
+        }
       }
 
       const onlinePayment = paymentMethod === "ONLINE";
       if (onlinePayment) setPaymentAttemptInitiated(true);
-      const res = await fetch(onlinePayment ? "/api/checkout/safepay/session" : "/api/checkout/place", {
+      // 20s deadline: the server transaction may run up to 15s, so a
+      // shorter timeout would abort orders that are still being placed.
+      // A timeout lands in the catch below (same generic network-error
+      // toast as any dropped response); the idempotency key makes a
+      // retry safe, and the order can be checked under /account/orders.
+      const res = await fetchWithTimeout(onlinePayment ? "/api/checkout/safepay/session" : "/api/checkout/place", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -386,12 +437,21 @@ export function CheckoutFlow({
           giftWrapMessage: giftMessage,
           couponCode,
         }),
-      });
+      }, CHECKOUT_FETCH_TIMEOUT_MS);
       const data = await res.json();
       if (!res.ok || !data.ok) {
         if (data.code === "OUT_OF_STOCK") {
           toast.error(data.error);
           router.push("/cart");
+          return;
+        }
+        if (data.code === "COUPON_UNAVAILABLE") {
+          // The order was NOT placed and no coupon use was consumed (H-5):
+          // pin the reason next to the coupon so it survives the toast.
+          setQuote((prev) =>
+            prev ? { ...prev, couponError: data.error, couponApplied: undefined } : prev
+          );
+          toast.error(data.error ?? "This coupon is no longer available.");
           return;
         }
         toast.error(data.error ?? "Could not place your order. Please try again.");
@@ -418,6 +478,10 @@ export function CheckoutFlow({
       toast.error("Network problem — your order was not placed. Please try again.");
     } finally {
       setPlacing(false);
+      // A failed online attempt must not soft-lock checkout (H-18): the
+      // lock only matters while the browser is leaving for the payment
+      // page, so every non-redirect exit resets it.
+      setPaymentAttemptInitiated(false);
     }
   }
 
@@ -439,13 +503,48 @@ export function CheckoutFlow({
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_400px]">
       <div className="order-2 min-w-0 lg:order-1 lg:col-start-1 lg:row-start-1">
+        {/* Guest-cart merge report (Phase 3, H-7): what was merged from the
+            guest cart and what was skipped and why — shown once, dismissible. */}
+        {mergeNotice && (
+          <div className="mb-4 rounded-xl border border-primary/30 bg-brand-50 p-4" role="status">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                {mergeNotice.merged.length > 0 && (
+                  <p className="text-sm font-semibold">
+                    Your guest cart was merged — {mergeNotice.merged.length} item{mergeNotice.merged.length === 1 ? "" : "s"} added to your cart.
+                  </p>
+                )}
+                {mergeNotice.skipped.length > 0 && (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Couldn&apos;t add {mergeNotice.skipped.length} item{mergeNotice.skipped.length === 1 ? "" : "s"}:{" "}
+                    {mergeNotice.skipped
+                      .map(
+                        (line) =>
+                          `${line.name} (${line.reason === "unavailable" ? "no longer available" : line.reason === "out_of_stock" ? "out of stock" : "already in your cart at the maximum quantity"})`
+                      )
+                      .join(", ")}
+                    .
+                  </p>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => setMergeNotice(null)}
+                className="shrink-0 rounded-md p-1 text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                aria-label="Dismiss merge notice"
+              >
+                <X className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+        )}
         {/* Stepper — step labels are hidden below sm, so name the current step for
             small screens instead of showing bare numbers. */}
         <p className="mb-3 text-center text-sm font-medium text-muted-foreground sm:hidden" aria-live="polite">
-          Step {step} of 3: <span className="font-semibold text-foreground">{STEPS[step]}</span>
+          Step {step} of 4: <span className="font-semibold text-foreground">{STEPS[step - 1]}</span>
         </p>
         <ol className="mb-6 flex items-center justify-center gap-0 sm:gap-2" aria-label="Checkout progress">
-          {STEPS.slice(1).map((label, i) => {
+          {STEPS.map((label, i) => {
             const n = i + 1;
             const state = step === n ? "current" : step > n ? "done" : "todo";
             return (
@@ -471,7 +570,7 @@ export function CheckoutFlow({
                     {label}
                   </span>
                 </span>
-                {n < 3 && <span className={cn("mx-1 h-0.5 w-8 sm:w-14", step > n ? "bg-primary" : "bg-muted")} aria-hidden="true" />}
+                {n < 4 && <span className={cn("mx-1 h-0.5 w-8 sm:w-14", step > n ? "bg-primary" : "bg-muted")} aria-hidden="true" />}
               </li>
             );
           })}
@@ -623,17 +722,30 @@ export function CheckoutFlow({
               <Button
                 size="lg"
                 className="w-full sm:w-auto"
+                disabled={savingAddress}
                 onClick={async () => {
+                  if (savingAddress) return;
                   if (user && selectedAddressId === "new" && showNewForm) {
-                    const saved = await saveNewAddress();
-                    if (!saved) return;
+                    setSavingAddress(true);
+                    try {
+                      const saved = await saveNewAddress();
+                      if (!saved) return;
+                    } finally {
+                      setSavingAddress(false);
+                    }
                   } else if (!user && (!validateAddress(form) || !validateCustomerEmail(form.email ?? ""))) {
                     return;
                   }
                   setStep(2);
                 }}
               >
-                Continue to Delivery
+                {savingAddress ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" /> Saving…
+                  </>
+                ) : (
+                  "Continue to Delivery"
+                )}
               </Button>
             </div>
           </SectionCard>
@@ -644,18 +756,27 @@ export function CheckoutFlow({
           <>
             <SectionCard icon={<Truck className="h-5 w-5" />} title="Delivery Method" subtitle="Choose how you want to receive your order">
               <RadioGroup value={deliveryMethod} onValueChange={(v) => setDeliveryMethod(v as "STANDARD" | "EXPRESS")} className="grid gap-3" disabled={placing || paymentAttemptInitiated}>
+                {/* Standard fee comes from the shared pricing engine, not a
+                    second inline copy of the free-delivery rule (Phase 3,
+                    chunk 12): same result, one definition of the rule. */}
                 <DeliveryOption
+                  id="delivery-standard"
+                  value="STANDARD"
                   selected={deliveryMethod === "STANDARD"}
-                  onSelect={() => setDeliveryMethod("STANDARD")}
                   title="Standard Delivery"
-                  desc="3 - 5 working days"
-                  fee={quote?.subtotal !== undefined && config.freeDeliveryThreshold > 0 && quote.subtotal >= config.freeDeliveryThreshold ? 0 : config.deliveryFeeStandard}
+                  desc={STANDARD_DELIVERY_WINDOW}
+                  fee={computeDeliveryFee(quote?.subtotal ?? 0, "STANDARD", {
+                    standardFee: config.deliveryFeeStandard,
+                    expressFee: config.deliveryFeeExpress,
+                    freeThreshold: config.freeDeliveryThreshold,
+                  })}
                 />
                 <DeliveryOption
+                  id="delivery-express"
+                  value="EXPRESS"
                   selected={deliveryMethod === "EXPRESS"}
-                  onSelect={() => setDeliveryMethod("EXPRESS")}
                   title="Express Delivery"
-                  desc="1 - 2 working days"
+                  desc={EXPRESS_DELIVERY_WINDOW}
                   fee={config.deliveryFeeExpress}
                 />
               </RadioGroup>
@@ -684,6 +805,9 @@ export function CheckoutFlow({
                         </span>
                         <span className="min-w-0 flex-1">
                           <span className="block truncate text-sm font-semibold">{item.name}</span>
+                          {item.variantLabel ? (
+                            <span className="block truncate text-xs text-muted-foreground">{item.variantLabel}</span>
+                          ) : null}
                           <span className="block text-xs text-muted-foreground">
                             Qty {item.quantity} · {formatPKR(config.giftWrapCharge * item.quantity)}
                           </span>
@@ -811,7 +935,7 @@ export function CheckoutFlow({
                   title="Delivery & Payment"
                   onEdit={() => setStep(2)}
                   lines={[
-                    deliveryMethod === "EXPRESS" ? "Express Delivery (1-2 days)" : "Standard Delivery (3-5 days)",
+                    deliveryMethod === "EXPRESS" ? `Express Delivery (${EXPRESS_DELIVERY_SHORT})` : `Standard Delivery (${STANDARD_DELIVERY_SHORT})`,
                     paymentMethod === "COD"
                       ? "Cash on Delivery"
                       : paymentMethod === "ONLINE"
@@ -841,9 +965,17 @@ export function CheckoutFlow({
                           </span>
                         )}
                       </p>
+                      {item.variantLabel ? (
+                        <p className="truncate text-xs text-muted-foreground">{item.variantLabel}</p>
+                      ) : null}
                       <p className="text-xs text-muted-foreground">
                         Qty: {item.quantity} × {formatPKR(item.price)}
                       </p>
+                      {item.outOfStock && (
+                        <p className="mt-0.5 text-xs font-medium text-destructive">
+                          Out of stock — this item will not be in your order.
+                        </p>
+                      )}
                     </div>
                     <span className="text-sm font-bold">{formatPKR(item.lineTotal)}</span>
                   </li>
@@ -851,20 +983,37 @@ export function CheckoutFlow({
               </ul>
             </SectionCard>
 
+            {hasStockProblem && (
+              <div className="mt-4 rounded-xl border border-destructive/40 bg-destructive/5 p-4" role="alert">
+                <p className="text-sm font-semibold text-destructive">Some items are no longer available</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  One or more items in your cart are out of stock. Remove them from your cart before confirming your order.
+                </p>
+                <Button asChild variant="outline" size="sm" className="mt-3">
+                  <Link href="/cart">Review your cart</Link>
+                </Button>
+              </div>
+            )}
+
             <div className="mt-5 flex flex-col-reverse items-center justify-between gap-3 sm:flex-row">
               <Button variant="ghost" onClick={() => setStep(3)} disabled={placing}>← Back</Button>
-              <Button size="lg" className="h-12 w-full text-base sm:w-auto" onClick={placeOrder} disabled={placing || quoting || updatingItemId !== null || giftWrapPendingId !== null}>
+              <Button size="lg" className="h-12 w-full text-base sm:w-auto" onClick={placeOrder} disabled={placing || quoting || quoteError !== null || quote === null || hasStockProblem || updatingItemId !== null || giftWrapPendingId !== null}>
                 {placing ? (
                   <>
                     <Loader2 className="h-4 w-4 animate-spin" /> Placing Order...
                   </>
                 ) : (
                   <>
-                    <Lock className="h-4 w-4" /> Confirm Order — {formatPKR(quote?.total ?? 0)}
+                    <Lock className="h-4 w-4" /> {quote ? `Confirm Order — ${formatPKR(quote.total)}` : "Confirm Order"}
                   </>
                 )}
               </Button>
             </div>
+            {quoteError && (
+              <p className="mt-3 text-center text-sm font-medium text-destructive sm:text-left" role="alert">
+                {quoteError}
+              </p>
+            )}
             <p className="mt-3 text-center text-xs text-muted-foreground sm:text-left">
               Totals are calculated on the server — the amount shown is what you pay.
             </p>
@@ -928,6 +1077,11 @@ export function CheckoutFlow({
                     {formatPKR(item.price)} each
                   </span>
                 </div>
+                {item.outOfStock && (
+                  <p className="mt-1 text-[11px] font-medium text-destructive">
+                    Out of stock — will not be included
+                  </p>
+                )}
               </div>
             </li>
           ))}
@@ -961,7 +1115,7 @@ export function CheckoutFlow({
             <div className="mt-2 flex items-center justify-between rounded-md bg-brand-50 px-2.5 py-1.5 text-xs">
               <span className="flex items-center gap-1 font-medium text-primary">
                 <Tag className="h-3 w-3" /> {couponCode}
-                {quote?.couponApplied !== couponCode && (
+                {quote?.couponApplied !== couponCode && !quote?.couponError && (
                   <span className="font-normal text-muted-foreground">— checking…</span>
                 )}
               </span>
@@ -987,14 +1141,14 @@ export function CheckoutFlow({
         <Separator className="my-4" />
 
         <div className="space-y-2.5 text-sm">
-          <Row label="Subtotal" value={formatPKR(quote?.subtotal ?? 0)} />
+          <Row label="Subtotal" value={quoteError ? "—" : formatPKR(quote?.subtotal ?? 0)} />
           {(quote?.discountTotal ?? 0) > 0 && (
-            <Row label={`Discount${quote?.couponApplied ? ` (${quote.couponApplied})` : ""}`} value={`− ${formatPKR(quote!.discountTotal)}`} accent />
+            <Row label={`Discount${quote?.couponApplied ? ` (${quote.couponApplied})` : quote?.promotionApplied ? ` (${quote.promotionApplied})` : ""}`} value={`− ${formatPKR(quote!.discountTotal)}`} accent />
           )}
           <Row
             label="Delivery Charges"
             value={
-              quote === null ? "…" : quote.deliveryFee === 0 ? "FREE" : formatPKR(quote.deliveryFee)
+              quoteError ? "—" : quote === null ? "…" : quote.deliveryFee === 0 ? "FREE" : formatPKR(quote.deliveryFee)
             }
           />
           {(quote?.giftWrapCharge ?? 0) > 0 && (
@@ -1009,9 +1163,15 @@ export function CheckoutFlow({
 
         <div className="flex items-center justify-between rounded-lg bg-brand-50 px-3 py-2.5">
           <span className="text-sm font-bold">Total Amount</span>
-          <span className="text-xl font-extrabold text-primary">
-            {quoting ? <Loader2 className="h-5 w-5 animate-spin text-primary" aria-label="Updating total" /> : formatPKR(quote?.total ?? 0)}
-          </span>
+          {quoteError ? (
+            <span className="max-w-55 text-right text-xs font-medium text-destructive" role="alert">
+              {quoteError}
+            </span>
+          ) : (
+            <span className="text-xl font-extrabold text-primary">
+              {quoting ? <Loader2 className="h-5 w-5 animate-spin text-primary" aria-label="Updating total" /> : formatPKR(quote?.total ?? 0)}
+            </span>
+          )}
         </div>
 
         <div className="mt-4 flex items-center gap-2 rounded-lg border p-3 text-xs text-muted-foreground">
@@ -1093,26 +1253,38 @@ function Field({
 }
 
 function DeliveryOption({
+  id,
+  value,
   selected,
-  onSelect,
   title,
   desc,
   fee,
 }: {
+  id: string;
+  value: "STANDARD" | "EXPRESS";
   selected: boolean;
-  onSelect: () => void;
   title: string;
   desc: string;
   fee: number;
 }) {
+  // Radix RadioGroup: the item's value MUST match the group's value
+  // (Phase 3, chunk 12 follow-up B). It used to be `value={title}` —
+  // "Standard Delivery" — while the group held "STANDARD", so no item
+  // ever matched: nothing showed checked, arrow-key navigation did
+  // nothing, and clicking fired onValueChange with the title, leaving
+  // deliveryMethod as "Standard Delivery" — which placeOrderSchema
+  // (z.enum(["STANDARD", "EXPRESS"])) rejects. Same pattern as
+  // PaymentOption: htmlFor + id association, the group is the only
+  // writer.
   return (
     <Label
+      htmlFor={id}
       className={cn(
-        "flex cursor-pointer items-center gap-3 rounded-xl border p-4 transition",
+        "flex cursor-pointer items-center gap-3 rounded-xl border p-4 transition has-[button[data-state=checked]]:border-primary has-[button[data-state=checked]]:bg-brand-50 has-[button[data-state=checked]]:ring-1 has-[button[data-state=checked]]:ring-primary",
         selected ? "border-primary bg-brand-50 ring-1 ring-primary" : "hover:border-muted-foreground/40"
       )}
     >
-      <RadioGroupItem value={title} checked={selected} onClick={onSelect} />
+      <RadioGroupItem value={value} id={id} />
       <Truck className="h-5 w-5 text-primary" aria-hidden="true" />
       <span className="flex-1">
         <span className="block text-sm font-bold">{title}</span>

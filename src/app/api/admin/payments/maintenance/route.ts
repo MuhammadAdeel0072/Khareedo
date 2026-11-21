@@ -9,7 +9,7 @@ import { z } from "zod";
 import { timingSafeEqual } from "node:crypto";
 import { requireAdminMfaVerified, AuthError } from "@/lib/auth-guard";
 import { rateLimit } from "@/lib/rate-limit";
-import { parseBody, jsonOk } from "@/lib/api";
+import { parseBody, jsonOk, handleRoute } from "@/lib/api";
 import {
   ADMIN_AUDIT_ACTIONS,
   adminAuditContext,
@@ -50,6 +50,9 @@ function tokenMatches(received: string | null, expected: string): boolean {
 }
 
 export async function POST(request: Request) {
+  // Stage 3 audit, L-2: wrapped in handleRoute so a non-auth throw
+  // becomes a JSON 500 instead of Next.js's default HTML 500 page.
+  return handleRoute(async () => {
   try {
     const user = await requireAdminMfaVerified();
     const limit = rateLimit(`payments-maintenance:${user.id}`, 10, 60_000);
@@ -85,6 +88,7 @@ export async function POST(request: Request) {
     }
     throw error;
   }
+  }, request);
 }
 
 

@@ -60,6 +60,17 @@ vi.mock("@/services/products.service", () => ({
   adminUpdateProduct: mocks.adminUpdateProduct,
   adminGetProduct: vi.fn(),
   adminArchiveProduct: vi.fn(),
+  // product-api-errors maps this class with instanceof, so the mock must
+  // export a real class (not a stub) for the mapper to load.
+  InactiveCategoryError: class InactiveCategoryError extends Error {
+    constructor(
+      message: string,
+      public categoryId: string,
+    ) {
+      super(message);
+      this.name = "InactiveCategoryError";
+    }
+  },
 }));
 vi.mock("@supabase/supabase-js", () => ({
   createClient: vi.fn(() => ({
@@ -95,8 +106,6 @@ function productInput(overrides: Record<string, unknown> = {}) {
     comparePrice: null,
     status: "PUBLISHED",
     isFeatured: false,
-    rating: 0,
-    reviewCount: 0,
     tags: "electronics",
     images: ["https://example.com/one.jpg"],
     stock: 3,
@@ -354,6 +363,40 @@ describe("admin product create and edit APIs", () => {
     expect(response.status).toBe(422);
     expect((await responseJson(response)).errors).toHaveProperty(field);
     expect(mocks.adminCreateProduct).not.toHaveBeenCalled();
+  });
+
+  // Ratings are calculated from APPROVED reviews only: a payload carrying
+  // rating/reviewCount is rejected (strict product schema) instead of
+  // overwriting the calculated values.
+  it.each([
+    ["rating", productInput({ rating: 4.5 })],
+    ["reviewCount", productInput({ reviewCount: 12 })],
+    ["rating and reviewCount", productInput({ rating: 5, reviewCount: 3 })],
+  ])("rejects create with %s and never reaches the service", async (_case, input) => {
+    const response = await createProduct(
+      new Request("http://localhost/api/admin/products", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(input),
+      })
+    );
+
+    expect(response.status).toBe(422);
+    expect(mocks.adminCreateProduct).not.toHaveBeenCalled();
+  });
+
+  it("rejects update with rating/reviewCount and never reaches the service", async () => {
+    const response = await updateProduct(
+      new Request("http://localhost/api/admin/products/product-1", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(productInput({ rating: 5, reviewCount: 9 })),
+      }),
+      { params: Promise.resolve({ id: "product-1" }) }
+    );
+
+    expect(response.status).toBe(422);
+    expect(mocks.adminUpdateProduct).not.toHaveBeenCalled();
   });
 
   it("returns a field-specific error for an unknown category", async () => {

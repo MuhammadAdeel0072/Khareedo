@@ -142,6 +142,15 @@ a remote database, the audit refuses. The same loopback rule (localhost,
 (script side), and `src/lib/db.ts` (which uses the same host set for its
 TLS decision).
 
+**Production gate (Stage 3 audit, L-4):** the endpoint is dev-audit
+scaffolding, so in production (`NODE_ENV=production`) it answers 404
+exactly like a nonexistent route and reveals nothing about the deployment
+topology. The audit scripts only ever run against a local dev server
+(`NODE_ENV=development`), so the gate does not break them — but a script
+pointed at a production app now gets a 404 instead of a boolean, and must
+refuse (it cannot establish a loopback database there, which is the safe
+outcome).
+
 ## If you are unsure
 
 Stop. Do not run a database command to find out what it does. Check this

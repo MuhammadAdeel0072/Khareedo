@@ -41,6 +41,9 @@ export async function POST(request: Request) {
     return jsonOk({ message: "If an account exists for this email address, a password reset link has been sent." });
   } catch (error) {
     console.error("[auth] password reset request failed", error instanceof Error ? error.name : "UnknownError");
-    return jsonError("Unable to send a password reset email. Please try again later.", 500);
+    // Stage 3 audit, L-1: this handler only ENQUEUES a reset email in
+    // the outbox — it never sends one — so "unable to send a password
+    // reset email" misdescribed an enqueue/DB failure. Say what failed.
+    return jsonError("Something went wrong while processing your request. Please try again later.", 500);
   }
 }

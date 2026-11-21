@@ -37,7 +37,7 @@ export const STOCK_RESTORING_STATUSES: OrderStatus[] = [
 export const PAYMENT_METHODS = ["COD", "ONLINE"] as const;
 export type PaymentMethod = (typeof PAYMENT_METHODS)[number];
 
-export const PAYMENT_STATUSES = ["PENDING", "PAID", "FAILED", "REFUNDED"] as const;
+export const PAYMENT_STATUSES = ["PENDING", "PAID", "FAILED", "REFUNDED", "CANCELLED"] as const;
 export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
 
 export const DELIVERY_METHODS = ["STANDARD", "EXPRESS"] as const;

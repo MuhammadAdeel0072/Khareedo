@@ -32,6 +32,9 @@ export interface AdminPromotion {
   startsAt: string | null;
   endsAt: string | null;
   isActive: boolean;
+  // Optimistic-lock version the row was loaded at (Chunk 11, Low); sent
+  // back on save so a stale form gets a 409 instead of overwriting.
+  version: number;
 }
 
 interface Draft {
@@ -44,6 +47,7 @@ interface Draft {
   startsAt: string;
   endsAt: string;
   isActive: boolean;
+  version: number | null;
 }
 
 function toInputDate(iso: string | null): string {
@@ -61,7 +65,7 @@ export function PromotionsManager({ initial }: { initial: AdminPromotion[] }) {
 
   function openCreate() {
     setErrors({});
-    setDraft({ id: null, title: "", description: "", type: "PERCENT", value: "", minOrderAmount: "", startsAt: "", endsAt: "", isActive: true });
+    setDraft({ id: null, title: "", description: "", type: "PERCENT", value: "", minOrderAmount: "", startsAt: "", endsAt: "", isActive: true, version: null });
   }
   function openEdit(p: AdminPromotion) {
     setErrors({});
@@ -75,6 +79,7 @@ export function PromotionsManager({ initial }: { initial: AdminPromotion[] }) {
       startsAt: toInputDate(p.startsAt),
       endsAt: toInputDate(p.endsAt),
       isActive: p.isActive,
+      version: p.version,
     });
   }
 
@@ -95,6 +100,10 @@ export function PromotionsManager({ initial }: { initial: AdminPromotion[] }) {
             startsAt: draft.startsAt || "",
             endsAt: draft.endsAt || "",
             isActive: draft.isActive,
+            // Optimistic lock: the version this form was loaded at (omitted
+            // on create — JSON.stringify drops undefined). A stale edit gets
+            // a 409 with "Promotion changed. Refresh before editing."
+            version: draft.version ?? undefined,
           }),
         });
         const data = await res.json();
@@ -133,7 +142,7 @@ export function PromotionsManager({ initial }: { initial: AdminPromotion[] }) {
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-extrabold tracking-tight sm:text-2xl">Promotions</h1>
-          <p className="mt-1 text-sm text-muted-foreground">Store-managed discount campaigns shown on the storefront</p>
+          <p className="mt-1 text-sm text-muted-foreground">Automatic discounts applied at checkout — never stacked with a coupon</p>
         </div>
         <Button className="gap-1.5" onClick={openCreate}>
           <Plus className="h-4 w-4" /> Add Promotion
@@ -213,7 +222,8 @@ export function PromotionsManager({ initial }: { initial: AdminPromotion[] }) {
               </div>
               <div>
                 <Label>End date</Label>
-                <Input type="date" value={draft.endsAt} onChange={(e) => setDraft({ ...draft, endsAt: e.target.value })} className="mt-1.5" />
+                <Input type="date" value={draft.endsAt} onChange={(e) => setDraft({ ...draft, endsAt: e.target.value })} className="mt-1.5" aria-invalid={Boolean(errors.endsAt)} />
+                {errors.endsAt && <p className="mt-1 text-xs text-destructive" role="alert">{errors.endsAt}</p>}
               </div>
               <div className="sm:col-span-2">
                 <Label>Description</Label>

@@ -4,7 +4,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
-import { Archive, Loader2, Pencil, Plus, Search, Upload } from "lucide-react";
+import { Archive, Loader2, Pencil, Plus, RotateCcw, Search, Upload } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -54,6 +54,8 @@ export function ProductsManager({
   pages,
   page,
   q,
+  status,
+  categoryId,
   categories,
 }: {
   items: AdminProductRow[];
@@ -61,6 +63,8 @@ export function ProductsManager({
   pages: number;
   page: number;
   q?: string;
+  status?: string;
+  categoryId?: string;
   categories: Array<{ id: string; name: string }>;
 }) {
   const router = useRouter();
@@ -98,8 +102,6 @@ export function ProductsManager({
         comparePrice: p.comparePrice,
         status: p.status,
         isFeatured: p.isFeatured,
-        rating: p.rating,
-        reviewCount: p.reviewCount,
         tags: Array.isArray(p.tags) ? p.tags.join(", ") : (p.tags ?? ""),
         images: (p.images ?? []).map((i: string | { url: string }) => (typeof i === "string" ? i : i.url)).filter(Boolean),
         stock: p.stock ?? 0,
@@ -129,6 +131,31 @@ export function ProductsManager({
     });
   }
 
+  /** Restore an archived product to DRAFT (never auto-publish). */
+  function restoreProduct(row: AdminProductRow) {
+    startTransition(async () => {
+      try {
+        const res = await fetch(`/api/admin/products/${row.id}/restore`, { method: "POST" });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) throw new Error(data.error ?? "Could not restore product");
+        toast.success("Product restored to draft");
+        router.refresh();
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "Could not restore product");
+      }
+    });
+  }
+
+  /** Pagination links keep every active filter (search, status, category). */
+  function pageHref(p: number) {
+    const params = new URLSearchParams();
+    params.set("page", String(p));
+    if (q) params.set("q", q);
+    if (status) params.set("status", status);
+    if (categoryId) params.set("categoryId", categoryId);
+    return `/admin/products?${params.toString()}`;
+  }
+
   return (
     <div>
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
@@ -149,11 +176,37 @@ export function ProductsManager({
         </div>
       </div>
 
-      <form action="/admin/products" className="mb-4 flex max-w-sm gap-2">
-        <div className="relative flex-1">
+      <form action="/admin/products" className="mb-4 flex flex-wrap gap-2">
+        <div className="relative min-w-52 flex-1">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
           <Input name="q" defaultValue={q} placeholder="Search products…" className="pl-9" aria-label="Search products" />
         </div>
+        <select
+          name="status"
+          defaultValue={status ?? ""}
+          onChange={(e) => e.currentTarget.form?.requestSubmit()}
+          aria-label="Filter by status"
+          className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+        >
+          <option value="">All statuses</option>
+          <option value="DRAFT">Draft</option>
+          <option value="PUBLISHED">Published</option>
+          <option value="ARCHIVED">Archived</option>
+        </select>
+        <select
+          name="categoryId"
+          defaultValue={categoryId ?? ""}
+          onChange={(e) => e.currentTarget.form?.requestSubmit()}
+          aria-label="Filter by category"
+          className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+        >
+          <option value="">All categories</option>
+          {categories.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name}
+            </option>
+          ))}
+        </select>
         <Button type="submit" variant="secondary">Search</Button>
       </form>
 
@@ -209,15 +262,27 @@ export function ProductsManager({
                     <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openEdit(p)} aria-label={`Edit ${p.name}`}>
                       <Pencil className="h-4 w-4" />
                     </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                      onClick={() => setDeleting(p)}
-                      aria-label={`Archive ${p.name}`}
-                    >
-                      <Archive className="h-4 w-4" />
-                    </Button>
+                    {p.status === "ARCHIVED" ? (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-muted-foreground hover:text-primary"
+                        onClick={() => restoreProduct(p)}
+                        aria-label={`Restore ${p.name}`}
+                      >
+                        <RotateCcw className="h-4 w-4" />
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                        onClick={() => setDeleting(p)}
+                        aria-label={`Archive ${p.name}`}
+                      >
+                        <Archive className="h-4 w-4" />
+                      </Button>
+                    )}
                   </div>
                 </td>
               </tr>
@@ -261,14 +326,25 @@ export function ProductsManager({
                 <Button variant="outline" size="sm" className="h-8 gap-1.5" onClick={() => openEdit(p)}>
                   <Pencil className="h-3.5 w-3.5" /> Edit
                 </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-8 gap-1.5 text-muted-foreground hover:text-destructive"
-                  onClick={() => setDeleting(p)}
-                >
-                  <Archive className="h-3.5 w-3.5" /> Archive
-                </Button>
+                {p.status === "ARCHIVED" ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 gap-1.5 text-muted-foreground hover:text-primary"
+                    onClick={() => restoreProduct(p)}
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" /> Restore
+                  </Button>
+                ) : (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 gap-1.5 text-muted-foreground hover:text-destructive"
+                    onClick={() => setDeleting(p)}
+                  >
+                    <Archive className="h-3.5 w-3.5" /> Archive
+                  </Button>
+                )}
               </div>
             </div>
           </div>
@@ -283,7 +359,7 @@ export function ProductsManager({
           {Array.from({ length: pages }, (_, i) => i + 1).map((p) => (
             <Link
               key={p}
-              href={`/admin/products?page=${p}${q ? `&q=${encodeURIComponent(q)}` : ""}`}
+              href={pageHref(p)}
               className={`flex h-9 w-9 items-center justify-center rounded-md border text-sm font-medium ${
                 p === page ? "border-primary bg-primary text-primary-foreground" : "bg-card hover:bg-muted"
               }`}
@@ -310,7 +386,7 @@ export function ProductsManager({
           <AlertDialogHeader>
             <AlertDialogTitle>Archive &quot;{deleting?.name}&quot;?</AlertDialogTitle>
             <AlertDialogDescription>
-              It will be removed from the store but kept for order history. Restore anytime by editing its visibility.
+              It will be removed from the store but kept for order history. Restore it anytime from the Archived filter.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

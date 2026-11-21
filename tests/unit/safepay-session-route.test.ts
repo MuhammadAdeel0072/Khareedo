@@ -28,7 +28,25 @@ const mocks = vi.hoisted(() => {
 
 vi.mock("next/headers", () => ({ cookies: mocks.cookies }));
 vi.mock("@/lib/db", () => ({ db: { $transaction: vi.fn() } }));
-vi.mock("@/lib/auth-guard", () => ({ getSessionUser: mocks.getSessionUser }));
+vi.mock("@/lib/auth-guard", () => ({
+  getSessionUser: mocks.getSessionUser,
+  AuthError: class AuthError extends Error {
+    status: number;
+    constructor(message: string, status = 401) { super(message); this.status = status; }
+  },
+  // handleRoute (src/lib/api.ts) checks instanceof MfaRequiredError on
+  // its error path, so the mock must define it (Stage 3 audit, M-7 —
+  // the session route is now wrapped in handleRoute).
+  MfaRequiredError: class MfaRequiredError extends Error {
+    code: "MFA_ENROLLMENT_REQUIRED" | "MFA_VERIFICATION_REQUIRED";
+    status: number;
+    constructor(code: "MFA_ENROLLMENT_REQUIRED" | "MFA_VERIFICATION_REQUIRED", message: string, status = 401) {
+      super(message);
+      this.code = code;
+      this.status = status;
+    }
+  },
+}));
 vi.mock("@/services/cart.service", () => ({ resolveCart: mocks.resolveCart }));
 vi.mock("@/services/settings.service", () => ({ getSettings: mocks.getSettings }));
 vi.mock("@/lib/safepay/config", () => ({
@@ -166,5 +184,35 @@ describe("Safepay checkout session route", () => {
     const response = await POST(request());
     expect(response.status).toBe(502);
     expect(await response.json()).not.toHaveProperty("redirectUrl");
+  });
+
+  // Stage 3 audit, M-7: contention is 503 with Retry-After (consistent
+  // with POST /api/checkout/place), not 409 — and an unexpected throw
+  // becomes a JSON 500, not Next.js's HTML 500 page.
+  it("maps pending-order BUSY to 503 with Retry-After, not 409", async () => {
+    mocks.pendingOrder.mockResolvedValue({ kind: "blocked", code: "BUSY" });
+    const response = await POST(request());
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("5");
+    expect(await response.json()).toMatchObject({ ok: false, code: "BUSY" });
+    expect(mocks.checkout).not.toHaveBeenCalled();
+  });
+
+  it("maps checkout-service BUSY to 503 with Retry-After, not 409", async () => {
+    mocks.checkout.mockResolvedValue({ kind: "blocked", code: "BUSY" });
+    const response = await POST(request());
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("5");
+    expect(await response.json()).toMatchObject({ ok: false, code: "BUSY" });
+  });
+
+  it("returns a JSON 500 (not an HTML page) when cart resolution throws", async () => {
+    mocks.resolveCart.mockRejectedValue(new Error("P1001 Can't reach database server"));
+    const response = await POST(request());
+    expect(response.status).toBe(500);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    const body = await response.json();
+    expect(body).toMatchObject({ ok: false });
+    expect(JSON.stringify(body)).not.toContain("P1001");
   });
 });

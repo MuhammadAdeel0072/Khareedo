@@ -12,7 +12,7 @@ import { SAFEPAY_RETURN_STATE_COOKIE } from "@/lib/safepay/return-input";
 import { createSafepayProvider } from "@/lib/safepay/provider";
 import { SAFEPAY_SANDBOX_SESSION_ENABLED } from "@/lib/safepay/readiness";
 import { placeOrderSchema } from "@/lib/validation";
-import { parseBody, jsonError } from "@/lib/api";
+import { parseBody, jsonError, handleRoute } from "@/lib/api";
 import { rateLimit, clientIp } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
@@ -22,11 +22,17 @@ const requestSchema = placeOrderSchema.extend({ paymentMethod: z.literal("ONLINE
 const RESERVATION_TTL_MS = 15 * 60 * 1000;
 const noStore = { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" };
 
-function blocked(code: string, status = 422) {
-  return Response.json({ ok: false, code, error: "Could not start secure checkout. Please try again." }, { status, headers: noStore });
+function blocked(code: string, status = 422, headers?: Record<string, string>) {
+  return Response.json({ ok: false, code, error: "Could not start secure checkout. Please try again." }, { status, headers: { ...noStore, ...headers } });
 }
 
 export async function POST(request: Request) {
+  // Stage 3 audit, M-7: wrapped in handleRoute so an unexpected throw
+  // (DB down in resolveCart/pendingOrder/checkout) becomes a JSON 500
+  // instead of Next.js's default HTML 500 page, which the checkout form
+  // misreported as a network problem. Auth/rate-limit/validation
+  // responses are unchanged; only the uncaught-throw path changes.
+  return handleRoute(async () => {
   const user = await getSessionUser();
   if (!user) {
     return Response.json({ ok: false, code: "AUTHENTICATION_REQUIRED", error: "Please sign in to continue." },
@@ -74,9 +80,13 @@ export async function POST(request: Request) {
     cartId: cart.id,
   });
   if (pending.kind !== "ready") {
-    const status = pending.code === "BUSY" ? 409 :
+    // Stage 3 audit, M-7: BUSY is contention, not a client conflict —
+    // 503 with Retry-After, consistent with POST /api/checkout/place
+    // (which used to be the only place-order path returning 503 here).
+    // PERSISTENCE_UNAVAILABLE stays 503; every other block stays 422.
+    const status = pending.code === "BUSY" ? 503 :
       pending.code === "PERSISTENCE_UNAVAILABLE" ? 503 : 422;
-    return blocked(pending.code, status);
+    return blocked(pending.code, status, pending.code === "BUSY" ? { "Retry-After": "5" } : undefined);
   }
 
   const checkout = createSafepayCheckoutService({
@@ -90,9 +100,14 @@ export async function POST(request: Request) {
     requestKey: parsed.data.idempotencyKey,
   }, owner);
   if (session.kind !== "ready") {
+    // BUSY here is the same contention signal as in the pending-order
+    // step: 503 with Retry-After, not 409. ALREADY_ISSUED /
+    // REQUEST_CONFLICT / CREATION_UNCERTAIN / RESUME_BLOCKED stay 409
+    // (the request itself conflicts with an existing tracker).
     const status = session.kind === "uncertain" || session.code === "AUTHENTICATION_UNAVAILABLE" ? 502 :
-      ["BUSY", "ALREADY_ISSUED", "REQUEST_CONFLICT", "CREATION_UNCERTAIN", "RESUME_BLOCKED"].includes(session.code) ? 409 : 422;
-    return blocked(session.code, status);
+      session.code === "BUSY" ? 503 :
+      ["ALREADY_ISSUED", "REQUEST_CONFLICT", "CREATION_UNCERTAIN", "RESUME_BLOCKED"].includes(session.code) ? 409 : 422;
+    return blocked(session.code, status, session.code === "BUSY" ? { "Retry-After": "5" } : undefined);
   }
 
   // The local signed return state travels in a first-party HttpOnly cookie so the
@@ -108,4 +123,5 @@ export async function POST(request: Request) {
     reference: pending.reference,
     redirectUrl: session.redirect.location(),
   }, { headers: { ...noStore, "Set-Cookie": stateCookie } });
+  }, request);
 }

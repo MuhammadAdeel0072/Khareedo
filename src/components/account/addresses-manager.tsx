@@ -25,6 +25,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { PROVINCES } from "@/lib/validation";
 
 export interface AddressRow {
   id: string;
@@ -38,16 +39,6 @@ export interface AddressRow {
   postalCode: string | null;
   isDefault: boolean;
 }
-
-const PROVINCES = [
-  "Punjab",
-  "Sindh",
-  "Khyber Pakhtunkhwa",
-  "Balochistan",
-  "Gilgit-Baltistan",
-  "Azad Kashmir",
-  "Islamabad Capital Territory",
-];
 
 interface Draft {
   id: string | null; // null = create
@@ -152,14 +143,13 @@ export function AddressesManager({ initial }: { initial: AddressRow[] }) {
         const data = await res.json();
         if (!res.ok || !data.ok) throw new Error(data.error ?? "Could not delete");
         const next = addresses.filter((a) => a.id !== target.id);
-        if (target.isDefault && next.length > 0 && !next.some((a) => a.isDefault)) {
-          const promote = next[0];
-          await fetch(`/api/account/addresses/${promote.id}`, {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ ...promote, isDefault: true }),
-          });
-          setAddresses(next.map((a) => ({ ...a, isDefault: a.id === promote.id })));
+        // The server promotes a new default when the deleted address was
+        // the default and reports it as promotedId (Phase 3, chunk 12
+        // follow-up B) — the client used to issue a second PUT to promote
+        // one itself, unchecked; that second write is gone, and local
+        // state follows the server's choice.
+        if (target.isDefault && data.promotedId) {
+          setAddresses(next.map((a) => ({ ...a, isDefault: a.id === data.promotedId })));
         } else {
           setAddresses(next);
         }
@@ -252,7 +242,8 @@ export function AddressesManager({ initial }: { initial: AddressRow[] }) {
             <form onSubmit={save} className="grid gap-3 sm:grid-cols-2" noValidate>
               <div>
                 <Label className="text-xs text-muted-foreground">Label</Label>
-                <Input value={draft.label} onChange={(e) => set("label", e.target.value)} placeholder="Home / Office" className="mt-1.5" />
+                <Input value={draft.label} onChange={(e) => set("label", e.target.value)} placeholder="Home / Office" className="mt-1.5" aria-invalid={Boolean(errors.label)} />
+                {errors.label && <p className="mt-1 text-xs text-destructive" role="alert">{errors.label}</p>}
               </div>
               <div>
                 <Label className="text-xs text-muted-foreground">Recipient name</Label>
@@ -285,15 +276,18 @@ export function AddressesManager({ initial }: { initial: AddressRow[] }) {
                   onChange={(e) => set("province", e.target.value)}
                   className="mt-1.5 flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   aria-label="Province"
+                  aria-invalid={Boolean(errors.province)}
                 >
                   {PROVINCES.map((p) => (
                     <option key={p}>{p}</option>
                   ))}
                 </select>
+                {errors.province && <p className="mt-1 text-xs text-destructive" role="alert">{errors.province}</p>}
               </div>
               <div>
                 <Label className="text-xs text-muted-foreground">Postal code (optional)</Label>
-                <Input value={draft.postalCode} onChange={(e) => set("postalCode", e.target.value)} className="mt-1.5" inputMode="numeric" />
+                <Input value={draft.postalCode} onChange={(e) => set("postalCode", e.target.value)} className="mt-1.5" inputMode="numeric" aria-invalid={Boolean(errors.postalCode)} />
+                {errors.postalCode && <p className="mt-1 text-xs text-destructive" role="alert">{errors.postalCode}</p>}
               </div>
               <label className="flex cursor-pointer items-center gap-2 sm:col-span-2">
                 <Checkbox checked={draft.isDefault} onCheckedChange={(c) => set("isDefault", c === true)} />

@@ -4,11 +4,13 @@ import { z } from "zod";
 import { placeOrderSchema, checkoutAddressSchema, checkoutCustomerSchema } from "@/lib/validation";
 import { computeOrderPricing, type DiscountRule } from "@/lib/pricing";
 import type { Coupon } from "../../generated/postgres-client";
-import { validateCouponRecord } from "@/lib/coupon-validation";
+import { validateCouponRecord, checkCouponUserEligibility, isPerUserCouponViolation, isFirstOrderClaimViolation } from "@/lib/coupon-validation";
+import { evaluateAutomaticPromotion } from "@/services/promotions.service";
 import { wholePkrToMinor } from "@/lib/safepay/contracts";
 import { generateOrderReference } from "@/lib/utils";
 import type { StoreSettings } from "@/services/settings.service";
 import { bindCheckoutOwner, type PaymentDatabase, type TrustedCheckoutOwner } from "@/services/safepay-attempt.store";
+import { recordOrderStatusHistory } from "@/services/order-status-history.service";
 
 const requestSchema = placeOrderSchema.extend({
   paymentMethod: z.literal("ONLINE"), customer: checkoutCustomerSchema.strict(), address: checkoutAddressSchema.strict(),
@@ -64,42 +66,86 @@ export function createSafepayPendingOrderService(dependencies: {
                 existing.reservationExpiresAt <= now) throw new PendingConflict("CHECKOUT_CLOSED");
             return { kind: "ready", orderId: existing.id, paymentId: existing.activePayment.id, reference: existing.reference, reused: true };
           }
-          // Lock the cart before reading it. A second key cannot reserve the same cart snapshot:
-          // purchased lines are removed in this transaction, while later additions remain intact.
+          // Claim the cart version-gated before reading it (Phase 3, chunk
+          // 3-final — Safepay cart lock Low): the previous plain updateMany
+          // was not a lock — a second concurrent checkout for the same cart
+          // could both proceed to reserve the same lines, and only the
+          // deleteMany exact-snapshot guard at the end caught it. The
+          // version claim fails the loser up front. Purchased lines are
+          // removed in this transaction, while later additions remain intact.
+          const cartHead = await tx.cart.findUnique({ where: { id: context.cartId },
+            select: { id: true, userId: true, version: true } });
+          if (!cartHead || cartHead.userId !== owner.userId) throw new PendingConflict("NOT_ELIGIBLE");
           const locked = await tx.cart.updateMany({ where: { id: context.cartId,
-            userId: owner.userId,
-          }, data: { updatedAt: now } });
-          if (locked.count !== 1) throw new PendingConflict("NOT_ELIGIBLE");
+            userId: owner.userId, version: cartHead.version,
+          }, data: { version: { increment: 1 }, updatedAt: now } });
+          if (locked.count !== 1) throw new PendingConflict("BUSY");
           const cart = await tx.cart.findUniqueOrThrow({ where: { id: context.cartId }, include: {
-            items: { orderBy: { productId: "asc" }, include: { product: {
+            items: { orderBy: { productId: "asc" }, include: { variant: { include: { inventory: true } }, product: {
               include: { inventory: true, images: { orderBy: { sortOrder: "asc" }, take: 1 } },
             } } },
           } });
           if (!cart.items.length) throw new PendingConflict("EMPTY_CART");
           if (cart.items.length > 100) throw new PendingConflict("INVALID_REQUEST");
           // Unlike a preview, payment creation never silently drops unavailable lines.
-          for (const item of cart.items) {
-            if (item.product.status !== "PUBLISHED" || item.product.deletedAt || !item.product.inventory ||
+          // A variant line prices and stocks against the VARIANT (Chunk 8 —
+          // D12): its absolute override replaces the product price, its own
+          // inventory row is the stock, and a gone/deactivated variant
+          // rejects the whole checkout with OUT_OF_STOCK — never a silent
+          // conversion to a no-variant line.
+          const resolvedLines = cart.items.map(item => {
+            const variant = item.variantId ? item.variant : null;
+            const problem =
+              item.variantId && !variant ? "variant-missing"
+              : variant && !variant.isActive ? "variant-inactive"
+              : null;
+            const unitPrice = variant?.priceOverride ?? item.product.price;
+            const inventoryRow = variant
+              ? variant.inventory
+              : item.product.inventory.find(r => r.variantId === null) ?? null;
+            return { item, variant, unitPrice, inventoryRow, problem };
+          });
+          for (const line of resolvedLines) {
+            const { item } = line;
+            if (line.problem || item.product.status !== "PUBLISHED" || item.product.deletedAt || !line.inventoryRow ||
                 !Number.isSafeInteger(item.quantity) || item.quantity < 1 ||
-                item.product.price < 1 || !Number.isSafeInteger(item.product.price * item.quantity) ||
-                item.product.inventory.quantity < item.quantity) throw new PendingConflict("OUT_OF_STOCK");
+                line.unitPrice < 1 || !Number.isSafeInteger(line.unitPrice * item.quantity) ||
+                line.inventoryRow.quantity < item.quantity) throw new PendingConflict("OUT_OF_STOCK");
           }
-          const subtotal = cart.items.reduce((sum, item) => sum + item.product.price * item.quantity, 0);
+          const subtotal = resolvedLines.reduce((sum, line) => sum + line.unitPrice * line.item.quantity, 0);
           let coupon: Coupon | null = null;
           let discount: DiscountRule | null = null;
+          let promotionId: string | null = null;
+          let promotionTitle: string | null = null;
           if (input.couponCode) {
             const validation = validateCouponRecord(await tx.coupon.findUnique({ where: { code: input.couponCode.toUpperCase() } }), subtotal, now);
             if ("error" in validation) throw new PendingConflict("COUPON_UNAVAILABLE");
             coupon = validation.coupon; discount = validation.rule;
+            // Per-user limit + first-order-only (D11/M-20), in-transaction:
+            // the count is a pre-check; the reservedCount CAS below is the
+            // atomic guard against a concurrent claim by the same user for
+            // THIS coupon, and the first-order claim (Order.firstOrderCoupon
+            // set at order.create below, migration 20261121000001) is the
+            // atomic guard across DIFFERENT first-order-only coupons (R-1).
+            if (await checkCouponUserEligibility(tx, coupon, owner.userId)) throw new PendingConflict("COUPON_UNAVAILABLE");
             const held = await tx.coupon.updateMany({ where: {
               id: coupon.id, version: coupon.version, usedCount: coupon.usedCount, reservedCount: coupon.reservedCount,
               maxUses: coupon.maxUses, isActive: true,
               AND: [{ OR: [{ startsAt: null }, { startsAt: { lte: now } }] }, { OR: [{ expiresAt: null }, { expiresAt: { gte: now } }] }],
             }, data: { reservedCount: { increment: 1 }, version: { increment: 1 } } });
             if (held.count !== 1) throw new PendingConflict("COUPON_UNAVAILABLE");
+          } else {
+            // No coupon supplied: the best applicable automatic promotion
+            // applies instead (D10) — it never stacks with a coupon.
+            const promo = await evaluateAutomaticPromotion(tx, subtotal, now);
+            if (promo) {
+              discount = promo.rule;
+              promotionId = promo.promotion.id;
+              promotionTitle = promo.promotion.title;
+            }
           }
           const pricing = computeOrderPricing({
-            lines: cart.items.map(item => ({ productId: item.productId, unitPrice: item.product.price, quantity: item.quantity })),
+            lines: resolvedLines.map(line => ({ productId: line.item.productId, unitPrice: line.unitPrice, quantity: line.item.quantity })),
             discount, delivery: { standardFee: settings.delivery_fee_standard, expressFee: settings.delivery_fee_express,
               freeThreshold: settings.free_delivery_threshold }, deliveryMethod: input.deliveryMethod,
             giftWrap: { enabled: settings.gift_wrap_enabled, charge: settings.gift_wrap_charge },
@@ -109,11 +155,11 @@ export function createSafepayPendingOrderService(dependencies: {
             throw new PendingConflict("INVALID_REQUEST");
           if (pricing.total < 1) throw new PendingConflict("INVALID_REQUEST");
           const amountMinor = wholePkrToMinor(pricing.total);
-          for (const item of cart.items) {
-            const inventory = item.product.inventory!;
+          for (const line of resolvedLines) {
+            const inventory = line.inventoryRow!;
             if ((await tx.inventory.updateMany({ where: {
-              id: inventory.id, version: inventory.version, quantity: { gte: item.quantity },
-            }, data: { quantity: { decrement: item.quantity }, version: { increment: 1 } } })).count !== 1)
+              id: inventory.id, version: inventory.version, quantity: { gte: line.item.quantity },
+            }, data: { quantity: { decrement: line.item.quantity }, version: { increment: 1 } } })).count !== 1)
               throw new PendingConflict("OUT_OF_STOCK");
           }
           const order = await tx.order.create({ data: {
@@ -124,18 +170,35 @@ export function createSafepayPendingOrderService(dependencies: {
             shipPostalCode: input.address.postalCode || null, status: "PENDING", paymentMethod: "ONLINE", paymentStatus: "PENDING",
             ...pricing, deliveryMethod: input.deliveryMethod, giftWrapSelected: pricing.giftWrapCharge > 0,
             giftWrapMessage: input.giftWrapMessage || null, notes: input.notes || null,
-            couponCode: coupon?.code ?? null, couponTitle: discount?.title ?? null,
+            couponCode: coupon?.code ?? null, couponTitle: coupon ? discount?.title ?? null : null,
+            // First-order claim (R-1, migration 20261121000001): the flag
+            // is carried onto the order row, where the partial unique
+            // index makes it the atomic guard — two concurrent first
+            // orders with different first-order coupons cannot both
+            // insert, even though both pre-checks read zero prior orders.
+            firstOrderCoupon: coupon?.firstOrderOnly ?? false,
+            promotionId, promotionTitle,
             paymentFlowVersion: 1, currency: "PKR", nextPaymentAttempt: 2,
             checkoutOwnerKind: owner.kind, checkoutOwnerHash: owner.hash, checkoutFingerprint: fingerprint,
             checkoutAccessExpiresAt: expiresAt, reservationExpiresAt: expiresAt, paymentReviewStatus: "CLEAR",
-            items: { create: cart.items.map(item => ({ productId: item.productId, productName: item.product.name,
-              productSlug: item.product.slug, imageUrl: item.product.images[0]?.url ?? null,
-              unitPrice: item.product.price, quantity: item.quantity, lineTotal: item.product.price * item.quantity,
-              giftWrap: item.giftWrap && settings.gift_wrap_enabled,
-              inventoryReservation: { create: { inventoryId: item.product.inventory!.id, quantity: item.quantity, heldAt: now } },
+            items: { create: resolvedLines.map(line => ({ productId: line.item.productId,
+              variantId: line.item.variantId, variantLabel: line.variant?.label ?? null, variantSku: line.variant?.sku ?? null,
+              productName: line.item.product.name,
+              productSlug: line.item.product.slug, imageUrl: line.item.product.images[0]?.url ?? null,
+              unitPrice: line.unitPrice, quantity: line.item.quantity, lineTotal: line.unitPrice * line.item.quantity,
+              giftWrap: line.item.giftWrap && settings.gift_wrap_enabled,
+              inventoryReservation: { create: { inventoryId: line.inventoryRow!.id, quantity: line.item.quantity, heldAt: now } },
             })) },
             ...(coupon ? { couponReservation: { create: { couponId: coupon.id, heldAt: now } } } : {}),
           } });
+          // Status history (M-6): the pending checkout itself is the first
+          // timeline entry, written in the same transaction as the order.
+          await recordOrderStatusHistory(tx, {
+            orderId: order.id,
+            status: "PENDING",
+            actor: `customer:${owner.userId}`,
+            note: "Payment checkout started",
+          });
           // No READY attempt exists until every inventory/coupon hold has succeeded.
           const payment = await tx.payment.create({ data: { orderId: order.id, provider: "SAFEPAY", amount: pricing.total,
             status: "PENDING", currency: "PKR", expectedAmountMinor: amountMinor, attemptNumber: 1, attemptState: "READY",
@@ -153,6 +216,22 @@ export function createSafepayPendingOrderService(dependencies: {
         }, { isolationLevel: "Serializable", maxWait: 5_000, timeout: 15_000 });
       } catch (error) {
         if (error instanceof PendingConflict) return { kind: "blocked", code: error.code };
+        // The one-redemption-per-user index (migration 20261120000006) is
+        // the atomic guard: a racing second order for the same user +
+        // coupon fails here even though its pre-check read zero prior
+        // orders. It is deterministic — retrying would fail again — so it
+        // must not fall through to the P2002 retry below.
+        if (isPerUserCouponViolation(error)) return { kind: "blocked", code: "COUPON_UNAVAILABLE" };
+        // The first-order claim (migration 20261121000001) is the atomic
+        // guard: a racing second first order for the same user — with a
+        // DIFFERENT first-order-only coupon, so the per-user index above
+        // cannot see it — fails its order.create with P2002 even though
+        // its pre-check read zero prior orders. It is deterministic —
+        // retrying would fail again — so it must not fall through to the
+        // P2002 retry below. The order is rejected with COUPON_UNAVAILABLE;
+        // the coupon is not silently dropped and the order is not placed
+        // without it.
+        if (isFirstOrderClaimViolation(error)) return { kind: "blocked", code: "COUPON_UNAVAILABLE" };
         const code = typeof error === "object" && error !== null && "code" in error ? error.code : null;
         // No provider side effects exist here. Retrying an aborted local transaction is safe.
         if ((code === "P2034" || code === "P2002") && attempt < 2) continue;

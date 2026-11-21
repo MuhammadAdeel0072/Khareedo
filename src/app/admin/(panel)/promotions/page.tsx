@@ -6,7 +6,9 @@ export const dynamic = "force-dynamic";
 export const metadata = { title: "Promotions · Admin" };
 
 export default async function AdminPromotionsPage() {
-  const promotions = await db.promotion.findMany({ orderBy: { createdAt: "desc" } });
+  // Bounded read: the manager renders the full list client-side, so the cap
+  // is a safety bound (far above any realistic promotion count), not pagination.
+  const promotions = await db.promotion.findMany({ orderBy: { createdAt: "desc" }, take: 1000 });
   return (
     <div className="p-4 sm:p-6">
       <PromotionsManager
@@ -20,6 +22,7 @@ export default async function AdminPromotionsPage() {
           startsAt: p.startsAt?.toISOString() ?? null,
           endsAt: p.endsAt?.toISOString() ?? null,
           isActive: p.isActive,
+          version: p.version,
         }))}
       />
     </div>

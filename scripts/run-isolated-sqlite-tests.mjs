@@ -168,16 +168,35 @@ function selectTestFiles(arguments_) {
     ? requested
     : [
         "tests/unit/integration.orders.test.ts",
+        "tests/unit/integration.order-cancel-route.test.ts",
+        "tests/unit/integration.order-status-history.test.ts",
         "tests/unit/integration.payment-relations.test.ts",
         "tests/unit/integration.safepay.test.ts",
+        "tests/unit/integration.safepay-cancel.test.ts",
         "tests/unit/integration.safepay-reservations.test.ts",
         "tests/unit/integration.safepay-webhook.test.ts",
         "tests/unit/integration.safepay-return-verify.test.ts",
         "tests/unit/integration.payment-settlement.test.ts",
         "tests/unit/integration.payment-refunds.test.ts",
         "tests/unit/integration.password-reset.test.ts",
+        "tests/unit/integration.email-outbox.test.ts",
+        "tests/unit/integration.order-emails.test.ts",
         "tests/unit/integration.admin-mfa.test.ts",
         "tests/unit/integration.admin-audit.test.ts",
+        "tests/unit/integration.catalogue.test.ts",
+        "tests/unit/integration.cart.test.ts",
+        "tests/unit/integration.cart-merge-trigger.test.ts",
+        "tests/unit/integration.addresses.test.ts",
+        "tests/unit/integration.payment-review.test.ts",
+        "tests/unit/integration.inventory.test.ts",
+        "tests/unit/integration.variants.test.ts",
+        "tests/unit/integration.reviews.test.ts",
+        "tests/unit/integration.review-routes.test.ts",
+        "tests/unit/integration.customers.test.ts",
+        "tests/unit/integration.reports.test.ts",
+        "tests/unit/integration.promotions.test.ts",
+        "tests/unit/integration.first-order-claim.test.ts",
+        "tests/unit/cart-categories.performance.test.ts",
         "tests/unit/integration.seed.test.ts",
       ];
   const unitTestRoot = path.join(projectRoot, "tests", "unit");
@@ -260,6 +279,7 @@ function safetyCheck() {
 // database; every other file keeps sharing the single database below.
 const ISOLATED_TEST_FILES = new Set([
   "tests/unit/integration.seed.test.ts",
+  "tests/unit/integration.reports.test.ts",
 ]);
 
 function runTestFilesAgainstFreshDatabase(testFiles, appUrl) {

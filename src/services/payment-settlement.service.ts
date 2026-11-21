@@ -2,9 +2,22 @@ import "server-only";
 import type { Payment, Prisma, PrismaClient } from "../../generated/postgres-client";
 import { sha256, trackerIdentity, type PaymentObservation } from "@/lib/payments/evidence-contract";
 import { readTrustedPaymentEvidence, type VerifiedEvidenceData } from "@/lib/payments/verified-evidence";
+import { recordOrderStatusHistory } from "@/services/order-status-history.service";
 
 export type PaymentPersistence = Pick<PrismaClient, "$transaction">;
-export type SettlementResult = { kind: "settled" | "already_settled" | "recorded" | "review_required" | "duplicate" } |
+/** The settled variant carries the refund that was just confirmed, when
+ * the settlement was a refund (Chunk 7-final — D14): the webhook service
+ * needs the settled refund row ids + amount to notify the customer, and
+ * only settlement knows exactly which rows it finalized. A capture
+ * settlement carries no `refund` field. The review_required variant
+ * carries `failureConfirmed` only when a verified FAILURE_CONFIRMED
+ * observation was recorded — the one code path that establishes final
+ * payment failure (today unreachable from production adapters; D5
+ * pending). Callers must not treat any other review_required as a
+ * customer-facing failure. */
+export type SettlementResult = { kind: "settled"; refund?: { refundIds: string[]; amountMinor: string } } |
+  { kind: "already_settled" | "recorded" | "duplicate" } |
+  { kind: "review_required"; failureConfirmed?: true } |
   { kind: "blocked"; code: "UNTRUSTED_EVIDENCE" | "EVENT_BINDING" | "IDENTITY_MISMATCH" | "BUSY" | "PERSISTENCE_UNAVAILABLE" };
 class SettlementConflict extends Error {}
 const include = { items: { orderBy: { productId: "asc" }, include: {
@@ -135,7 +148,18 @@ export function createPaymentSettlementService(database: PaymentPersistence, opt
                 o.kind === "REVERSAL_NOTICE" || (o.kind === "REVIEW_REQUIRED" && o.refundMinor !== null)) {
               const captured = payment.capturedAmountMinor;
               const refunded = payment.refundedAmountMinor ?? BigInt(0);
-              const refundablePayment = payment.status === "PAID" && order.paymentStatus === "PAID" &&
+              // PAID (live order) or CANCELLED (paid order cancelled under
+              // H-12/D2): cancelling an order does not move the money — the
+              // captured payment stays PAID and a refund requested through
+              // the manual flow must still settle from verified evidence.
+              // Any other order payment status (PENDING, FAILED, REFUNDED)
+              // means there is no verified capture to refund. This mirrors
+              // guardRefundable in payment-refund.service.ts: the two gates
+              // must agree, or a refund the service accepts can never
+              // settle and strands PENDING until confirmation timeout.
+              const refundablePayment = payment.status === "PAID" &&
+                (order.paymentStatus === "PAID" ||
+                  (order.paymentStatus === "CANCELLED" && order.status === "CANCELLED")) &&
                 order.acceptedPaymentId === payment.id && !!payment.paidVerifiedAt &&
                 captured !== null && captured === payment.expectedAmountMinor;
 
@@ -181,8 +205,8 @@ export function createPaymentSettlementService(database: PaymentPersistence, opt
               };
               const externalRefundKey = () => "PROVIDER:" + sha256(JSON.stringify(
                 [payment.id, o.occurredAt ?? o.observationId, o.refundMinor]));
-              const createExternalRefund = async (amountMinor: bigint, type: "FULL" | "PARTIAL") => {
-                await tx.paymentRefund.create({ data: {
+              const createExternalRefund = async (amountMinor: bigint, type: "FULL" | "PARTIAL"): Promise<string> => {
+                const created = await tx.paymentRefund.create({ data: {
                   paymentId: payment.id, trackerToken: payment.trackerToken!,
                   providerEnvironment: payment.providerEnvironment!, merchantAccountRef: payment.merchantAccountRef!,
                   amountMinor, currency: "PKR", type, status: "SUCCEEDED", initiatedBy: "PROVIDER",
@@ -194,6 +218,7 @@ export function createPaymentSettlementService(database: PaymentPersistence, opt
                   confirmedAt: o.occurredAt ? new Date(o.occurredAt) : now, settledAt: now,
                   reconcileStatus: "VERIFIED",
                 } });
+                return created.id;
               };
               const finalizeRow = async (row: { id: string; version: number }, confirmedAt: Date) => {
                 if ((await tx.paymentRefund.updateMany({ where: { id: row.id, version: row.version,
@@ -213,15 +238,17 @@ export function createPaymentSettlementService(database: PaymentPersistence, opt
                   if (open.length > 0 && openSum === remaining) {
                     for (const row of open) await finalizeRow(row, now);
                     await advance(captured);
-                    return finish("REFUND_SETTLED", { kind: "settled" }, undefined,
+                    return finish("REFUND_SETTLED", { kind: "settled",
+                      refund: { refundIds: open.map(row => row.id), amountMinor: openSum.toString() } }, undefined,
                       { details: { refundIds: open.map(row => row.id) } });
                   }
                   if (open.length === 0 && remaining > BigInt(0)) {
                     // External dashboard full refund: the ledger row is created from verified
                     // evidence for exactly the remaining refundable balance.
-                    await createExternalRefund(remaining, "FULL");
+                    const externalRefundId = await createExternalRefund(remaining, "FULL");
                     await advance(captured);
-                    return finish("REFUND_SETTLED", { kind: "settled" });
+                    return finish("REFUND_SETTLED", { kind: "settled",
+                      refund: { refundIds: [externalRefundId], amountMinor: remaining.toString() } });
                   }
                   if (open.length === 0 && remaining === BigInt(0)) return finish("ALREADY_SETTLED", { kind: "recorded" });
                   return review("REFUND_ROWS_UNRECONCILABLE");
@@ -271,7 +298,8 @@ export function createPaymentSettlementService(database: PaymentPersistence, opt
               if (match) {
                 await finalizeRow(match, confirmedAt);
                 await advance(refunded + refundMinor);
-                return finish("REFUND_SETTLED", { kind: "settled" }, undefined, { refundId: match.id });
+                return finish("REFUND_SETTLED", { kind: "settled",
+                  refund: { refundIds: [match.id], amountMinor: refundMinor.toString() } }, undefined, { refundId: match.id });
               }
               if (open.length === 0) {
                 // External (dashboard) refund: recorded from verified evidence with a stable
@@ -279,9 +307,10 @@ export function createPaymentSettlementService(database: PaymentPersistence, opt
                 // events with different event ids still cannot create duplicate rows.
                 const existing = await tx.paymentRefund.findUnique({ where: { operationKey: externalRefundKey() } });
                 if (existing) return finish("ALREADY_SETTLED", { kind: "recorded" });
-                await createExternalRefund(refundMinor, refundMinor === remaining ? "FULL" : "PARTIAL");
+                const externalRefundId = await createExternalRefund(refundMinor, refundMinor === remaining ? "FULL" : "PARTIAL");
                 await advance(refunded + refundMinor);
-                return finish("REFUND_SETTLED", { kind: "settled" });
+                return finish("REFUND_SETTLED", { kind: "settled",
+                  refund: { refundIds: [externalRefundId], amountMinor: refundMinor.toString() } });
               }
               // Open rows exist but none matches the asserted amount: never guess an
               // attribution; keep the ledger untouched for manual reconciliation.
@@ -311,7 +340,19 @@ export function createPaymentSettlementService(database: PaymentPersistence, opt
                 (payment.capturedAmountMinor ?? BigInt(0)) !== BigInt(0) || (payment.refundedAmountMinor ?? BigInt(0)) !== BigInt(0))
               return review("INELIGIBLE_PAYMENT_LIFECYCLE");
             if (o.kind !== "CAPTURE_CONFIRMED") {
-              if (o.kind === "FAILURE_CONFIRMED") return review("FAILED_OBSERVATION_HOLDS_RETAINED", "FAILED");
+              if (o.kind === "FAILURE_CONFIRMED") {
+                // Failure finality (D14): a verified FAILURE_CONFIRMED
+                // observation is the one code path that establishes that a
+                // payment definitively failed — the payment is marked
+                // FAILED and the order goes to review with holds retained.
+                // The flag on the result lets the caller notify the
+                // customer. Today no production adapter emits this kind
+                // (verification.ts: a payment.failed webhook never yields
+                // it — D5 pending), so the flag cannot fire in production
+                // until Safepay confirms a failure-final signal.
+                const failureResult = await review("FAILED_OBSERVATION_HOLDS_RETAINED", "FAILED");
+                return { ...failureResult, failureConfirmed: true as const };
+              }
               await changePayment({ reconcileStatus: o.kind, lastReconcileAt: now,
                 nextReconcileAt: new Date(now.getTime() + options.reconcileDelayMs), reconcileAttempts: { increment: 1 },
                 reconcileLeaseToken: null, reconcileLeaseUntil: null });
@@ -343,6 +384,13 @@ export function createPaymentSettlementService(database: PaymentPersistence, opt
               reconcileLeaseToken: null, reconcileLeaseUntil: null, reconcileAttempts: { increment: 1 } });
             await tx.order.update({ where: { id: order.id }, data: { status: "CONFIRMED", paymentStatus: "PAID",
               acceptedPaymentId: payment.id, paymentOwnerOrderId: order.id, paymentReviewStatus: "CLEAR", paymentReviewReason: null } });
+            // Status history (M-6): verified payment confirms the order.
+            await recordOrderStatusHistory(tx, {
+              orderId: order.id,
+              status: "CONFIRMED",
+              actor: "system",
+              note: "Payment verified",
+            });
             // If processing crosses the local hold deadline, roll back consumption/capture and
             // reevaluate with a fresh clock. A stale pre-transaction timestamp cannot settle an expired hold.
             if (clock() >= order.reservationExpiresAt) throw new SettlementConflict();

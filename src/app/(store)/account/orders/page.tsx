@@ -60,6 +60,9 @@ export default async function OrdersPage({
                     <Badge variant="outline" className={STATUS_BADGE_CLASSES[o.status] ?? ""}>
                       {o.status}
                     </Badge>
+                    <Badge variant="outline" className={STATUS_BADGE_CLASSES[o.paymentStatus] ?? ""}>
+                      {o.paymentMethod === "COD" ? "COD" : o.paymentMethod} · {o.paymentStatus}
+                    </Badge>
                     <span className="text-base font-extrabold text-primary">{formatPKR(o.total)}</span>
                   </div>
                 </div>

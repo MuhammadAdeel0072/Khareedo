@@ -80,10 +80,10 @@ describe("worker failure alert", () => {
 
   it("does not alert when the sweep succeeds", async () => {
     const run = vi.fn(async (action: MaintenanceAction, batch: number): Promise<MaintenanceRunResult> => {
-      if (action === "expire_reservations") return { action, batch, released: 0, reviewRequired: 0, failed: 0 };
+      if (action === "expire_reservations") return { action, batch, released: 0, reviewRequired: 0, settled: 0, failed: 0 };
       if (action === "process_webhook_inbox") return { action, batch, considered: 0, outcomes: [] };
       if (action === "reconcile_due_payments") return { action, batch, considered: 0, outcomes: [] };
-      return { action: "reconcile_refunds", batch, considered: 0, outcomes: [] };
+      return { action: "reconcile_refunds", batch, considered: 0, released: 0, outcomes: [] };
     });
     const worker = createPaymentMaintenanceWorker({ run }, { log: () => {} });
     await worker.sweepOnce();

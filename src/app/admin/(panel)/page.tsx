@@ -3,6 +3,7 @@ import Link from "next/link";
 import {
   ArrowRight,
   ArrowUpRight,
+  AlertTriangle,
   Check,
   DollarSign,
   Package,
@@ -29,7 +30,11 @@ import {
   getTopSellingProducts,
   getPendingOrdersCount,
 } from "@/services/reports.service";
-import { getLowStockProducts } from "@/services/inventory.service";
+import { getLowStockProducts, getInventoryReservationDrift } from "@/services/inventory.service";
+import { listEmailOutboxEntries } from "@/services/email-outbox.service";
+import { countPaymentReviewCases } from "@/services/payment-review.service";
+import { getOutboxWorkerHeartbeat, getWorkerHeartbeat } from "@/services/worker-heartbeat";
+import { WorkerHealthRow } from "@/components/admin/worker-health-row";
 import { RevenueChart, StatusDonut } from "@/components/admin/dashboard-charts";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { ProductImage } from "@/components/products/product-image";
@@ -38,7 +43,7 @@ export const dynamic = "force-dynamic";
 export const metadata = { title: "Admin Dashboard" };
 
 export default async function AdminDashboardPage() {
-  const [stats, statusCounts, revenueByDay, recentOrders, topProducts, lowStock, newCustomers, pendingOrders] =
+  const [stats, statusCounts, revenueByDay, recentOrders, topProducts, lowStock, newCustomers, pendingOrders, failedEmails, reviewRequired, drift, worker, outboxWorker] =
     await Promise.all([
       getDashboardStats(),
       getOrderStatusCounts(),
@@ -48,7 +53,24 @@ export default async function AdminDashboardPage() {
       getLowStockProducts(4),
       getRecentCustomers(4),
       getPendingOrdersCount(),
+      // Ops health (M-32): counts come from the same service functions the
+      // detail pages use — outbox viewer, review queue, inventory drift —
+      // so the numbers here can never disagree with those pages.
+      listEmailOutboxEntries({ status: "FAILED", perPage: 1 }),
+      countPaymentReviewCases(),
+      getInventoryReservationDrift(),
+      // D15: the payment maintenance worker heartbeat. The queue counts
+      // above cannot prove the worker is alive — a dead worker leaves
+      // rows PENDING and reservations unexpired, so all three counts can
+      // read zero while nothing is running.
+      getWorkerHeartbeat(),
+      // Stream F: the email outbox worker heartbeat. Same reasoning — a
+      // dead outbox worker leaves rows PENDING (not FAILED), so the
+      // failed-email count above can read zero while no email delivers.
+      getOutboxWorkerHeartbeat(),
     ]);
+  const failedEmailCount = failedEmails.total;
+  const expiredHoldCount = drift.items.filter((i) => i.reasons.includes("EXPIRED")).length;
 
   const statusColors: Record<string, string> = {
     DELIVERED: "var(--chart-1)",
@@ -96,16 +118,68 @@ export default async function AdminDashboardPage() {
           tint="bg-brand-50 text-primary"
           label="Total Revenue"
           value={formatPKR(stats.totalRevenue)}
-          sub={`${formatPKR(stats.revenueThisMonth)} this month`}
+          sub={`${formatPKR(stats.revenueThisMonth)} paid this month · ${formatPKR(stats.pendingRevenue)} pending`}
         />
       </div>
+
+      {/* Operations health (M-32): the three queues that used to be visible
+          only in error logs — failed emails, payments awaiting review, and
+          expired reservations still holding stock. Each count links to the
+          page that resolves it. Holds are never released from here: release
+          and consume stay manual actions in payment review, by design. */}
+      <Card className="mt-4">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <AlertTriangle className="h-4 w-4 text-warning" aria-hidden="true" /> Operations health
+          </CardTitle>
+          <CardDescription>Things waiting on a human — failed deliveries, reviews, stuck holds</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {failedEmailCount === 0 && reviewRequired === 0 && expiredHoldCount === 0 && worker.status === "healthy" && outboxWorker.status === "healthy" ? (
+            <p className="flex items-center gap-1.5 py-2 text-sm text-muted-foreground">
+              <Check className="h-4 w-4 text-primary" aria-hidden="true" /> All clear — nothing needs attention.
+            </p>
+          ) : (
+            <ul className="divide-y">
+              <WorkerHealthRow worker={worker} outboxWorker={outboxWorker} />
+              <li className="flex flex-wrap items-center justify-between gap-2 py-2.5 first:pt-0 last:pb-0">
+                <p className="text-sm">
+                  <span className={`font-bold ${failedEmailCount > 0 ? "text-destructive" : ""}`}>{failedEmailCount}</span>
+                  {" "}failed email{failedEmailCount === 1 ? "" : "s"} in the outbox
+                </p>
+                <Link href="/admin/email-outbox?status=FAILED" className="flex items-center gap-1 text-xs font-semibold text-primary hover:underline">
+                  View outbox <ArrowRight className="h-3 w-3" aria-hidden="true" />
+                </Link>
+              </li>
+              <li className="flex flex-wrap items-center justify-between gap-2 py-2.5 first:pt-0 last:pb-0">
+                <p className="text-sm">
+                  <span className={`font-bold ${reviewRequired > 0 ? "text-destructive" : ""}`}>{reviewRequired}</span>
+                  {" "}payment{reviewRequired === 1 ? "" : "s"} needing review
+                </p>
+                <Link href="/admin/payments/review" className="flex items-center gap-1 text-xs font-semibold text-primary hover:underline">
+                  Review queue <ArrowRight className="h-3 w-3" aria-hidden="true" />
+                </Link>
+              </li>
+              <li className="flex flex-wrap items-center justify-between gap-2 py-2.5 first:pt-0 last:pb-0">
+                <p className="text-sm">
+                  <span className={`font-bold ${expiredHoldCount > 0 ? "text-destructive" : ""}`}>{expiredHoldCount}</span>
+                  {" "}expired reservation{expiredHoldCount === 1 ? "" : "s"} still holding stock
+                </p>
+                <Link href="/admin/inventory" className="flex items-center gap-1 text-xs font-semibold text-primary hover:underline">
+                  View inventory <ArrowRight className="h-3 w-3" aria-hidden="true" />
+                </Link>
+              </li>
+            </ul>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Charts */}
       <div className="mt-4 grid gap-4 [&>*]:min-w-0 xl:grid-cols-3">
         <Card className="xl:col-span-2">
           <CardHeader>
             <CardTitle className="text-base">Sales Overview</CardTitle>
-            <CardDescription>Revenue for the last 30 days (excludes cancelled)</CardDescription>
+            <CardDescription>Paid revenue for the last 30 days (excludes cancelled and unpaid)</CardDescription>
           </CardHeader>
           <CardContent>
             <RevenueChart data={revenueByDay} />
@@ -303,7 +377,11 @@ export default async function AdminDashboardPage() {
             </div>
             <div>
               <p className="text-2xl font-extrabold">{formatPKR(stats.revenueThisMonth)}</p>
-              <p className="text-xs text-muted-foreground">revenue this month</p>
+              <p className="text-xs text-muted-foreground">paid revenue this month</p>
+            </div>
+            <div>
+              <p className="text-2xl font-extrabold">{formatPKR(stats.pendingRevenueThisMonth)}</p>
+              <p className="text-xs text-muted-foreground">pending (unpaid) this month</p>
             </div>
             <div>
               <p className="text-sm font-bold text-warning">{pendingOrders} pending</p>
