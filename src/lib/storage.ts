@@ -39,12 +39,12 @@ export function buildObjectKey(extension: string, prefix?: string): string {
 }
 
 /**
- * If the URL points at OUR storage public URL AND the object sits under the
- * banner prefix, return the object key ("banners/<uuid>.<ext>"); otherwise
- * null. Anything not recognised is never eligible for deletion — external
- * hotlinks, product images and legacy paths are untouchable by design.
+ * Shared validation for "is this URL one of OUR storage public URLs, and
+ * which object key does it name?" Returns the decoded object key, or null
+ * when the URL is not one of ours (external hotlink, wrong host, malformed
+ * URL, path traversal). Callers add their own prefix eligibility on top.
  */
-export function parseBannerStorageObjectPath(url: string | null | undefined): string | null {
+function parseStorageObjectKey(url: string | null | undefined): string | null {
   if (!url) return null;
   const config = getStorageConfig();
   if (!config) return null;
@@ -70,8 +70,32 @@ export function parseBannerStorageObjectPath(url: string | null | undefined): st
   if (!parsed.pathname.startsWith(marker)) return null;
 
   const key = decodeURIComponent(parsed.pathname.slice(marker.length));
-  if (!key.startsWith(`${BANNER_IMAGE_PREFIX}/`)) return null;
-  // Path-traversal hardening: the key must stay inside the banner prefix.
-  if (key.includes("..") || key.includes("\\")) return null;
+  // Path-traversal hardening: the key must stay inside the bucket.
+  if (!key || key.includes("..") || key.includes("\\")) return null;
+  return key;
+}
+
+/**
+ * If the URL points at OUR storage public URL AND the object sits under the
+ * banner prefix, return the object key ("banners/<uuid>.<ext>"); otherwise
+ * null. Anything not recognised is never eligible for deletion — external
+ * hotlinks, product images and legacy paths are untouchable by design.
+ */
+export function parseBannerStorageObjectPath(url: string | null | undefined): string | null {
+  const key = parseStorageObjectKey(url);
+  if (!key || !key.startsWith(`${BANNER_IMAGE_PREFIX}/`)) return null;
+  return key;
+}
+
+/**
+ * If the URL points at OUR storage public URL AND the object is a media
+ * object owned by products/categories (any key NOT under the banner prefix
+ * — banners are owned by banner cleanup and must never be touched here),
+ * return the object key; otherwise null. External hotlinks, banner objects
+ * and legacy paths are untouchable by design.
+ */
+export function parseMediaStorageObjectPath(url: string | null | undefined): string | null {
+  const key = parseStorageObjectKey(url);
+  if (!key || key.startsWith(`${BANNER_IMAGE_PREFIX}/`)) return null;
   return key;
 }

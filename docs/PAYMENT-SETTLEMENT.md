@@ -40,6 +40,8 @@ One serializable transaction:
 
 Same-event processing is a no-op after completion. A new authenticated observation ID repeating the same accepted capture records an ALREADY_SETTLED decision without consuming again or regressing a PROCESSING/SHIPPED/DELIVERED order. Duplicate webhook and reconciliation observations may both be recorded, but only one can perform the financial transition.
 
+**Known quirk — refund-settlement dedup conflates same-amount/same-time refunds.** A `REFUND_CONFIRMED` observation is recorded `ALREADY_SETTLED` when a `SUCCEEDED` `PaymentRefund` row already exists for the same `(paymentId, amountMinor, providerRefundedAt)` (`src/services/payment-settlement.service.ts`, both the webhook and reconciliation paths). That triple is the dedup key: two genuinely distinct refunds for the same payment with the same amount **and** the same provider `occurredAt` would be conflated into one already-settled record, and the second refund's `refundedAmountMinor` would never be applied. In practice the collision needs the provider to report two distinct refunds of identical amount at the identical timestamp; the predicate was verified at the query level on disposable Postgres (`tests/postgres/pg-verify.test.ts`, refund §(c)). Closing it properly needs a provider-issued refund identifier in the observation (none is established in the Safepay contract yet — see D5/D6), so until then a same-amount/same-time pair must be resolved by manual review, not by re-observing.
+
 The session-setup review path now locks Order before Payment and refuses to downgrade settled/closed orders, avoiding the previous lock-order inversion with settlement.
 
 ## Reconciliation, cancellation, late capture and refunds

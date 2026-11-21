@@ -14,6 +14,34 @@ export type ClaimResult = { kind: "claimed"; claim: ClaimedAttempt } |
   { kind: "blocked"; code: "NOT_ELIGIBLE" | "REQUEST_CONFLICT" | "CREATION_UNCERTAIN" |
     "ALREADY_ISSUED" | "RESUME_BLOCKED" | "BUSY" | "PERSISTENCE_UNAVAILABLE" };
 
+/**
+ * Resume of a bound-but-never-issued tracker (Phase 3, chunk 3-final — H-3).
+ * A tracker creation that succeeded at the provider but whose hosted checkout
+ * was never issued (process crash between bindTracker and the redirect, or a
+ * metadata/auth failure that never reached review) leaves the attempt in
+ * TRACKER_CREATED/AUTHENTICATING with the tracker token persisted locally.
+ * The claim refuses all later attempts for that order (RESUME_BLOCKED), so
+ * the tracker could never be reclaimed or replaced — the customer was stuck
+ * even though nothing was paid. Resume reuses the persisted tracker instead
+ * of creating a second one: no provider idempotency key exists for tracker
+ * creation (Safepay has not documented one — open provider question, see
+ * docs/SAFEPAY-SERVER-INTEGRATION.md), so the local claim + the persisted
+ * trackerToken are the only dedup, and reuse is the only safe recovery.
+ *
+ * Resume is deliberately narrow: only TRACKER_CREATED/AUTHENTICATING (the
+ * tracker is bound and the checkout was never issued), only for the SAME
+ * client request (retryRequestKey must equal this request's identity hash —
+ * a different requestKey is a REQUEST_CONFLICT), and never for CREATING /
+ * CREATION_UNCERTAIN (no tracker is bound, so the creation outcome is
+ * unknown and a second tracker might already exist at the provider) or
+ * CHECKOUT_ISSUED (a redirect may already be live at the provider).
+ * The claim version is NOT bumped here: advance() is the version gate that
+ * lets exactly one resumed (or concurrent) attempt proceed.
+ */
+export type ResumeResult = { kind: "resumed"; claim: ClaimedAttempt; tracker: Tracker;
+    from: "TRACKER_CREATED" | "AUTHENTICATING" } |
+  { kind: "blocked"; code: "NOT_ELIGIBLE" | "REQUEST_CONFLICT" | "RESUME_BLOCKED" | "BUSY" | "PERSISTENCE_UNAVAILABLE" };
+
 export function bindCheckoutOwner(owner: TrustedCheckoutOwner): OwnerBinding {
   const principal = owner?.userId;
   if (owner?.kind !== "USER" || !principal || principal.length > 256 || /[\u0000-\u0020\u007f]/.test(principal)) {
@@ -131,6 +159,58 @@ export function createPrismaSafepayStore(database: PaymentDatabase) {
             amountMinor: payment.expectedAmountMinor!, owner,
             deadlineMs: Math.min(order.reservationExpiresAt!.getTime(), order.checkoutAccessExpiresAt!.getTime()),
           } };
+        });
+      } catch (error) {
+        return { kind: "blocked", code: error instanceof ClaimConflict ||
+          (typeof error === "object" && error !== null && "code" in error &&
+            (error.code === "P2002" || error.code === "P2034")) ? "BUSY" : "PERSISTENCE_UNAVAILABLE" };
+      }
+    },
+    async resume(request: CheckoutRequest, owner: OwnerBinding, config: SafepayConfig, now: Date): Promise<ResumeResult> {
+      try {
+        return await database.$transaction(async tx => {
+          const [order, payment] = await Promise.all([
+            tx.order.findUnique({ where: { id: request.orderId }, include }),
+            tx.payment.findUnique({ where: { id: request.paymentId } }),
+          ]);
+          if (!eligible(order, payment, owner, config, now) || !payment) return { kind: "blocked", code: "NOT_ELIGIBLE" };
+          const keyHash = checkoutRequestIdentity(request, owner);
+          if (payment.retryRequestKey !== null && payment.retryRequestKey !== keyHash) return { kind: "blocked", code: "REQUEST_CONFLICT" };
+          // Only a bound tracker for the same request can be resumed. A null
+          // key means no claim ever happened for this attempt; CREATING /
+          // CREATION_UNCERTAIN means the creation outcome is unknown (a
+          // tracker may exist at the provider that we cannot see), and
+          // CHECKOUT_ISSUED means a redirect may already be live.
+          if (payment.retryRequestKey === null || !payment.trackerToken ||
+              (payment.attemptState !== "TRACKER_CREATED" && payment.attemptState !== "AUTHENTICATING"))
+            return { kind: "blocked", code: "RESUME_BLOCKED" };
+          // A changed active pointer does not prove an older hosted tracker is no longer payable.
+          // Until provider finality/cancellation is confirmed, refuse replacement attempts too.
+          if (await tx.payment.count({ where: {
+            orderId: order.id, provider: "SAFEPAY", id: { not: payment.id },
+            OR: [
+              { creationStartedAt: { not: null } }, { trackerToken: { not: null } }, { reference: { not: null } },
+              { attemptState: { in: ["CREATING", "CREATION_UNCERTAIN", "TRACKER_CREATED", "AUTHENTICATING", "CHECKOUT_ISSUED"] } },
+            ],
+          } }) > 0) return { kind: "blocked", code: "RESUME_BLOCKED" };
+          // The tracker is reconstructed from the persisted bind, never from
+          // browser input: token + provider state from the payment row, the
+          // fixed checkout shape from config, the amount from the attempt.
+          const tracker: Tracker = {
+            token: payment.trackerToken,
+            environment: config.environment,
+            state: payment.providerState ?? "TRACKER_STARTED",
+            intent: "CYBERSOURCE",
+            mode: "payment",
+            entryMode: config.entryMode,
+            currency: "PKR",
+            amountMinor: payment.expectedAmountMinor!,
+          };
+          return { kind: "resumed", claim: {
+            orderId: order.id, paymentId: payment.id, keyHash, version: payment.version,
+            amountMinor: payment.expectedAmountMinor!, owner,
+            deadlineMs: Math.min(order.reservationExpiresAt!.getTime(), order.checkoutAccessExpiresAt!.getTime()),
+          }, tracker, from: payment.attemptState };
         });
       } catch (error) {
         return { kind: "blocked", code: error instanceof ClaimConflict ||

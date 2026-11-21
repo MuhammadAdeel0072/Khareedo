@@ -19,7 +19,7 @@ import { requireAdminMfaVerified } from "@/lib/auth-guard";
 import { clientIp, rateLimit } from "@/lib/rate-limit";
 import { handleRoute, jsonError, jsonOk, parseBody } from "@/lib/api";
 import { adminAuditContext } from "@/services/admin-audit.service";
-import { MfaUnavailableError, startAdminMfaReplacement } from "@/services/admin-mfa.service";
+import { MfaUnavailableError, isAdminMfaConfigured, startAdminMfaReplacement } from "@/services/admin-mfa.service";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -38,6 +38,14 @@ export async function POST(request: Request) {
     const user = await requireAdminMfaVerified();
     const parsed = await parseBody(request, bodySchema);
     if (parsed.error) return parsed.error;
+    // Config failure is checked BEFORE the limiter: a missing key must
+    // return 503 without burning any of the 5 attempts in the budget.
+    if (!isAdminMfaConfigured()) {
+      return jsonError(
+        "Administrator MFA is not configured on this server. Ask the operator to set ADMIN_MFA_ENCRYPTION_KEY.",
+        503
+      );
+    }
     const ip = clientIp(request.headers);
     const ipLimit = rateLimit(`admin-mfa-replace-ip:${ip}`, 10, 15 * 60 * 1000);
     const userLimit = rateLimit(`admin-mfa-replace-user:${user.id}`, 5, 15 * 60 * 1000);

@@ -118,6 +118,20 @@ describe("saved-address checkout validation (regression)", () => {
     expect(deliveryDetailsComplete({ ...savedDefaultAddress, fullName: "A" }, signedInUserEmail)).toBe(false);
   });
 
+  it("flags province and postalCode too (chunk 12 follow-up B: both were omitted)", () => {
+    expect(addressFieldErrors({ ...savedDefaultAddress, province: "Nowhere" })).toMatchObject({
+      province: expect.any(String),
+    });
+    expect(deliveryDetailsComplete({ ...savedDefaultAddress, province: "Nowhere" }, signedInUserEmail)).toBe(false);
+    expect(addressFieldErrors({ ...savedDefaultAddress, postalCode: "ABC" })).toMatchObject({
+      postalCode: expect.any(String),
+    });
+    expect(deliveryDetailsComplete({ ...savedDefaultAddress, postalCode: "ABC" }, signedInUserEmail)).toBe(false);
+    // In-list province and a digits-only postal code pass.
+    expect(addressFieldErrors(savedDefaultAddress)).toEqual({});
+    expect(addressFieldErrors({ ...savedDefaultAddress, province: "Sindh", postalCode: "75000" })).toEqual({});
+  });
+
   it("still rejects a null address", () => {
     expect(deliveryDetailsComplete(null, signedInUserEmail)).toBe(false);
     expect(deliveryDetailsComplete(undefined, signedInUserEmail)).toBe(false);

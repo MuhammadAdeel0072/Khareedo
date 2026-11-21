@@ -1,0 +1,97 @@
+# Khareedo production service — Hostinger Ubuntu VPS (systemd)
+#
+# What this is: the process supervisor for the single long-running app
+# server. The payment maintenance worker and the email outbox worker are
+# in-process (src/instrumentation.ts), so supervising this one service
+# supervises both workers: if the process dies, systemd restarts it and
+# both workers come back; if the process is stopped, both workers stop.
+# There is no separate worker process to supervise.
+#
+# Start command — verified from the repo, not guessed:
+# package.json "start" is `NODE_ENV=production bun .next/standalone/server.js`
+# (bun is the RUNTIME here, not the package manager — dependencies are
+# installed with npm only). This unit runs bun DIRECTLY, without the
+# `| tee server.log` pipe from `npm start`: under systemd the pipe would
+# make the shell the supervised process (muddying restart and stop
+# signals) and duplicate logs. systemd captures stdout/stderr to the
+# journal instead — see docs/WORKER-HEALTH.md §5 for the journalctl
+# commands. Do NOT run `npm start` under systemd.
+#
+# Install (operator):
+#   1. Fill in every OPERATOR TO CONFIRM item below (paths/user on the VPS
+#      are unknown to this repo — nothing here is invented).
+#   2. sudo cp deploy/khareedo.service /etc/systemd/system/khareedo.service
+#   3. sudo systemctl daemon-reload
+#   4. sudo systemctl enable --now khareedo
+#   5. Verify: systemctl status khareedo
+#      curl -s https://<production-origin>/api/health
+#      (worker.status and outbox.status must both reach "healthy" within
+#      ~75 s of the process starting; see docs/WORKER-HEALTH.md §5.3)
+#
+# Single instance: systemd runs exactly one instance of this unit. A
+# second `systemctl start khareedo` while it is running is a no-op, and a
+# second app process cannot bind :3000 anyway (the standalone server
+# exits with EADDRINUSE). Never run a second copy by hand (npm start, bun
+# .next/standalone/server.js) alongside the unit — see
+# docs/WORKER-HEALTH.md §5.4.
+#
+# Environment: the standalone build omits .env, so runtime secrets must
+# come from EnvironmentFile (see docs/DEPLOYMENT.md). The file must set
+# SUPABASE_POSTGRES_URL, NEXTAUTH_SECRET (≥ 32 chars), NEXTAUTH_URL
+# (https:// production origin), SMTP settings, and ERROR_MONITORING_ALERT_EMAIL.
+# If SUPABASE_DB_CA_CERT is set, the certificate file it points at must
+# exist on the VPS (src/lib/db.ts fails fast without it for a Supabase host).
+# Restrict the file: sudo chmod 600 <env file>; sudo chown <user>:<user> <env file>.
+
+[Unit]
+Description=Khareedo storefront (Next.js standalone server)
+After=network-online.target
+Wants=network-online.target
+# Restart limiting lives in [Unit], not [Service]: at most 5 restarts in
+# 5 minutes — after that systemd holds the unit in failed state instead
+# of restart-looping forever, and the operator investigates
+# (systemctl status khareedo).
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# OPERATOR TO CONFIRM: the dedicated user the app runs as on the VPS.
+# (Do not run the storefront as root.)
+User=khareedo
+# OPERATOR TO CONFIRM: absolute path of the app checkout on the VPS
+# (the directory containing package.json and .next/standalone/server.js).
+WorkingDirectory=/srv/khareedo
+# OPERATOR TO CONFIRM: absolute path of the production env file
+# (the standalone build omits .env — see header).
+EnvironmentFile=/etc/khareedo/production.env
+Environment=NODE_ENV=production
+# The standalone server listens on $PORT (default 3000). Pinned explicitly
+# because the reverse proxy in front of it expects localhost:3000
+# (Caddyfile; production proxy itself still unverified — see
+# docs/DEPLOYMENT.md).
+Environment=PORT=3000
+# OPERATOR TO CONFIRM: absolute path of the bun binary on the VPS
+# (run `command -v bun` there). systemd requires an absolute path and
+# does not resolve a user shell PATH.
+ExecStart=/usr/local/bin/bun .next/standalone/server.js
+# Crash recovery: restart on failure (non-zero exit, signal, timeout),
+# 10 s between attempts (restart limiting is in [Unit] above).
+# A clean `systemctl stop` is NOT a failure and is never restarted.
+Restart=on-failure
+RestartSec=10
+# Graceful stop: on `systemctl stop khareedo` systemd sends SIGTERM and
+# waits up to 90 s before SIGKILL. The standalone server closes its
+# listener on SIGTERM; an in-flight sweep finishes its current database
+# operation and the process exits when its handles drain. A sweep cut off
+# mid-batch is safe to resume: payment sweeps are idempotent by
+# construction and outbox rows are claim-leased (5 min), so the next
+# start redoes the work instead of losing or duplicating it.
+TimeoutStopSec=90
+# Logs go to the journal (never to server.log under systemd).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=khareedo
+
+[Install]
+WantedBy=multi-user.target

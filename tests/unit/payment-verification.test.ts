@@ -184,6 +184,28 @@ describe("Targeted Safepay payment verification", () => {
     ]);
   });
 
+  it("force bypasses the transport-failure backoff for a pre-expiry check (M-26)", async () => {
+    const at = new Date("2026-11-09T10:00:00Z");
+    const d = deps({ row: eligibleRow({
+      nextReconcileAt: new Date(at.getTime() + 600_000),
+      lastReconcileAt: new Date(at.getTime() - 5_000),
+    }), now: at });
+    // Non-forced: the backoff is respected, no provider call.
+    await expect(d.service.verifyPaymentNow("pay-1")).resolves.toEqual({ kind: "skipped", code: "BACKOFF" });
+    expect(d.provider.fetchTracker).not.toHaveBeenCalled();
+    // Forced (pre-expiry): the provider is consulted despite the backoff,
+    // because the reservation would otherwise expire unverified.
+    await expect(d.service.verifyPaymentNow("pay-1", { force: true })).resolves.toEqual({ kind: "settled" });
+    expect(d.provider.fetchTracker).toHaveBeenCalledTimes(1);
+  });
+
+  it("force never doubles a fetch already in flight (M-26)", async () => {
+    const at = new Date("2026-11-09T10:00:00Z");
+    const d = deps({ row: eligibleRow({ reconcileLeaseUntil: new Date(at.getTime() + 30_000) }), now: at });
+    await expect(d.service.verifyPaymentNow("pay-1", { force: true })).resolves.toEqual({ kind: "skipped", code: "BACKOFF" });
+    expect(d.provider.fetchTracker).not.toHaveBeenCalled();
+  });
+
   it("grows the retry delay exponentially and caps it at 15 minutes", () => {
     expect(fetchRetryDelayMs(1)).toBe(60_000);
     expect(fetchRetryDelayMs(2)).toBe(120_000);

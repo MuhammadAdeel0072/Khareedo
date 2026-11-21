@@ -23,6 +23,15 @@ export interface ParsedProductRow {
   imageUrl?: string;
   status: "PUBLISHED" | "DRAFT";
   featured: boolean;
+  /** Variant fields (Chunk 8 — D12). A row with a variant label/SKU is a
+   *  variant of the named product, not a second product: its `stock`
+   *  (or `variantStock` when given) is the variant's stock, and the
+   *  product-level stock is 0 unless a plain row for the same product
+   *  sets it. */
+  variantLabel?: string;
+  variantSku?: string;
+  variantPrice?: number | null;
+  variantStock?: number;
 }
 
 export interface ImportIssue {
@@ -64,6 +73,12 @@ const HEADER_ALIASES: Record<string, string> = {
   status: "status",
   featured: "featured",
   isfeatured: "featured",
+  variantlabel: "variantLabel",
+  variant: "variantLabel",
+  variantname: "variantLabel",
+  variantsku: "variantSku",
+  variantprice: "variantPrice",
+  variantstock: "variantStock",
 };
 
 const REQUIRED_HEADERS = ["name", "category", "price", "stock"] as const;
@@ -112,6 +127,10 @@ const rowSchema = z.object({
   imageUrl: z.string().max(600).optional(),
   status: z.enum(["PUBLISHED", "DRAFT"]),
   featured: z.boolean(),
+  variantLabel: z.string().min(1, "Variant Label must not be empty").max(120, "Variant Label must be 120 characters or fewer").optional(),
+  variantSku: z.string().min(1, "Variant SKU must not be empty").max(120, "Variant SKU must be 120 characters or fewer").optional(),
+  variantPrice: z.number().int("Variant Price must be a whole number (Rs)").positive("Variant Price must be greater than 0").max(10_000_000).nullable().optional(),
+  variantStock: z.number().int("Variant Stock must be a whole number").min(0, "Variant Stock cannot be negative").max(100_000).optional(),
 });
 
 export interface ParseResult {
@@ -156,6 +175,7 @@ export function parseProductsSheet(rows: SheetRow[]): ParseResult {
   }
 
   const seenNames = new Set<string>();
+  const seenVariantKeys = new Set<string>();
   const dupInFile: string[] = [];
 
   for (const { rowNumber, cells } of dataRows) {
@@ -187,6 +207,23 @@ export function parseProductsSheet(rows: SheetRow[]): ParseResult {
     const featuredText = cellText(get("featured")).toLowerCase();
     const featured = ["yes", "y", "true", "1"].includes(featuredText);
 
+    const variantLabel = cellText(get("variantLabel")) || undefined;
+    const variantSku = cellText(get("variantSku")) || undefined;
+    const variantPriceRaw = coerceInt(get("variantPrice"), "Variant Price", rowNumber, issues);
+    const variantStockRaw = coerceInt(get("variantStock"), "Variant Stock", rowNumber, issues);
+    // A variant row needs BOTH label and SKU (a label alone cannot be
+    // stocked, a SKU alone cannot be displayed); a plain row needs neither.
+    if ((variantLabel && !variantSku) || (variantSku && !variantLabel)) {
+      issues.push({ rowNumber, message: "A variant row needs both Variant Label and Variant SKU" });
+      continue;
+    }
+    // A variant price or stock with no label/SKU is a mistyped plain row —
+    // fail it rather than silently importing it as variant-less.
+    if (!variantLabel && (variantPriceRaw !== undefined || variantStockRaw !== undefined)) {
+      issues.push({ rowNumber, message: "Variant Price / Variant Stock need a Variant Label and Variant SKU on the same row" });
+      continue;
+    }
+
     const candidate = {
       name,
       category,
@@ -200,6 +237,10 @@ export function parseProductsSheet(rows: SheetRow[]): ParseResult {
       imageUrl,
       status,
       featured,
+      variantLabel,
+      variantSku,
+      variantPrice: variantPriceRaw ?? null,
+      variantStock: variantStockRaw,
     };
 
     const parsed = rowSchema.safeParse(candidate);
@@ -215,13 +256,27 @@ export function parseProductsSheet(rows: SheetRow[]): ParseResult {
       continue;
     }
 
+    // A product name may repeat in the file ONLY for variant rows: one row
+    // per variant of the same product (Chunk 8 — D12). A plain row repeating
+    // a name is still a duplicate, and the same variant label twice for one
+    // product is still a duplicate.
     const key = parsed.data.name.toLowerCase();
-    if (seenNames.has(key)) {
+    const variantKey = parsed.data.variantLabel ? `${key}::${parsed.data.variantLabel.toLowerCase()}` : null;
+    if (variantKey) {
+      if (seenVariantKeys.has(variantKey)) {
+        dupInFile.push(parsed.data.name);
+        issues.push({ rowNumber, message: `Variant "${parsed.data.variantLabel}" of "${parsed.data.name}" appears more than once in this file — only the first will be imported` });
+        continue;
+      }
+      seenVariantKeys.add(variantKey);
+      seenNames.add(key);
+    } else if (seenNames.has(key)) {
       dupInFile.push(parsed.data.name);
       issues.push({ rowNumber, message: `"${parsed.data.name}" appears more than once in this file — only the first will be imported` });
       continue;
+    } else {
+      seenNames.add(key);
     }
-    seenNames.add(key);
 
     out.push({ ...parsed.data, rowNumber });
   }

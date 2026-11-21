@@ -7,11 +7,11 @@ import { z } from "zod";
 import { db } from "@/lib/db";
 import { requireAdminMfaVerified, AuthError } from "@/lib/auth-guard";
 import { rateLimit } from "@/lib/rate-limit";
-import { jsonOk, handleRoute } from "@/lib/api";
+import { jsonOk, handleRoute, readBoundedBodyText } from "@/lib/api";
 import { loadSafepayConfig, SafepayConfigurationError } from "@/lib/safepay/config";
 import { requestOrigin } from "@/lib/request-origin";
 import { createSafepayProvider } from "@/lib/safepay/provider";
-import { createPaymentRefundService } from "@/services/payment-refund.service";
+import { createPaymentRefundService, REFUND_SERVICE_OPTIONS } from "@/services/payment-refund.service";
 import { SAFEPAY_REFUNDS_SANDBOX_ONLY } from "@/lib/safepay/readiness";
 import {
   ADMIN_AUDIT_ACTIONS,
@@ -36,11 +36,6 @@ const listSchema = z.object({
   status: z.enum(["REQUESTED", "SUBMITTING", "PENDING", "SUCCEEDED", "FAILED", "REVIEW_REQUIRED"]).optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),
 });
-
-const REFUND_SERVICE_OPTIONS = {
-  pollDelayMs: 60_000, maxConfirmationAttempts: 6, submitGraceMs: 120_000,
-  reversalWindowMs: 24 * 3_600_000, cardRefundWindowMs: 90 * 24 * 3_600_000,
-} as const;
 
 type SerializableRefundRow = {
   id: string; paymentId: string; amountMinor: bigint; currency: string; type: string; status: string;
@@ -71,6 +66,10 @@ function serialize(row: SerializableRefundRow) {
 }
 
 export async function POST(request: Request) {
+  // Stage 3 audit, L-2: wrapped in handleRoute so a non-auth throw
+  // (e.g. DB down) becomes a JSON 500 instead of Next.js's default
+  // HTML 500 page. The inner AuthError handling is unchanged.
+  return handleRoute(async () => {
   try {
     const user = await requireAdminMfaVerified();
     const limit = rateLimit(`payments-refunds-initiate:${user.id}`, 10, 60_000);
@@ -92,8 +91,16 @@ export async function POST(request: Request) {
       return Response.json({ ok: false, code: "REFUNDS_SANDBOX_ONLY",
         error: "Refunds are not enabled outside the sandbox." }, { status: 503, headers: { "Cache-Control": "no-store" } });
     }
+    // Stage 3 audit, L-5: the body is read under parseBody's 1 MiB cap
+    // (the old request.json() had no cap). The error contract is
+    // unchanged: unparseable → 400 INVALID_BODY, oversized → 413.
+    const read = await readBoundedBodyText(request);
+    if (!read.ok && read.reason === "too-large") {
+      return Response.json({ ok: false, code: "BODY_TOO_LARGE", error: "Request body is too large." },
+        { status: 413, headers: { "Cache-Control": "no-store" } });
+    }
     let parsedBody: unknown;
-    try { parsedBody = await request.json(); } catch {
+    try { parsedBody = JSON.parse(read.ok ? read.text : ""); } catch {
       return Response.json({ ok: false, code: "INVALID_BODY", error: "Invalid request body." },
         { status: 400, headers: { "Cache-Control": "no-store" } });
     }
@@ -114,9 +121,15 @@ export async function POST(request: Request) {
       requestedByUserId: user.id,
     });
     if (result.kind === "rejected") {
-      const status = result.code === "PAYMENT_NOT_FOUND" || result.code === "INVALID_INPUT" ? 404 : 409;
+      // Stage 3 audit, M-8: PAYMENT_NOT_FOUND stays 404; genuine bad
+      // input (non-positive/oversized amount, malformed idempotency
+      // key) is 422, not 404; transient DB contention (TRANSIENT) is
+      // 503 with Retry-After; everything else stays 409.
+      const status = result.code === "PAYMENT_NOT_FOUND" ? 404
+        : result.code === "INVALID_INPUT" ? 422
+        : result.code === "TRANSIENT" ? 503 : 409;
       return Response.json({ ok: false, code: result.code, error: "Refund request was not accepted." },
-        { status, headers: { "Cache-Control": "no-store" } });
+        { status, headers: { "Cache-Control": "no-store", ...(status === 503 ? { "Retry-After": "5" } : {}) } });
     }
     const row = await refunds.getRefund(result.refundId);
     await recordAdminAuditBestEffort(adminAuditContext(request, user), {
@@ -142,9 +155,12 @@ export async function POST(request: Request) {
     }
     throw error;
   }
+  }, request);
 }
 
 export async function GET(request: Request) {
+  // Stage 3 audit, L-2: same handleRoute wrap as POST (JSON 500, not HTML).
+  return handleRoute(async () => {
   try {
     const user = await requireAdminMfaVerified();
     const limit = rateLimit(`payments-refunds-list:${user.id}`, 30, 60_000);
@@ -178,4 +194,5 @@ export async function GET(request: Request) {
     }
     throw error;
   }
+  }, request);
 }

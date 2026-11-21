@@ -31,6 +31,12 @@ export interface ProductsExportRow {
   featured: string;
   rating: number;
   createdAt: string;
+  /** Variant columns (Chunk 8 — D12): empty for the product-level row of a
+   *  variant-less product; a variant row carries its label/SKU/absolute
+   *  price override and its own stock. */
+  variantLabel: string;
+  variantSku: string;
+  variantPrice: number | null;
 }
 
 export async function getProductsExportData(limit = 500): Promise<ProductsExportRow[]> {
@@ -47,25 +53,44 @@ export async function getProductsExportData(limit = 500): Promise<ProductsExport
       rating: true,
       createdAt: true,
       category: { select: { name: true } },
-      inventory: { select: { quantity: true, lowStockThreshold: true } },
+      inventory: {
+        select: {
+          variantId: true,
+          quantity: true,
+          lowStockThreshold: true,
+          variant: { select: { label: true, sku: true, priceOverride: true } },
+        },
+      },
     },
     orderBy: { createdAt: "desc" },
     take: limit,
   });
-  return rows.map((p) => ({
-    name: p.name,
-    sku: p.sku ?? "—",
-    category: p.category.name,
-    brand: p.brand ?? "—",
-    price: p.price,
-    comparePrice: p.comparePrice,
-    stock: p.inventory?.quantity ?? 0,
-    lowStockThreshold: p.inventory?.lowStockThreshold ?? 5,
-    status: p.status,
-    featured: p.isFeatured ? "Yes" : "No",
-    rating: p.rating,
-    createdAt: fmtDate(p.createdAt),
-  }));
+  // One row per stock row (Chunk 8 — D12): the product-level row plus one
+  // row per variant, so a round-trip import restores per-variant stock and
+  // pricing exactly. A product with no inventory row at all exports one
+  // row with empty variant columns (as before — stock 0).
+  return rows.flatMap((p) => {
+    const stockRows = p.inventory.length > 0
+      ? p.inventory
+      : [{ variantId: null as string | null, quantity: 0, lowStockThreshold: 5, variant: null as { label: string; sku: string; priceOverride: number | null } | null }];
+    return stockRows.map((inv) => ({
+      name: p.name,
+      sku: p.sku ?? "—",
+      category: p.category.name,
+      brand: p.brand ?? "—",
+      price: p.price,
+      comparePrice: p.comparePrice,
+      stock: inv.quantity,
+      lowStockThreshold: inv.lowStockThreshold ?? 5,
+      status: p.status,
+      featured: p.isFeatured ? "Yes" : "No",
+      rating: p.rating,
+      createdAt: fmtDate(p.createdAt),
+      variantLabel: inv.variant?.label ?? "",
+      variantSku: inv.variant?.sku ?? "",
+      variantPrice: inv.variant?.priceOverride ?? null,
+    }));
+  });
 }
 
 export interface OrdersExportRow {
@@ -121,6 +146,8 @@ export async function getOrdersExportData(
       items: {
         select: {
           productName: true,
+          variantLabel: true,
+          variantSku: true,
           quantity: true,
           unitPrice: true,
           lineTotal: true,
@@ -151,8 +178,10 @@ export async function getOrdersExportData(
     for (const it of o.items) {
       items.push({
         reference: o.reference,
-        product: it.productName,
-        sku: it.product?.sku ?? "—",
+        // The variant SKU identifies the exact variant sold; fall back to
+        // the snapshot label, then the product SKU (Chunk 8 — D12).
+        product: it.variantLabel ? `${it.productName} (${it.variantLabel})` : it.productName,
+        sku: it.variantSku ?? it.product?.sku ?? "—",
         quantity: it.quantity,
         unitPrice: it.unitPrice,
         lineTotal: it.lineTotal,
@@ -173,7 +202,7 @@ export interface CustomersExportRow {
 }
 
 export async function getCustomersExportData(limit = 1000): Promise<CustomersExportRow[]> {
-  const customers = await adminListCustomerSummaries(limit);
+  const { items: customers } = await adminListCustomerSummaries({ perPage: limit });
   return customers.map((customer) => ({
     name: customer.name ?? "—",
     email: customer.email,

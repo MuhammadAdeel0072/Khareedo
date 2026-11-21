@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { mockDb, mockSendVerificationEmail, mockFindUserByEmail } = vi.hoisted(() => ({
+const { mockDb, mockSendVerificationEmail, mockFindUserByEmail, mockEnqueueVerificationEmail } = vi.hoisted(() => ({
   mockDb: { $transaction: vi.fn() },
   mockSendVerificationEmail: vi.fn(),
   mockFindUserByEmail: vi.fn(),
+  mockEnqueueVerificationEmail: vi.fn(),
 }));
 
 vi.mock("@/lib/db", () => ({ db: mockDb }));
@@ -13,9 +14,11 @@ vi.mock("@/services/email.service", () => ({
 vi.mock("@/services/auth-users.service", () => ({
   findUserByEmail: mockFindUserByEmail,
 }));
+vi.mock("@/services/email-outbox.service", () => ({
+  enqueueVerificationEmail: mockEnqueueVerificationEmail,
+}));
 
 import {
-  hashVerificationToken,
   resendVerificationEmail,
   sendRegistrationVerification,
   verifyEmailTokenForLogin,
@@ -81,49 +84,60 @@ describe("verification-token NextAuth exchange", () => {
     mockDb.$transaction.mockReset();
     mockSendVerificationEmail.mockReset();
     mockFindUserByEmail.mockReset();
+    mockEnqueueVerificationEmail.mockReset();
   });
 
-  it("stores only a token hash and sends a link with a safe callback", async () => {
-    const transaction = {
-      verificationToken: {
-        deleteMany: vi.fn(),
-        create: vi.fn(),
-      },
-    };
-    mockDb.$transaction.mockImplementation((callback) => callback(transaction));
-
+  it("registration only enqueues a verification email — the worker generates the token and sends it", async () => {
+    // Phase 3 Chunk 7 (M-24): registration no longer sends synchronously,
+    // so a transient SMTP failure cannot fail registration. It enqueues one
+    // outbox row carrying only the email; the worker looks the account up,
+    // generates the token at delivery time, stores only its hash, and sends
+    // the link (proved in email-outbox.test.ts). No token is created here
+    // and no email is sent here.
     await sendRegistrationVerification(
-      { id: "customer-1", email: "customer@example.com", name: "Customer" },
-      "https://attacker.example/"
+      { id: "customer-1", email: "customer@example.com", name: "Customer" }
     );
 
-    const stored = transaction.verificationToken.create.mock.calls[0][0].data;
-    const email = mockSendVerificationEmail.mock.calls[0][0];
-    expect(stored.tokenHash).toBe(hashVerificationToken(email.token));
-    expect(stored.tokenHash).not.toBe(email.token);
-    expect(email.callbackUrl).toBe("/account");
+    expect(mockEnqueueVerificationEmail).toHaveBeenCalledTimes(1);
+    expect(mockEnqueueVerificationEmail).toHaveBeenCalledWith({
+      email: "customer@example.com",
+      // Chunk 7-final: the outbox payload carries the callbackUrl so the
+      // delivered verification link lands where the customer was going.
+      callbackUrl: null,
+    });
+    expect(mockDb.$transaction).not.toHaveBeenCalled();
+    expect(mockSendVerificationEmail).not.toHaveBeenCalled();
   });
 
-  it("resends only for an unverified password account", async () => {
-    mockFindUserByEmail.mockResolvedValue({
-      id: "customer-1",
+  it("threads a callbackUrl through registration into the outbox payload", async () => {
+    await sendRegistrationVerification(
+      { id: "customer-1", email: "customer@example.com", name: "Customer" },
+      "/checkout"
+    );
+
+    expect(mockEnqueueVerificationEmail).toHaveBeenCalledTimes(1);
+    expect(mockEnqueueVerificationEmail).toHaveBeenCalledWith({
       email: "customer@example.com",
-      name: "Customer",
-      passwordHash: "stored-hash",
-      emailVerified: null,
+      callbackUrl: "/checkout",
     });
-    const transaction = {
-      verificationToken: {
-        deleteMany: vi.fn(),
-        create: vi.fn(),
-      },
-    };
-    mockDb.$transaction.mockImplementation((callback) => callback(transaction));
+  });
 
-    await resendVerificationEmail("customer@example.com", "/checkout");
+  it("resend enqueues without an account lookup — the worker discards ineligible addresses", async () => {
+    // Phase 3 Chunk 7 (M-24): resend also goes through the outbox. The
+    // service performs NO account lookup, so the request path cannot branch
+    // on account existence; the worker discards unknown, OAuth-only, and
+    // already-verified addresses after the request returns.
+    await resendVerificationEmail("customer@example.com");
 
-    expect(mockSendVerificationEmail).toHaveBeenCalledOnce();
-    expect(mockSendVerificationEmail.mock.calls[0][0].callbackUrl).toBe("/checkout");
+    expect(mockFindUserByEmail).not.toHaveBeenCalled();
+    expect(mockEnqueueVerificationEmail).toHaveBeenCalledTimes(1);
+    expect(mockEnqueueVerificationEmail).toHaveBeenCalledWith({
+      email: "customer@example.com",
+      // Chunk 7-final: the outbox payload carries the callbackUrl so the
+      // delivered verification link lands where the customer was going.
+      callbackUrl: null,
+    });
+    expect(mockSendVerificationEmail).not.toHaveBeenCalled();
   });
 
   it("verifies and returns only a customer identity for NextAuth to establish a session", async () => {

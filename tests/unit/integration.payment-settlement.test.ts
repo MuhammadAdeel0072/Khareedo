@@ -33,7 +33,7 @@ import { trackerIdentity, type PaymentObservation, type VerificationInput } from
 import { adminUpdateOrderStatus } from "@/services/orders.service";
 import { DEFAULT_SETTINGS } from "@/services/settings.service";
 import { placeOrder } from "@/services/checkout.service";
-import * as cartService from "@/services/cart.service";
+import type { PlaceOrderInput } from "@/lib/validation";
 import * as settingsService from "@/services/settings.service";
 
 assertDisposableTestDatabase();
@@ -48,7 +48,7 @@ const reconciliation = createPaymentReconciliationService(database, inbox, clock
 const reservations = createSafepayReservationService(database, clock);
 const settings = { ...DEFAULT_SETTINGS };
 const productIds: string[] = [], categoryIds: string[] = [], cartIds: string[] = [], couponIds: string[] = [], userIds: string[] = [], eventIds: string[] = [];
-function checkoutInput(method: "ONLINE" | "COD" = "ONLINE", couponCode?: string) {
+function checkoutInput(method: "ONLINE" | "COD" = "ONLINE", couponCode?: string): PlaceOrderInput {
   return { idempotencyKey: randomUUID(), paymentMethod: method, deliveryMethod: "STANDARD" as const,
     customer: { name: "Synthetic Buyer", email: "synthetic@example.invalid", phone: "03001234567" },
     address: { fullName: "Synthetic Buyer", phone: "03001234567", line1: "Synthetic Street 1", city: "Lahore", province: "Punjab" }, couponCode };
@@ -104,7 +104,7 @@ async function processObservation(observation: PaymentObservation, service = inb
 async function state(id: string) { return db.order.findUniqueOrThrow({ where: { id }, include: { payments: true,
   items: { include: { inventoryReservation: true } }, couponReservation: true } }); }
 async function quantities(f: Awaited<ReturnType<typeof fixture>>) {
-  return Promise.all(f.products.map(async p => (await db.inventory.findUniqueOrThrow({ where: { productId: p.id } })).quantity));
+  return Promise.all(f.products.map(async p => (await db.inventory.findFirstOrThrow({ where: { productId: p.id, variantId: null } })).quantity));
 }
 function failingDatabase(model: string, operation: string, failAt = 1): PaymentPersistence {
   return { $transaction: ((fn: (tx: Prisma.TransactionClient) => unknown, txOptions?: object) => db.$transaction(async tx => {
@@ -126,6 +126,10 @@ function failingDatabase(model: string, operation: string, failAt = 1): PaymentP
 beforeEach(() => { time = new Date(baseTime); simulated.enabled = true; vi.restoreAllMocks(); });
 afterAll(async () => {
   const orders = (await db.order.findMany({ where: { items: { some: { productId: { in: productIds } } } }, select: { id: true } })).map(o => o.id);
+  // Chunk 7-final: settlement now enqueues customer emails in the outbox.
+  // Remove this file's rows so later suites' small outbox sweeps are not
+  // starved by leftovers.
+  await db.emailOutbox.deleteMany({ where: { email: "synthetic@example.invalid" } });
   await db.paymentEvidence.deleteMany({ where: { payment: { orderId: { in: orders } } } });
   await db.paymentWebhookEvent.deleteMany({ where: { OR: [{ id: { in: eventIds } }, { payment: { orderId: { in: orders } } }] } });
   await db.inventoryReservation.deleteMany({ where: { orderItem: { orderId: { in: orders } } } });
@@ -440,10 +444,10 @@ describe("Inbox replay, reconciliation, races and atomic rollback", () => {
     const f = await fixture({ coupon: true }); await processObservation(f.observation);
     vi.spyOn(settingsService, "getSettings").mockResolvedValue(settings);
     const product = f.products[0];
-    vi.spyOn(cartService, "getCartDetails").mockResolvedValue({ id: "mock-offline-cart", subtotal: 1000, itemCount: 1, wrappedUnits: 0,
-      items: [{ itemId: "mock-line", productId: product.id, name: product.name, slug: product.slug, price: 1000, comparePrice: null,
-        image: null, quantity: 1, stock: 4, lowStock: true, outOfStock: false, lineTotal: 1000, giftWrap: false, priceChanged: false }] });
-    vi.spyOn(cartService, "clearCart").mockResolvedValue(undefined);
+    // The Safepay pending order consumed the fixture cart (M-8), so the COD
+    // checkout needs a real cart line of its own (Phase 3, chunk 1:
+    // placeOrder reads the cart from the DB).
+    await db.cartItem.create({ data: { cartId: f.context.cartId, productId: product.id, quantity: 1 } });
     const placed = await placeOrder(checkoutInput(method), f.context.owner.userId);
     if (!placed.ok) throw new Error("Offline checkout failed");
     expect((await state(placed.orderId)).paymentFlowVersion).toBeNull(); expect(await quantities(f)).toEqual([3]);

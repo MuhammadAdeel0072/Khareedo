@@ -50,7 +50,7 @@ async function fixture(options: { coupon?: boolean } = {}) {
       } },
     }, include: { items: true, payments: true } });
     await tx.inventoryReservation.create({ data: {
-      orderItemId: order.items[0].id, inventoryId: product.inventory!.id, quantity: 1,
+      orderItemId: order.items[0].id, inventoryId: product.inventory.find((r) => r.variantId === null)!.id, quantity: 1,
     } });
     if (options.coupon) {
       const coupon = await tx.coupon.create({ data: {
@@ -113,7 +113,7 @@ describe("Safepay session orchestration with mocked HTTP and real disposable per
     expect(payment).toMatchObject({ status: "PENDING", attemptState: "CHECKOUT_ISSUED", amount: 900 });
     expect(payment.trackerToken).toBeTruthy();
     expect(order).toMatchObject({ status: "PENDING", paymentStatus: "PENDING", total: 900 });
-    expect((await db.inventory.findUniqueOrThrow({ where: { productId: f.product.id } })).quantity).toBe(4);
+    expect((await db.inventory.findFirstOrThrow({ where: { productId: f.product.id, variantId: null } })).quantity).toBe(4);
     expect(await db.coupon.findFirstOrThrow({ where: { id: { in: coupons }, reservations: { some: { orderId: order.id } } } }))
       .toMatchObject({ usedCount: 0, reservedCount: 1 });
     const evidence = await db.paymentEvidence.findMany({ where: { paymentId: payment.id } });
@@ -144,6 +144,61 @@ describe("Safepay session orchestration with mocked HTTP and real disposable per
     expect(second).toMatchObject({ kind: "blocked", code: "CREATION_UNCERTAIN" });
     release(); expect((await first).kind).toBe("ready");
     expect(http).toHaveBeenCalledTimes(3);
+  });
+  it("resumes a crashed-after-bind attempt with the same tracker and no second creation", async () => {
+    const f = await fixture(), http = transport();
+    const claimed = await store.claim(f.request, bindCheckoutOwner(f.owner), config, new Date());
+    expect(claimed.kind).toBe("claimed");
+    if (claimed.kind !== "claimed") throw new Error("Expected claim");
+    const token = "synthetic-bound-" + randomUUID();
+    const bound = await store.bindTracker(claimed.claim, {
+      token, environment: "sandbox", state: "TRACKER_STARTED", intent: "CYBERSOURCE",
+      mode: "payment", entryMode: "flex", currency: "PKR", amountMinor: BigInt(100000),
+    }, config, new Date());
+    expect(bound).not.toBeNull();
+    const result = await service(http)(f.request, f.owner);
+    expect(result.kind).toBe("ready");
+    // Metadata + authentication only: the provider creation endpoint is never called again.
+    expect(http).toHaveBeenCalledTimes(2);
+    expect(http.mock.calls.filter(([url]) => url.pathname === "/order/payments/v3/")).toHaveLength(0);
+    const payment = await db.payment.findUniqueOrThrow({ where: { id: f.payment.id } });
+    expect(payment).toMatchObject({ trackerToken: token, attemptState: "CHECKOUT_ISSUED" });
+  });
+  it("resumes an authenticating attempt straight to authentication without re-attaching metadata", async () => {
+    const f = await fixture(), http = transport();
+    const claimed = await store.claim(f.request, bindCheckoutOwner(f.owner), config, new Date());
+    if (claimed.kind !== "claimed") throw new Error("Expected claim");
+    const token = "synthetic-bound-" + randomUUID();
+    const bound = await store.bindTracker(claimed.claim, {
+      token, environment: "sandbox", state: "TRACKER_STARTED", intent: "CYBERSOURCE",
+      mode: "payment", entryMode: "flex", currency: "PKR", amountMinor: BigInt(100000),
+    }, config, new Date());
+    if (!bound) throw new Error("Expected bound tracker");
+    const advanced = await store.advance(bound, config, "TRACKER_CREATED", "AUTHENTICATING", new Date());
+    expect(advanced).not.toBeNull();
+    const result = await service(http)(f.request, f.owner);
+    expect(result.kind).toBe("ready");
+    // Authentication only: no creation, no metadata re-attach.
+    expect(http).toHaveBeenCalledTimes(1);
+    expect(http.mock.calls.filter(([url]) => url.pathname === "/order/payments/v3/")).toHaveLength(0);
+    const payment = await db.payment.findUniqueOrThrow({ where: { id: f.payment.id } });
+    expect(payment).toMatchObject({ trackerToken: token, attemptState: "CHECKOUT_ISSUED" });
+  });
+  it("blocks a concurrent request with a different key without creating a second tracker", async () => {
+    const f = await fixture();
+    let dispatched!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { dispatched = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const http = vi.fn<HttpTransport>(async (url, init) => {
+      if (url.pathname === "/order/payments/v3/") { dispatched(); await gate; return goodTracker(init); }
+      return new Response(JSON.stringify({ data: "synthetic-authentication" }));
+    });
+    const run = service(http), first = run(f.request, f.owner);
+    await started;
+    const second = await run({ ...f.request, requestKey: randomUUID() }, f.owner);
+    expect(second).toMatchObject({ kind: "blocked", code: "REQUEST_CONFLICT" });
+    release(); expect((await first).kind).toBe("ready");
+    expect(http.mock.calls.filter(([url]) => url.pathname === "/order/payments/v3/")).toHaveLength(1);
   });
   it("does not dispatch on a crashed prior creation claim", async () => {
     const f = await fixture(), http = transport();

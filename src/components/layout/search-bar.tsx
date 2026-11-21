@@ -1,16 +1,21 @@
 "use client";
 
 // Search box — submits to /products?q= (FR-09).
-import { useState } from "react";
+import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { Search } from "lucide-react";
+import { Loader2, Search } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 
 export function SearchBar({ className }: { className?: string }) {
   const router = useRouter();
   const [q, setQ] = useState("");
-  const [pending, setPending] = useState(false);
+  // The button never showed a pending state (Phase 3, chunk 12
+  // follow-up B): setPending(true) was immediately followed by
+  // setPending(false) in the same synchronous handler, so the state
+  // never rendered. A transition keeps `isPending` true until the
+  // navigation actually completes.
+  const [isPending, startTransition] = useTransition();
 
   return (
     <form
@@ -18,9 +23,9 @@ export function SearchBar({ className }: { className?: string }) {
       className={`relative flex min-w-0 w-full ${className ?? ""}`}
       onSubmit={(e) => {
         e.preventDefault();
-        setPending(true);
-        router.push(q.trim() ? `/products?q=${encodeURIComponent(q.trim())}` : "/products");
-        setPending(false);
+        startTransition(() => {
+          router.push(q.trim() ? `/products?q=${encodeURIComponent(q.trim())}` : "/products");
+        });
       }}
     >
       <Search
@@ -37,11 +42,15 @@ export function SearchBar({ className }: { className?: string }) {
       />
       <Button
         type="submit"
-        disabled={pending}
+        disabled={isPending}
         className="h-11 shrink-0 rounded-l-none rounded-r-md px-4 sm:px-5"
         aria-label="Search"
       >
-        <Search className="h-4 w-4" aria-hidden="true" />
+        {isPending ? (
+          <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+        ) : (
+          <Search className="h-4 w-4" aria-hidden="true" />
+        )}
       </Button>
     </form>
   );

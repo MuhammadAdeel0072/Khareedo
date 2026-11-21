@@ -273,11 +273,19 @@ export async function runSeed(
         data: { productId: created.id, url: imageUrl, alt: p.name, sortOrder: 0 },
       });
     }
-    await db.inventory.upsert({
-      where: { productId: created.id },
-      update: {},
-      create: { productId: created.id, quantity: p.stock, lowStockThreshold: 5 },
+    // No upsert here: Inventory's unique key is now the compound
+    // (productId, variantId) and Prisma rejects null inside a compound-
+    // unique `where` (Chunk 8 — D12). The product-level row is
+    // variantId NULL, so findFirst + create is the idempotent form.
+    const existingInventory = await db.inventory.findFirst({
+      where: { productId: created.id, variantId: null },
+      select: { id: true },
     });
+    if (!existingInventory) {
+      await db.inventory.create({
+        data: { productId: created.id, quantity: p.stock, lowStockThreshold: 5 },
+      });
+    }
     n++;
   }
   summary.productsPresent = n;
@@ -441,6 +449,8 @@ export async function runSeed(
       type: "PERCENT",
       value: 10,
       minOrderAmount: 2000,
+      // First-order-only (D11): enforced in coupon validation/reservation.
+      firstOrderOnly: true,
       isActive: true,
     },
     {

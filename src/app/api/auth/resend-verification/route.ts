@@ -3,9 +3,7 @@ import { z } from "zod";
 import { clientIp, rateLimit } from "@/lib/rate-limit";
 import { jsonError, jsonOk, parseBody } from "@/lib/api";
 import { emailSchema } from "@/lib/validation";
-import { EmailDeliveryNotConfiguredError, isEmailDeliveryConfigured } from "@/services/email.service";
 import { resendVerificationEmail } from "@/services/email-verification.service";
-import { safeCallbackUrl } from "@/lib/auth-client";
 
 const resendSchema = z.object({
   email: emailSchema,
@@ -27,19 +25,23 @@ export async function POST(request: Request) {
   }
 
   try {
-    if (!isEmailDeliveryConfigured()) {
-      throw new EmailDeliveryNotConfiguredError();
-    }
-    await resendVerificationEmail(
-      parsed.data.email,
-      safeCallbackUrl(parsed.data.callbackUrl)
-    );
+    // Resend only enqueues a verification email in the outbox (Phase 3
+    // Chunk 7, M-24) — the worker looks the account up at delivery and
+    // silently discards unknown, OAuth-only, and already-verified
+    // addresses, so the response is identical either way. There is no
+    // SMTP-configuration failure to report here: a failed delivery shows
+    // up as a FAILED outbox row for an admin to retry. A callbackUrl sent
+    // in the body is carried in the outbox payload (Chunk 7-final), so the
+    // verification link lands there instead of the default "/account".
+    await resendVerificationEmail(parsed.data.email, parsed.data.callbackUrl ?? null);
     return jsonOk({ message: "If an eligible account exists, a verification email has been sent." });
   } catch (error) {
-    if (error instanceof EmailDeliveryNotConfiguredError) {
-      return jsonError("Email verification is not configured. Please contact the store administrator.", 503);
-    }
     console.error("[auth] verification email resend failed", error instanceof Error ? error.name : "UnknownError");
-    return jsonError("Unable to send a verification email. Please try again later.", 500);
+    // Stage 3 audit, L-1: this handler only ENQUEUES a verification
+    // email in the outbox — it never sends one — so "unable to send a
+    // verification email" misdescribed an enqueue/DB failure. Say what
+    // failed. (Register's identical wording was already corrected in
+    // the perf work; this is the same fix for resend.)
+    return jsonError("Something went wrong while processing your request. Please try again later.", 500);
   }
 }

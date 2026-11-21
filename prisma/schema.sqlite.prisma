@@ -39,6 +39,7 @@ model User {
   orders        Order[]
   cart          Cart?
   wishlistItems WishlistItem[]
+  reviews       Review[]
   oauthAccounts OAuthAccount[]
   verificationTokens VerificationToken[]
   passwordResetTokens PasswordResetToken[]
@@ -185,6 +186,11 @@ model EmailOutbox {
   id            String    @id @default(cuid())
   type          String // "PASSWORD_RESET"
   email         String
+  // Optional JSON payload (Phase 3, Chunk 7-final — D14): the data the
+  // worker needs to render the email (order reference/total/status for
+  // order notifications; callbackUrl for verification mail). Auth rows
+  // carry no payload; order rows always do. TEXT, never indexed.
+  payload       String?
   status        String    @default("PENDING") // PENDING | FAILED
   attempts      Int       @default(0)
   nextAttemptAt DateTime  @default(now())
@@ -194,6 +200,8 @@ model EmailOutbox {
 
   @@index([status, nextAttemptAt])
   @@index([createdAt])
+  // Enqueue dedup read (enqueueOutboxEmail: type + email + PENDING status).
+  @@index([type, email, status])
 }
 
 model Address {
@@ -254,7 +262,9 @@ model Product {
   status     String  @default("DRAFT") // DRAFT | PUBLISHED | ARCHIVED (FR-39, FR-13)
   isFeatured Boolean @default(false)   // FR-12, FR-42
 
-  // Display-only ratings (decision D-08)
+  // Ratings (D-08 display-only, superseded by D13): maintained by
+  // in-transaction aggregation over APPROVED reviews — see
+  // reviews.service.ts. The seed now writes 0/0.
   rating      Float @default(0)
   reviewCount Int   @default(0)
 
@@ -262,10 +272,12 @@ model Product {
   deletedAt DateTime? // soft archive
 
   images        ProductImage[]
-  inventory     Inventory?
+  inventory     Inventory[]
+  variants      ProductVariant[]
   cartItems     CartItem[]
   orderItems    OrderItem[]
   wishlistItems WishlistItem[]
+  reviews       Review[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -291,15 +303,74 @@ model ProductImage {
   @@index([productId])
 }
 
+// Product variants (Phase 3, Chunk 8 — D12): denormalised label-string model.
+// One row per sellable option (e.g. "Size: M / Colour: Red") — no normalised
+// attribute/option tables in V1. priceOverride is ABSOLUTE (null = inherit
+// the product price). Stock is a separate Inventory row per variant; a null
+// variantId on cart/order lines means the product itself (no backfill).
+// No variant images and no variant filtering in V1.
+model ProductVariant {
+  id            String   @id @default(cuid())
+  productId     String
+  product       Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  label         String
+  sku           String   @unique
+  priceOverride Int?
+  isActive      Boolean  @default(true)
+  sortOrder     Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  inventory  Inventory?
+  cartItems  CartItem[]
+  orderItems OrderItem[]
+
+  @@index([productId])
+  @@index([productId, sortOrder])
+}
+
+// Product reviews (Phase 3, Chunk 9 — D13): verified purchasers only
+// (a DELIVERED order containing the product), pre-moderation, one review
+// per user per product (editable; edits return to PENDING). No per-variant
+// reviews in V1 — a review is for the product. Product.rating / reviewCount
+// are maintained by in-transaction aggregation over APPROVED reviews only
+// (see reviews.service.ts); the seed's invented values are reset to 0/0.
+model Review {
+  id               String   @id @default(cuid())
+  productId        String
+  product          Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  userId           String
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rating           Int
+  text             String?
+  status           String   @default("PENDING") // PENDING | APPROVED | REJECTED
+  verifiedPurchase Boolean  @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([userId, productId])
+  @@index([productId, status, createdAt])
+  @@index([status, createdAt])
+}
+
 model Inventory {
   id                String   @id @default(cuid())
-  productId         String   @unique
+  productId         String
   product           Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  // Null = the product-level stock row (variant-less products); set = this
+  // variant's own stock row. One row per (productId, variantId): the
+  // compound unique below plus the partial unique index in migration
+  // 20261120000003 (Postgres and SQLite both treat NULLs as distinct in a
+  // plain unique index, so the null-variant row needs its own index).
+  variantId         String?  @unique
+  variant           ProductVariant? @relation(fields: [variantId], references: [id], onDelete: Cascade)
   quantity          Int      @default(0) // never negative — guarded in checkout transaction
   lowStockThreshold Int      @default(5)
   updatedAt         DateTime @updatedAt
 
   @@index([quantity])
+  @@unique([productId, variantId])
+  @@index([variantId])
 
   // Available quantity keeps its existing meaning. All writers must honor version
   // before reservations can be enabled; schema authoring does not enable them.
@@ -316,6 +387,12 @@ model Cart {
   sessionKey String?  @unique // guest cart (BR-01, FR-17)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
+  // Optimistic-lock claim for the Safepay pending-order creation (Phase 3,
+  // chunk 3-final): the cart is claimed version-gated before the snapshot is
+  // read, so two concurrent checkouts for the same cart cannot both reserve
+  // it. Cart edits do not bump this version; the deleteMany exact-snapshot
+  // guard at the end of pending-order creation still catches those.
+  version    Int      @default(0)
 
   items CartItem[]
 }
@@ -326,11 +403,14 @@ model CartItem {
   cart      Cart    @relation(fields: [cartId], references: [id], onDelete: Cascade)
   productId String
   product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variantId String?
+  variant   ProductVariant? @relation(fields: [variantId], references: [id], onDelete: Cascade)
   quantity  Int
   giftWrap  Boolean @default(false)
 
-  @@unique([cartId, productId])
+  @@unique([cartId, productId, variantId])
   @@index([cartId])
+  @@index([variantId])
 }
 
 model WishlistItem {
@@ -373,7 +453,19 @@ model Order {
 
   status        String @default("PENDING") // PENDING | CONFIRMED | PROCESSING | SHIPPED | DELIVERED | CANCELLED
   paymentMethod String @default("COD")     // COD | BANK_TRANSFER | ONLINE
-  paymentStatus String @default("PENDING") // PENDING | PAID | FAILED | REFUNDED
+  paymentStatus String @default("PENDING") // PENDING | PAID | FAILED | REFUNDED | CANCELLED
+
+  // Cancellation record (Phase 3, Chunk 2-final — D1/D2): who cancelled, when,
+  // and the optional customer/admin reason. Null on orders never cancelled.
+  // cancelledBy is "customer:<userId>" or "admin:<adminId>".
+  cancelledAt  DateTime?
+  cancelledBy  String?
+  cancelReason String?
+
+  // Shipment tracking (Phase 3, Chunk 6 — D4): set by an admin when marking
+  // an order SHIPPED. Null until then; plain text, no provider integration.
+  carrier        String?
+  trackingNumber String?
 
   // Money snapshots (BR-04/06/09/15) — INTEGER PKR
   subtotal       Int
@@ -388,10 +480,27 @@ model Order {
   giftWrapMessage  String?
   couponCode       String?
   couponTitle      String?
+  // First-order claim (R-1, migration 20261121000001): true when this
+  // order redeemed a first-order-only coupon. The partial unique index
+  // Order_userId_first_order_coupon_active_idx (raw SQL — Prisma cannot
+  // express partial indexes) allows at most one non-cancelled order per
+  // user with this flag set, so two concurrent first orders with
+  // DIFFERENT first-order-only coupons cannot both commit: the second
+  // order.create fails with P2002. Set by the checkout services from
+  // Coupon.firstOrderOnly at order creation; never set by clients.
+  // Cancelling frees the claim automatically (CANCELLED rows leave the
+  // partial index), exactly like the per-user redemption index — no
+  // cancel-path change is needed.
+  firstOrderCoupon Boolean @default(false)
+  // Automatic promotion applied to this order (Chunk 11 — D10). A discount
+  // comes from exactly one source: couponCode XOR promotionId, never both.
+  promotionId      String?
+  promotionTitle   String?
   notes            String?
 
   items    OrderItem[]
   payments Payment[] @relation("OrderPayments")
+  statusHistory OrderStatusHistory[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -400,6 +509,8 @@ model Order {
   @@index([status])
   @@index([status, createdAt])
   @@index([createdAt])
+  // Dashboard revenue SUMs filter paymentStatus + createdAt ranges.
+  @@index([paymentStatus, createdAt])
   // Order history index (mirrors schema.postgres.prisma).
   @@index([userId, createdAt])
 
@@ -434,12 +545,35 @@ model Order {
   @@index([paymentFlowVersion, paymentReviewStatus, updatedAt])
 }
 
+// Order status history (Phase 3, Chunk 6 — M-6/D4): one dated row per status
+// transition, written in the same transaction as the status change. The admin
+// audit log keeps its own ORDER_STATUS_CHANGED entries; this table is the
+// customer-facing timeline (actor is internal — never render it to
+// customers). Append-only: no update or delete API.
+model OrderStatusHistory {
+  id        String   @id @default(cuid())
+  orderId   String
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  status    String   // PENDING | CONFIRMED | PROCESSING | SHIPPED | DELIVERED | CANCELLED
+  actor     String?  // "admin:<id>" | "customer:<id>" | "system" | "system:expiry"
+  note      String?
+  createdAt DateTime @default(now())
+
+  @@index([orderId, createdAt])
+}
+
 model OrderItem {
   id          String  @id @default(cuid())
   orderId     String
   order       Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
   productId   String?
   product     Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  // Variant snapshot (BR-09, Chunk 8 — D12): survives later variant edits/
+  // deactivation. Null variantId = the product itself (no variant).
+  variantId    String?
+  variant      ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+  variantLabel String?
+  variantSku   String?
   // Line snapshot (BR-09, NFR-31): survives later product edits/archival
   productName String
   productSlug String
@@ -451,6 +585,8 @@ model OrderItem {
 
   @@index([orderId])
   @@index([productId])
+  // Top-selling products group by (productName, productSlug).
+  @@index([productName, productSlug])
 
   inventoryReservation InventoryReservation?
 }
@@ -461,7 +597,7 @@ model Payment {
   order Order @relation("OrderPayments", fields: [orderId], references: [id], onDelete: Cascade)
   provider  String   // COD | BANK_TRANSFER | <gateway name when enabled>
   amount    Int
-  status    String   @default("PENDING") // PENDING | PAID | FAILED | REFUNDED
+  status    String   @default("PENDING") // PENDING | PAID | FAILED | REFUNDED | CANCELLED
   reference String?  // provider transaction reference (BR-10: only set from verified response)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -699,6 +835,10 @@ model Promotion {
   startsAt       DateTime?
   endsAt         DateTime?
   isActive       Boolean   @default(true)
+  // Optimistic lock (Chunk 11): admin updates claim this version, so two
+  // concurrent edits cannot silently overwrite each other (coupons already
+  // had the same CAS pattern).
+  version        Int       @default(0)
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 }
@@ -711,6 +851,12 @@ model Coupon {
   value          Int
   minOrderAmount Int       @default(0)
   maxUses        Int? // null = unlimited
+  // Max-discount cap (D11/M-21): null = no cap. A percentage discount is
+  // clamped to this amount at computation time (pricing.computeDiscount).
+  maxDiscountAmount Int?
+  // First-order-only (D11): the coupon is valid only when the user has no
+  // prior non-cancelled order. WELCOME10 is seeded with this on.
+  firstOrderOnly Boolean   @default(false)
   usedCount      Int       @default(0)
   startsAt       DateTime?
   expiresAt      DateTime?

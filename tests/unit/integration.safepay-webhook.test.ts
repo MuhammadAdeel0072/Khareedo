@@ -66,7 +66,7 @@ async function fixture() {
       } },
     }, include: { items: true, payments: true } });
     await tx.inventoryReservation.create({ data: {
-      orderItemId: created.items[0].id, inventoryId: product.inventory!.id, quantity: 1,
+      orderItemId: created.items[0].id, inventoryId: product.inventory.find((r) => r.variantId === null)!.id, quantity: 1,
     } });
     await tx.order.update({ where: { id: created.id }, data: { paymentOwnerOrderId: created.id, activePaymentId: created.payments[0].id } });
     return created;
@@ -120,6 +120,10 @@ function signedDelivery(token: string, type = "payment.succeeded", failedState =
 
 afterAll(async () => {
   const orderIds = [...orders];
+  // Chunk 7-final: settlement/refunds now enqueue customer emails in the
+  // outbox. Remove this file's rows so later suites' small outbox sweeps
+  // are not starved by leftovers.
+  await db.emailOutbox.deleteMany({ where: { email: "synthetic@example.invalid" } });
   await db.paymentEvidence.deleteMany({ where: { payment: { orderId: { in: orderIds } } } });
   await db.paymentRefund.deleteMany({ where: { payment: { orderId: { in: orderIds } } } });
   await db.paymentWebhookEvent.deleteMany({ where: { OR: [{ id: { in: events } }, { payment: { orderId: { in: orderIds } } }] } });
@@ -156,7 +160,7 @@ describe("Signed webhook to settled order", () => {
     const evidence = await db.paymentEvidence.findMany({ where: { paymentId: f.paymentId } });
     expect(evidence.some(row => row.source === "WEBHOOK" && row.decision === "SETTLED")).toBe(true);
     // Stock was already decremented when the reservation was HELD; settlement must not double-decrement.
-    const inventory = await db.inventory.findUniqueOrThrow({ where: { productId: f.product.id } });
+    const inventory = await db.inventory.findFirstOrThrow({ where: { productId: f.product.id, variantId: null } });
     expect(inventory.quantity).toBe(3);
   });
 
@@ -783,7 +787,13 @@ describe("Signed webhook to settled order", () => {
 
     events.push(first.eventId);
 
-    expect(await inbox.process(first.eventId)).toEqual({ kind: "settled" });
+    const refundResult = await inbox.process(first.eventId);
+    const refundRows = await db.paymentRefund.findMany({ where: { paymentId: f.paymentId } });
+    expect(refundRows).toHaveLength(1);
+    // Chunk 7-final: the settled result names the refund row settlement
+    // created, so the caller can notify the customer.
+    expect(refundResult).toEqual({ kind: "settled",
+      refund: { refundIds: [refundRows[0].id], amountMinor: "1000" } });
 
     // Identical provider redelivery must not duplicate effects.
     const duplicate = await inbox.receive(notice);

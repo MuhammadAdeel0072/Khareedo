@@ -37,12 +37,19 @@
 // compiler statically flags `process.on` as unsupported even behind a
 // runtime guard, so it must not appear in this file.
 import { captureError } from "@/lib/error-monitoring";
+import { warnTrustedProxyStartup } from "@/lib/trusted-proxy";
 
 export async function register() {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
   if (process.env.NEXT_PHASE === "phase-production-build") return;
   const { registerProcessErrorMonitor } = await import("@/instrumentation-node");
   registerProcessErrorMonitor();
+
+  // Production trusted-proxy warning: log only, never throws. When
+  // TRUSTED_PROXY_IPS is unset, every per-IP rate limit collapses to one
+  // global bucket — operators must see this at boot, not discover it
+  // from a lockout. Also evaluated lazily on first trusted-proxy use.
+  warnTrustedProxyStartup();
 
   // Payment maintenance worker. Its opt-out (PAYMENT_MAINTENANCE_WORKER=off)
   // guards ONLY this worker: it must never prevent the email outbox worker

@@ -30,6 +30,10 @@ export const registerSchema = z.object({
   name: z.string().trim().min(2, "Please enter your full name").max(80),
   email: emailSchema,
   password: passwordSchema,
+  // Post-verification destination, carried in the outbox payload (Chunk
+  // 7-final) so the verification link lands here instead of "/account".
+  // Validated again at send time by safeCallbackUrl.
+  callbackUrl: z.string().max(2048).optional(),
 });
 
 export const loginSchema = z.object({
@@ -43,6 +47,28 @@ export const profileSchema = z.object({
   image: z.string().url().optional().or(z.literal("")),
 });
 
+// ─── Addresses ───
+// The province list, defined once and shared by the checkout form, the
+// addresses manager and server-side validation (Phase 3, chunk 12
+// follow-up B): province was free text server-side, so a typo'd province
+// could be saved and then fail silently downstream. Writes validate
+// against this list; reads never reject legacy values — a saved address
+// with an out-of-list province is still displayed and usable, it just
+// cannot be re-saved without picking a listed province.
+export const PROVINCES = [
+  "Punjab",
+  "Sindh",
+  "Khyber Pakhtunkhwa",
+  "Balochistan",
+  "Gilgit-Baltistan",
+  "Azad Kashmir",
+  "Islamabad Capital Territory",
+] as const;
+
+export const provinceSchema = z.enum(PROVINCES, {
+  error: "Please select a province",
+});
+
 export const addressSchema = z.object({
   label: z.string().trim().min(1, "Label is required (e.g. Home)").max(30),
   fullName: z.string().trim().min(2, "Recipient name is required").max(80),
@@ -50,7 +76,7 @@ export const addressSchema = z.object({
   line1: z.string().trim().min(5, "Please enter the full street address").max(200),
   line2: z.string().trim().max(200).optional().or(z.literal("")),
   city: z.string().trim().min(2, "City is required").max(60),
-  province: z.string().trim().min(2, "Province is required").max(60),
+  province: provinceSchema,
   postalCode: z
     .string()
     .trim()
@@ -74,7 +100,7 @@ export const checkoutAddressSchema = z.object({
   line1: z.string().trim().min(5, "Please enter the full street address").max(200),
   line2: z.string().trim().max(200).optional().or(z.literal("")),
   city: z.string().trim().min(2, "City is required").max(60),
-  province: z.string().trim().min(2, "Province is required").max(60),
+  province: provinceSchema,
   postalCode: z
     .string()
     .trim()
@@ -97,30 +123,35 @@ export const placeOrderSchema = z.object({
 });
 
 // ─── Admin: products ───
-export const productSchema = z.object({
-  name: z.string().trim().min(3, "Product name is required").max(120),
-  slug: z
-    .string()
-    .trim()
-    .regex(/^[a-z0-9-]*$/, "Slug may contain lowercase letters, numbers and dashes")
-    .max(140)
-    .optional()
-    .or(z.literal("")),
-  description: z.string().trim().max(5000).default(""),
-  brand: z.string().trim().max(60).optional().or(z.literal("")),
-  sku: z.string().trim().max(60).optional().or(z.literal("")),
-  categoryId: z.string().min(1, "Please choose a category"),
-  price: z.coerce.number().int("Price must be a whole number").min(1, "Price must be greater than 0"),
-  comparePrice: z.coerce.number().int().min(0).optional().nullable(),
-  status: z.enum(["DRAFT", "PUBLISHED", "ARCHIVED"]).default("DRAFT"),
-  isFeatured: z.boolean().default(false),
-  rating: z.coerce.number().min(0).max(5).default(0),
-  reviewCount: z.coerce.number().int().min(0).default(0),
-  tags: z.string().trim().max(300).optional().or(z.literal("")),
-  images: z.array(z.string().trim().min(1)).min(1, "Add at least one product image").max(8),
-  stock: z.coerce.number().int().min(0).default(0),
-  lowStockThreshold: z.coerce.number().int().min(0).default(5),
-});
+// Rating / reviewCount are NOT accepted here: they are calculated from
+// APPROVED reviews only (src/services/reviews.service.ts) and must never
+// be overwritten by an admin payload. The schema is strict, so a payload
+// carrying rating/reviewCount (or any other unknown key) is rejected with
+// 422 instead of being silently stripped.
+export const productSchema = z
+  .object({
+    name: z.string().trim().min(3, "Product name is required").max(120),
+    slug: z
+      .string()
+      .trim()
+      .regex(/^[a-z0-9-]*$/, "Slug may contain lowercase letters, numbers and dashes")
+      .max(140)
+      .optional()
+      .or(z.literal("")),
+    description: z.string().trim().max(5000).default(""),
+    brand: z.string().trim().max(60).optional().or(z.literal("")),
+    sku: z.string().trim().max(60).optional().or(z.literal("")),
+    categoryId: z.string().min(1, "Please choose a category"),
+    price: z.coerce.number().int("Price must be a whole number").min(1, "Price must be greater than 0"),
+    comparePrice: z.coerce.number().int().min(0).optional().nullable(),
+    status: z.enum(["DRAFT", "PUBLISHED", "ARCHIVED"]).default("DRAFT"),
+    isFeatured: z.boolean().default(false),
+    tags: z.string().trim().max(300).optional().or(z.literal("")),
+    images: z.array(z.string().trim().min(1)).min(1, "Add at least one product image").max(8),
+    stock: z.coerce.number().int().min(0).default(0),
+    lowStockThreshold: z.coerce.number().int().min(0).default(5),
+  })
+  .strict();
 
 // ─── Admin: categories ───
 export const categorySchema = z.object({
@@ -142,11 +173,62 @@ export const categorySchema = z.object({
 // ─── Admin: inventory ───
 export const inventoryUpdateSchema = z.object({
   productId: z.string().min(1),
+  /** Null/absent = the product-level stock row; set = that variant's row.
+   * Nullish (not just optional): the admin UI sends explicit `null` for
+   * product-level rows, and the service treats null as product-level — the
+   * old `.optional()` rejected that with a 422 on every product-level
+   * stock update (E2E, Stream E). */
+  variantId: z.string().min(1).nullish(),
   quantity: z.coerce
     .number()
     .int("Stock must be a whole number")
     .min(0, "Stock cannot be negative"),
   lowStockThreshold: z.coerce.number().int().min(0).max(999).optional(),
+});
+
+// ─── Admin: product variants (Phase 3, Chunk 8 — D12) ───
+// Denormalised label-string model: label + SKU are required; priceOverride
+// is ABSOLUTE (null = inherit the product price).
+export const variantSchema = z.object({
+  label: z.string().trim().min(1, "Variant label is required").max(120),
+  sku: z.string().trim().min(1, "SKU is required").max(60),
+  priceOverride: z.coerce.number().int("Price must be a whole number").min(1, "Price must be greater than 0").optional().nullable(),
+  stock: z.coerce.number().int().min(0, "Stock cannot be negative").default(0),
+  lowStockThreshold: z.coerce.number().int().min(0).max(999).optional(),
+  sortOrder: z.coerce.number().int().min(0).optional(),
+  isActive: z.boolean().default(true),
+});
+
+/** Update payload for a variant. Written out explicitly — NOT
+ *  `variantSchema.partial()`: the create schema's `.default(0)` on stock
+ *  and `.default(true)` on isActive would fire on an omitted key and a
+ *  PATCH that only renames a variant would silently zero its stock. */
+export const variantUpdateSchema = z.object({
+  label: z.string().trim().min(1, "Label must not be empty").max(120, "Label must be 120 characters or fewer").optional(),
+  sku: z.string().trim().min(1, "SKU must not be empty").max(120, "SKU must be 120 characters or fewer").optional(),
+  priceOverride: z.number().int("Price override must be a whole number (Rs)").positive("Price override must be greater than 0").max(10_000_000).nullable().optional(),
+  stock: z.number().int("Stock must be a whole number").min(0, "Stock cannot be negative").max(100_000).optional(),
+  lowStockThreshold: z.number().int().min(1).max(999).optional(),
+  sortOrder: z.number().int().min(0).max(9999).optional(),
+  isActive: z.boolean().optional(),
+});
+
+// ─── Customer: product reviews (Phase 3, Chunk 9 — D13) ───
+// Rating is required (integer 1–5); text is optional. The same shape is
+// used for create and update — an edit always resubmits both fields and
+// returns the review to pending moderation.
+export const reviewSchema = z.object({
+  rating: z.coerce
+    .number()
+    .int("Rating must be a whole number")
+    .min(1, "Rating must be between 1 and 5")
+    .max(5, "Rating must be between 1 and 5"),
+  text: z.string().trim().max(1000, "Review must be 1000 characters or fewer").optional().nullable(),
+});
+
+// ─── Admin: review moderation (Phase 3, Chunk 9 — D13) ───
+export const reviewModerationSchema = z.object({
+  action: z.enum(["APPROVED", "REJECTED"]),
 });
 
 // ─── Admin: coupons / promotions / banners ───
@@ -162,6 +244,10 @@ export const couponSchema = z
     value: z.coerce.number().int().min(1, "Value must be at least 1"),
     minOrderAmount: z.coerce.number().int().min(0).default(0),
     maxUses: z.coerce.number().int().min(1).optional().nullable(),
+    // Max-discount cap (D11/M-21): null = no cap.
+    maxDiscountAmount: z.coerce.number().int().min(1, "Max discount must be at least Rs 1").optional().nullable(),
+    // First-order-only (D11): WELCOME10 is seeded with this on.
+    firstOrderOnly: z.boolean().default(false),
     startsAt: z.string().optional().or(z.literal("")),
     expiresAt: z.string().optional().or(z.literal("")),
     isActive: z.boolean().default(true),
@@ -169,6 +255,10 @@ export const couponSchema = z
   .refine((d) => d.type !== "PERCENT" || d.value <= 100, {
     message: "Percent discount cannot exceed 100",
     path: ["value"],
+  })
+  .refine((d) => !d.startsAt || !d.expiresAt || new Date(d.startsAt) < new Date(d.expiresAt), {
+    message: "Start date must be before the expiry date",
+    path: ["expiresAt"],
   });
 
 export const promotionSchema = z
@@ -181,10 +271,17 @@ export const promotionSchema = z
     startsAt: z.string().optional().or(z.literal("")),
     endsAt: z.string().optional().or(z.literal("")),
     isActive: z.boolean().default(true),
+    // Optimistic-lock version the caller loaded (Chunk 11, Low); the admin
+    // manager sends it, direct callers may omit it (see adminUpdatePromotion).
+    version: z.coerce.number().int().min(0).optional(),
   })
   .refine((d) => d.type !== "PERCENT" || d.value <= 100, {
     message: "Percent discount cannot exceed 100",
     path: ["value"],
+  })
+  .refine((d) => !d.startsAt || !d.endsAt || new Date(d.startsAt) < new Date(d.endsAt), {
+    message: "Start date must be before the end date",
+    path: ["endsAt"],
   });
 
 /** Root-relative path ("/...") or absolute http(s) URL; blocks protocol-relative and dangerous schemes. */
@@ -250,6 +347,7 @@ export type PlaceOrderInput = z.infer<typeof placeOrderSchema>;
 export type ProductFormInput = z.infer<typeof productSchema>;
 export type CategoryFormInput = z.infer<typeof categorySchema>;
 export type CouponFormInput = z.infer<typeof couponSchema>;
+export type PromotionFormInput = z.infer<typeof promotionSchema>;
 export type SettingsFormInput = z.infer<typeof settingsSchema>;
 
 /** Flatten a ZodError into { field: message } for form display (FR-49). */

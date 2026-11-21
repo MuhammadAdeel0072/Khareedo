@@ -1,8 +1,22 @@
-import { createHash, randomBytes } from "node:crypto";
+// Email verification tokens (PR-09 pattern; delivery moved onto the outbox
+// in Phase 3 Chunk 7, M-24).
+//
+// Registration used to send the verification email synchronously, so a
+// transient SMTP failure failed the whole registration. Registration and
+// resend now only enqueue an EMAIL_VERIFICATION outbox row; the worker
+// (email-outbox.service.ts) looks the account up at delivery time,
+// generates the token then, stores only its hash, and sends the email with
+// retries. A failed SMTP send therefore never fails registration or resend,
+// and the admin outbox viewer surfaces rows that exhaust their retries.
+//
+// Token shape is unchanged: cryptographically secure random token, only its
+// SHA-256 hash stored, single-use (consumedAt) and expiring (24h). The raw
+// token is emailed once and never persisted or logged. The verification link
+// uses the callbackUrl carried in the outbox payload when the request
+// supplied one (Chunk 7-final), falling back to the default "/account".
+import { createHash } from "node:crypto";
 import { db } from "@/lib/db";
-import { safeCallbackUrl } from "@/lib/auth-client";
-import { sendVerificationEmail } from "@/services/email.service";
-import { findUserByEmail } from "@/services/auth-users.service";
+import { enqueueVerificationEmail } from "@/services/email-outbox.service";
 
 export const VERIFICATION_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -17,40 +31,33 @@ export function isVerificationTokenUsable(
   return token.consumedAt === null && token.expiresAt.getTime() > now.getTime();
 }
 
-async function issueVerificationEmail(
-  user: { id: string; email: string; name: string | null },
-  callbackUrl = "/account"
-) {
-  const token = randomBytes(32).toString("base64url");
-  const tokenHash = hashVerificationToken(token);
-  const expiresAt = new Date(Date.now() + VERIFICATION_TOKEN_TTL_MS);
-
-  await db.$transaction(async (transaction) => {
-    await transaction.verificationToken.deleteMany({ where: { userId: user.id } });
-    await transaction.verificationToken.create({
-      data: { userId: user.id, email: user.email, tokenHash, expiresAt },
-    });
-  });
-
-  await sendVerificationEmail({
-    email: user.email,
-    name: user.name,
-    token,
-    callbackUrl: safeCallbackUrl(callbackUrl),
-  });
-}
-
+/**
+ * Enqueue a verification email for a newly registered (or still unverified)
+ * user. Never sends synchronously and never throws for SMTP reasons — the
+ * worker delivers it. The caller has already established that this user
+ * needs verification; eligibility (unverified credentials account) is
+ * re-checked by the worker at delivery, so a stale row is discarded there.
+ * A caller supplied callbackUrl is carried in the outbox payload (Chunk
+ * 7-final) so the verification link lands where the caller asked instead
+ * of the default "/account".
+ */
 export async function sendRegistrationVerification(
   user: { id: string; email: string; name: string | null },
-  callbackUrl?: string
+  callbackUrl?: string | null
 ) {
-  await issueVerificationEmail(user, callbackUrl);
+  await enqueueVerificationEmail({ email: user.email, callbackUrl: callbackUrl ?? null });
 }
 
-export async function resendVerificationEmail(email: string, callbackUrl?: string) {
-  const user = await findUserByEmail(email);
-  if (!user || !user.passwordHash || user.emailVerified) return;
-  await issueVerificationEmail(user, callbackUrl);
+/**
+ * Enqueue a verification email for a resend request. Same shape as
+ * registration: no account lookup here, no synchronous send. The worker
+ * looks the account up at delivery and silently discards unknown,
+ * OAuth-only, and already-verified addresses — the route's response is
+ * identical either way, so resend cannot probe which emails are registered.
+ * A caller supplied callbackUrl is carried in the outbox payload.
+ */
+export async function resendVerificationEmail(email: string, callbackUrl?: string | null) {
+  await enqueueVerificationEmail({ email: email.trim().toLowerCase(), callbackUrl: callbackUrl ?? null });
 }
 
 class InvalidVerificationStateError extends Error {}

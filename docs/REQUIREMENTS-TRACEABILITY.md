@@ -15,7 +15,7 @@
 | D-05 | Promotions | **Store-managed** promotions, banners, featured products; third-party advertising deferred |
 | D-06 | Coupons | Confirmed: percent or fixed-amount codes, min-order value, expiry window, usage limit, entered at checkout |
 | D-07 | Currency / locale | **PKR (Rs), English UI** |
-| D-08 | Ratings & reviews | **Display-only** ratings (admin-editable product fields); customer review submission deferred |
+| D-08 | Ratings & reviews | **Implemented (Phase 3, D13)** — verified-purchaser reviews only (DELIVERED order required), pre-moderation, one review per user per product (editable; edits return to pending), rating 1–5 required, text optional, approved-only public list (newest first, 10/page), admin moderation queue at `/admin/reviews`. Product `rating`/`reviewCount` are calculated from approved reviews only and are never admin-settable (admin-editable fields removed, Phase 3). Spam limits: 5 submissions/hour per user + 20/hour per IP on create; 60/min per user on edit. |
 | D-09 | WhatsApp number | Placeholder, admin-configurable via Store Settings |
 | D-10 | Database for sandbox build | Fully functional build on Prisma/SQLite + reviewed **Prisma migrations under `prisma/migrations/`** for Supabase Postgres with setup guide (legacy Supabase SQL quarantined to `docs/legacy/supabase-migrations/` in PR-07) |
 | D-11 | Authentication | Working email/password (accounts created via the guarded seed with operator-chosen passwords, or self-registration — no demo accounts with known passwords) + **Google-ready** OAuth provider that activates when `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` are configured |
@@ -192,5 +192,5 @@ Payment status: COD → PENDING until DELIVERED (then PAID) or CANCELLED. Online
 2. **Supabase Auth vs NextAuth** — production auth per doc is Supabase Auth; sandbox demo uses NextAuth v4 credentials + Google-ready provider behind `lib/auth` so the interface matches (D-11).
 3. **Storage** — production: Supabase Storage. Sandbox: local `public/uploads` via admin upload API with identical service interface.
 4. **user_roles table** — implemented as `role` column on `users` (single-role model) for simplicity; Supabase SQL includes `user_roles` table form for multi-role growth.
-5. **Reviews** — display-only fields per D-08; mockup's "Reviews" admin page intentionally omitted (no FR backing).
+5. **Reviews** — implemented in Phase 3 (D13), superseding the earlier display-only D-08: customer review submission with pre-moderation and an admin Reviews queue (`/admin/reviews`, `src/app/api/admin/reviews/route.ts`, `src/services/reviews.service.ts`). The mockup's "Reviews" admin page is no longer omitted.
 6. **Taxes** — BR-06 includes tax "if required"; no tax policy confirmed → tax fields exist (default 0) but no tax UI; flagged for future confirmation.

@@ -27,6 +27,32 @@ export function createPaymentReconciliationService(database: PaymentPersistence,
         trackerToken: true, version: true } }));
     },
     /**
+     * Pre-expiry provider check (M-26): managed payments whose reservation
+     * expires within `withinMs` and whose tracker may already be paid.
+     * Unlike due(), this deliberately ignores nextReconcileAt: a payment
+     * whose fetches keep failing backs off exponentially (up to 15 minutes)
+     * — longer than the reservation itself — so it could otherwise expire
+     * unverified. The caller force-verifies these (bypassing backoff) while
+     * the reservation is still live, so a capture can still auto-settle;
+     * once the reservation has expired, settlement can only ever
+     * LATE_CAPTURE-review. Bounded by the window and the batch: a payment
+     * is force-checked at most once per sweep inside the window.
+     */
+    async dueForPreExpiryCheck(limit = 10, withinMs = 5 * 60_000) {
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid pre-expiry batch size.");
+      if (!Number.isSafeInteger(withinMs) || withinMs < 1_000 || withinMs > 3_600_000) throw new Error("Invalid pre-expiry window.");
+      const now = clock();
+      return database.$transaction(tx => tx.payment.findMany({ where: {
+        attemptNumber: { not: null }, trackerToken: { not: null }, status: "PENDING",
+        reconcileStatus: { in: ["PENDING", "UNCERTAIN"] }, order: { paymentFlowVersion: 1, paymentMethod: "ONLINE",
+          status: "PENDING", paymentStatus: "PENDING", checkoutClosedAt: null, acceptedPaymentId: null,
+          paymentReviewStatus: "CLEAR",
+          reservationExpiresAt: { gt: now, lte: new Date(now.getTime() + withinMs) } },
+      }, orderBy: [{ order: { reservationExpiresAt: "asc" } }, { id: "asc" }], take: limit,
+      select: { id: true, orderId: true, provider: true, providerEnvironment: true, merchantAccountRef: true,
+        trackerToken: true, version: true } }));
+    },
+    /**
      * Refund reconciliation sweep: submits never-submitted REQUESTED rows, parks stale
      * SUBMITTING rows for review (their provider outcome is unknowable, so they are never
      * resubmitted), and re-polls the documented reporter endpoint for PENDING rows so
@@ -35,6 +61,11 @@ export function createPaymentReconciliationService(database: PaymentPersistence,
     async reconcileDueRefunds(refunds: PaymentRefundService, provider: Pick<SafepayProvider, "fetchTracker">,
       input: { environment: "sandbox" | "production"; merchantAccountRef: string }, limit = 25) {
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid refund batch size.");
+      // M-27: refunds parked for the 24-hour reversal window become
+      // submittable once the capture is old enough — release them first so
+      // this sweep's due list includes them; the normal submit path below
+      // then submits each exactly once through the documented endpoint.
+      const released = await refunds.releaseDueWindowRefunds(limit);
       const due = await refunds.dueForReconciliation(limit);
       const outcomes: Array<{ refundId: string; disposition: string; outcome?: string; code?: string }> = [];
       for (const row of due) {
@@ -65,7 +96,7 @@ export function createPaymentReconciliationService(database: PaymentPersistence,
         outcomes.push({ refundId: row.id, disposition: noted,
           outcome: observed.kind, ...("code" in observed ? { code: observed.code } : {}) });
       }
-      return { considered: due.length, outcomes };
+      return { considered: due.length, released: released.filter(r => r.released).length, outcomes };
     },
   };
 }

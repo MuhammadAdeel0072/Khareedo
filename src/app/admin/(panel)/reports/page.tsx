@@ -30,7 +30,10 @@ export default async function AdminReportsPage() {
     getLowStockProducts(8),
   ]);
 
-  const avgOrder = summary.totalOrders > 0 ? Math.round(summary.totalRevenue / summary.totalOrders) : 0;
+  // Average order value is the average *paid* order in the same 30-day
+  // window as the revenue total (D18): paid revenue divided by every order
+  // including unpaid and cancelled ones would understate it.
+  const avgOrder = summary.paidOrders > 0 ? Math.round(summary.totalRevenue / summary.paidOrders) : 0;
 
   return (
     <div className="p-4 sm:p-6">
@@ -44,8 +47,9 @@ export default async function AdminReportsPage() {
         <ExportButtons type="reports" />
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-3">
-        <MiniStat label="Revenue (30 days)" value={formatPKR(summary.totalRevenue)} />
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <MiniStat label="Revenue (30 days, paid)" value={formatPKR(summary.totalRevenue)} />
+        <MiniStat label="Pending (30 days, unpaid)" value={formatPKR(summary.pendingRevenue)} />
         <MiniStat label="Orders (all time)" value={summary.totalOrders.toLocaleString()} />
         <MiniStat label="Average Order Value" value={formatPKR(avgOrder)} />
       </div>
@@ -54,7 +58,7 @@ export default async function AdminReportsPage() {
         <Card className="xl:col-span-2">
           <CardHeader>
             <CardTitle className="text-base">Revenue Trend</CardTitle>
-            <CardDescription>Daily revenue, last 30 days</CardDescription>
+            <CardDescription>Paid revenue, last 30 days</CardDescription>
           </CardHeader>
           <CardContent>
             <RevenueChart data={summary.revenueByDay} />

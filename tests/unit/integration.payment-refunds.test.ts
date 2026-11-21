@@ -26,6 +26,7 @@ import { createPaymentSettlementService, type PaymentPersistence } from "@/servi
 import { createPaymentWebhookService } from "@/services/payment-webhook.service";
 import { createPaymentReconciliationService } from "@/services/payment-reconciliation.service";
 import { createPaymentRefundService, type RefundSubmissionOutcome } from "@/services/payment-refund.service";
+import { adminUpdateOrderStatus } from "@/services/orders.service";
 import { createPaymentPayloadVault } from "@/lib/payments/payload-vault";
 import { trackerIdentity, type PaymentObservation, type VerificationInput } from "@/lib/payments/evidence-contract";
 import type { SafepayProvider } from "@/lib/safepay/provider";
@@ -171,6 +172,10 @@ function failingDatabase(model: string, operation: string, failAt = 1): PaymentP
 beforeEach(() => { time = new Date(baseTime); simulated.enabled = true; submittedViaProvider.length = 0; });
 afterAll(async () => {
   const orders = (await db.order.findMany({ where: { items: { some: { productId: { in: productIds } } } }, select: { id: true } })).map(o => o.id);
+  // Chunk 7-final: settlement/refunds now enqueue customer emails in the
+  // outbox. Remove this file's rows so later suites' small outbox sweeps
+  // are not starved by leftovers.
+  await db.emailOutbox.deleteMany({ where: { email: "synthetic@example.invalid" } });
   await db.paymentEvidence.deleteMany({ where: { payment: { orderId: { in: orders } } } });
   await db.paymentRefund.deleteMany({ where: { paymentId: { in: paymentIds } } });
   await db.paymentWebhookEvent.deleteMany({ where: { OR: [{ id: { in: eventIds } }, { payment: { orderId: { in: orders } } }] } });
@@ -197,7 +202,10 @@ describe("Refund accounting from verified webhook evidence", () => {
 
     const result = await processObservation(refundObservation(f, f.capturedMinor.toString(),
       { providerState: "TRACKER_REFUNDED" }));
-    expect(result).toEqual({ kind: "settled" });
+    // Chunk 7-final: the settled result names the refund it finalized, so
+    // the caller can notify the customer with the exact amount.
+    expect(result).toEqual({ kind: "settled",
+      refund: { refundIds: [created.refundId], amountMinor: f.capturedMinor.toString() } });
     row = (await rows(f.paymentId))[0];
     expect(row).toMatchObject({ status: "SUCCEEDED", reconcileStatus: "VERIFIED",
       providerState: "TRACKER_REFUNDED" });
@@ -209,7 +217,7 @@ describe("Refund accounting from verified webhook evidence", () => {
     expect(evidence).toMatchObject({ decision: "REFUND_SETTLED", observedRefundedMinor: f.capturedMinor,
       observedProviderState: "TRACKER_REFUNDED" });
     // Inventory is deliberately untouched by refunds.
-    expect((await db.inventory.findUniqueOrThrow({ where: { productId: f.product.id } })).quantity).toBe(3);
+    expect((await db.inventory.findFirstOrThrow({ where: { productId: f.product.id, variantId: null } })).quantity).toBe(3);
   });
 
   it("keeps a partial refund distinguishable: payment stays PAID with advanced refundedAmountMinor", async () => {
@@ -219,7 +227,8 @@ describe("Refund accounting from verified webhook evidence", () => {
     if (created.kind !== "created") throw new Error("expected created");
     refundIds.push(created.refundId);
     expect((await rows(f.paymentId))[0]).toMatchObject({ type: "PARTIAL", amountMinor: BigInt(50000) });
-    expect(await processObservation(refundObservation(f, "50000"))).toEqual({ kind: "settled" });
+    expect(await processObservation(refundObservation(f, "50000"))).toEqual({ kind: "settled",
+      refund: { refundIds: [created.refundId], amountMinor: "50000" } });
     const order = await state(f.orderId);
     expect(order).toMatchObject({ status: "CONFIRMED", paymentStatus: "PAID" });
     expect(order.payments[0]).toMatchObject({ status: "PAID", refundedAmountMinor: BigInt(50000) });
@@ -233,10 +242,12 @@ describe("Refund accounting from verified webhook evidence", () => {
     const second = await refunds.requestRefund({ paymentId: f.paymentId, amountMinor: secondAmount, requestedByUserId: "admin-1" });
     if (first.kind !== "created" || second.kind !== "created") throw new Error("expected both created");
     refundIds.push(first.refundId, second.refundId);
-    expect(await processObservation(refundObservation(f, firstAmount.toString()))).toEqual({ kind: "settled" });
+    expect(await processObservation(refundObservation(f, firstAmount.toString()))).toEqual({ kind: "settled",
+      refund: { refundIds: [first.refundId], amountMinor: firstAmount.toString() } });
     let order = await state(f.orderId);
     expect(order.payments[0]).toMatchObject({ status: "PAID", refundedAmountMinor: firstAmount });
-    expect(await processObservation(refundObservation(f, secondAmount.toString()))).toEqual({ kind: "settled" });
+    expect(await processObservation(refundObservation(f, secondAmount.toString()))).toEqual({ kind: "settled",
+      refund: { refundIds: [second.refundId], amountMinor: secondAmount.toString() } });
     order = await state(f.orderId);
     expect(order).toMatchObject({ paymentStatus: "REFUNDED" });
     expect(order.payments[0]).toMatchObject({ status: "REFUNDED", refundedAmountMinor: f.capturedMinor });
@@ -285,7 +296,8 @@ describe("Refund accounting from verified webhook evidence", () => {
     refundIds.push(created.refundId);
     const observation = refundObservation(f, f.capturedMinor.toString(), { providerState: "TRACKER_REFUNDED" });
     const received = await receive(observation);
-    expect(await inbox.process(received.eventId)).toEqual({ kind: "settled" });
+    expect(await inbox.process(received.eventId)).toEqual({ kind: "settled",
+      refund: { refundIds: [created.refundId], amountMinor: f.capturedMinor.toString() } });
     expect(await inbox.process(received.eventId)).toEqual({ kind: "duplicate" });
     expect(await inbox.receive(received.input).then(r => r.kind)).toBe("duplicate");
     expect(await state(f.orderId).then(o => o.payments[0].refundedAmountMinor)).toBe(f.capturedMinor);
@@ -359,7 +371,8 @@ describe("Reporter-driven refund reconciliation", () => {
     const b = await refunds.requestRefund({ paymentId: f.paymentId, amountMinor: f.capturedMinor - (f.capturedMinor / BigInt(2)), requestedByUserId: "admin-1" });
     if (a.kind !== "created" || b.kind !== "created") throw new Error("expected both created");
     refundIds.push(a.refundId, b.refundId);
-    expect(await processObservation(reporterObservation(f, "TRACKER_REFUNDED"), "RECONCILIATION")).toEqual({ kind: "settled" });
+    expect(await processObservation(reporterObservation(f, "TRACKER_REFUNDED"), "RECONCILIATION")).toEqual({ kind: "settled",
+      refund: { refundIds: [a.refundId, b.refundId], amountMinor: f.capturedMinor.toString() } });
     const all = await rows(f.paymentId);
     expect(all.every(r => r.status === "SUCCEEDED")).toBe(true);
     const order = await state(f.orderId);
@@ -369,9 +382,13 @@ describe("Reporter-driven refund reconciliation", () => {
 
   it("records an external dashboard full refund from reporter evidence when no local rows exist", async () => {
     const f = await fixture();
-    expect(await processObservation(reporterObservation(f, "TRACKER_REFUNDED"), "RECONCILIATION")).toEqual({ kind: "settled" });
+    const result = await processObservation(reporterObservation(f, "TRACKER_REFUNDED"), "RECONCILIATION");
     const all = await rows(f.paymentId);
     expect(all).toHaveLength(1);
+    // Chunk 7-final: the settled result names the refund row settlement
+    // created, so the caller can notify the customer.
+    expect(result).toEqual({ kind: "settled",
+      refund: { refundIds: [all[0].id], amountMinor: f.capturedMinor.toString() } });
     expect(all[0]).toMatchObject({ status: "SUCCEEDED", initiatedBy: "PROVIDER", type: "FULL",
       amountMinor: f.capturedMinor });
     const order = await state(f.orderId);
@@ -381,7 +398,11 @@ describe("Reporter-driven refund reconciliation", () => {
 
   it("treats a repeated external full-refund observation as already settled, never double-counting", async () => {
     const f = await fixture();
-    expect(await processObservation(reporterObservation(f, "TRACKER_REFUNDED"), "RECONCILIATION")).toEqual({ kind: "settled" });
+    const result = await processObservation(reporterObservation(f, "TRACKER_REFUNDED"), "RECONCILIATION");
+    const all = await rows(f.paymentId);
+    expect(all).toHaveLength(1);
+    expect(result).toEqual({ kind: "settled",
+      refund: { refundIds: [all[0].id], amountMinor: f.capturedMinor.toString() } });
     // A distinct observation id (fresh event) asserting the same already-accounted refund.
     expect(await processObservation(refundObservation(f, "50000"), "WEBHOOK")).toEqual({ kind: "review_required" });
     const order = await state(f.orderId);
@@ -405,9 +426,13 @@ describe("Reporter-driven refund reconciliation", () => {
 
   it("handles a refund webhook for an external dashboard refund (no open rows) with a stable operation key", async () => {
     const f = await fixture();
-    expect(await processObservation(refundObservation(f, "40000"))).toEqual({ kind: "settled" });
+    const result = await processObservation(refundObservation(f, "40000"));
     const all = await rows(f.paymentId);
     expect(all).toHaveLength(1);
+    // Chunk 7-final: the settled result names the refund row settlement
+    // created, so the caller can notify the customer.
+    expect(result).toEqual({ kind: "settled",
+      refund: { refundIds: [all[0].id], amountMinor: "40000" } });
     expect(all[0]).toMatchObject({ status: "SUCCEEDED", initiatedBy: "PROVIDER", type: "PARTIAL", amountMinor: BigInt(40000) });
     const order = await state(f.orderId);
     expect(order.payments[0]).toMatchObject({ status: "PAID", refundedAmountMinor: BigInt(40000) });
@@ -416,7 +441,13 @@ describe("Reporter-driven refund reconciliation", () => {
   it("does not double-count a redelivered external refund event asserting the same refunded_at and amount", async () => {
     const f = await fixture();
     const occurredAt = time.toISOString();
-    expect(await processObservation(refundObservation(f, "40000", { occurredAt, providerState: null }))).toEqual({ kind: "settled" });
+    const result = await processObservation(refundObservation(f, "40000", { occurredAt, providerState: null }));
+    const all = await rows(f.paymentId);
+    expect(all).toHaveLength(1);
+    // Chunk 7-final: the settled result names the refund row settlement
+    // created, so the caller can notify the customer.
+    expect(result).toEqual({ kind: "settled",
+      refund: { refundIds: [all[0].id], amountMinor: "40000" } });
     // Same provider refund timestamp + amount under a different observation id: the stable
     // external operation key makes the second event an inert already-settled record.
     const replay = { ...refundObservation(f, "40000", { occurredAt, providerState: null }), observationId: randomUUID() };
@@ -437,7 +468,8 @@ describe("Reporter-driven refund reconciliation", () => {
     const fullRefund = () => refundObservation(f, f.capturedMinor.toString(), {
       occurredAt, providerState: "TRACKER_REFUNDED",
     });
-    expect(await processObservation(fullRefund())).toEqual({ kind: "settled" });
+    expect(await processObservation(fullRefund())).toEqual({ kind: "settled",
+      refund: { refundIds: [created.refundId], amountMinor: f.capturedMinor.toString() } });
     const replay = { ...fullRefund(), observationId: randomUUID() };
     expect(await processObservation(replay)).toEqual({ kind: "recorded" });
     expect(await db.paymentRefund.count({ where: { paymentId: f.paymentId } })).toBe(1);
@@ -460,6 +492,54 @@ describe("Refund business rules", () => {
     const later = await guarded.requestRefund({ paymentId: f.paymentId, requestedByUserId: "admin-1" });
     expect(later.kind).toBe("created");
     if (later.kind === "created") refundIds.push(later.refundId);
+    expect(submittedViaProvider).toHaveLength(1);
+  });
+
+  it("returns the existing parked row for a repeated in-window request instead of queueing a duplicate (M-27)", async () => {
+    const f = await fixture();
+    const guarded = createPaymentRefundService(database, providerStub(), { ...refundOptions, reversalWindowMs: 86_400_000 });
+    const first = await guarded.requestRefund({ paymentId: f.paymentId, requestedByUserId: "admin-1" });
+    expect(first).toMatchObject({ kind: "review_required", reason: "REFUND_WINDOW_REVERSAL_24H" });
+    if (first.kind !== "review_required") return;
+    refundIds.push(first.refundId);
+    const second = await guarded.requestRefund({ paymentId: f.paymentId, requestedByUserId: "admin-1" });
+    expect(second).toEqual({ kind: "existing", refundId: first.refundId, status: "REVIEW_REQUIRED" });
+    expect(await rows(f.paymentId)).toHaveLength(1);
+    expect(submittedViaProvider).toHaveLength(0);
+  });
+
+  it("releases a parked in-window refund after the window and submits it exactly once (M-27)", async () => {
+    // Isolate from earlier tests' rows in the shared database: the late
+    // sweep would otherwise release every 24-hour-parked row and poll
+    // every due PENDING row, not just this test's.
+    await db.paymentRefund.updateMany({ where: { status: "REVIEW_REQUIRED", reviewReason: "REFUND_WINDOW_REVERSAL_24H" },
+      data: { reviewReason: "TEST_ISOLATION" } });
+    await quarantinePriorOpenRefunds();
+    const f = await fixture();
+    const guarded = createPaymentRefundService(database, providerStub(), { ...refundOptions, reversalWindowMs: 86_400_000 });
+    const parked = await guarded.requestRefund({ paymentId: f.paymentId, requestedByUserId: "admin-1" });
+    expect(parked).toMatchObject({ kind: "review_required", reason: "REFUND_WINDOW_REVERSAL_24H" });
+    if (parked.kind !== "review_required") return;
+    refundIds.push(parked.refundId);
+    const sweepInput = { environment: "sandbox" as const, merchantAccountRef: "synthetic-account" };
+    // A failed reporter fetch just notes the attempt; it never resubmits.
+    const pollProvider = { fetchTracker: vi.fn(async () => ({ kind: "failed" as const, code: "TIMEOUT" as const })) };
+    // Inside the window the sweep releases nothing and submits nothing.
+    const early = await reconciliation.reconcileDueRefunds(guarded, pollProvider, sweepInput);
+    expect(early.released).toBe(0);
+    expect(submittedViaProvider).toHaveLength(0);
+    expect((await rows(f.paymentId))[0]).toMatchObject({ status: "REVIEW_REQUIRED" });
+    // After the window the sweep releases the row and submits it exactly once.
+    time = new Date(baseTime.getTime() + 86_400_001);
+    const late = await reconciliation.reconcileDueRefunds(guarded, pollProvider, sweepInput);
+    expect(late.released).toBe(1);
+    expect(late.outcomes).toContainEqual(expect.objectContaining(
+      { refundId: parked.refundId, disposition: "submitted", outcome: "submitted" }));
+    expect(submittedViaProvider).toHaveLength(1);
+    expect((await rows(f.paymentId))[0]).toMatchObject({ status: "PENDING" });
+    // A second sweep submits nothing more: the row is PENDING, awaiting evidence.
+    const again = await reconciliation.reconcileDueRefunds(guarded, pollProvider, sweepInput);
+    expect(again.released).toBe(0);
     expect(submittedViaProvider).toHaveLength(1);
   });
 
@@ -659,5 +739,62 @@ describe("Refund submission outcomes", () => {
     }
     expect(submittedViaProvider).toHaveLength(1);
     expect((await rows(f.paymentId))[0].status).toBe("REVIEW_REQUIRED");
+  });
+});
+
+describe("Paid-order cancellation leaves the refund to the manual flow (Phase 3, chunk 2-final — H-12, D6)", () => {
+  it("cancelling a settled order submits no refund and keeps the captured balance refundable", async () => {
+    const f = await fixture();
+    // Webhook settlement already leaves the order CONFIRMED/PAID.
+    expect((await state(f.orderId))).toMatchObject({ status: "CONFIRMED", paymentStatus: "PAID" });
+    expect(
+      await adminUpdateOrderStatus(f.orderId, "CANCELLED", undefined, { cancelledBy: "admin:test-admin" })
+    ).toEqual({ ok: true, couponRestored: false });
+
+    // The cancel made no provider call and created no refund rows: D6 is
+    // pending (no confirmed reversal API), so the refund stays manual.
+    expect(submittedViaProvider).toHaveLength(0);
+    expect(await db.paymentRefund.count({ where: { paymentId: f.paymentId } })).toBe(0);
+    const order = await state(f.orderId);
+    expect(order).toMatchObject({ status: "CANCELLED", paymentStatus: "CANCELLED" });
+    const payment = order.payments.find((p) => p.id === f.paymentId)!;
+    expect(payment.status).toBe("PAID");
+    expect(payment.refundedAmountMinor).toBeNull(); // no refund recorded
+
+    // The manual refund flow still sees the captured balance afterwards.
+    const created = await refunds.requestRefund({ paymentId: f.paymentId, requestedByUserId: "admin-1" });
+    expect(created.kind).toBe("created");
+    expect(await rows(f.paymentId)).toHaveLength(1);
+  });
+
+  it("settles a manual refund requested after a paid-order cancellation (refund-after-cancel)", async () => {
+    const f = await fixture();
+    expect(
+      await adminUpdateOrderStatus(f.orderId, "CANCELLED", undefined, { cancelledBy: "admin:test-admin" })
+    ).toEqual({ ok: true, couponRestored: false });
+    expect((await state(f.orderId))).toMatchObject({ status: "CANCELLED", paymentStatus: "CANCELLED" });
+
+    // The refund service accepts the request for a paid-cancelled order
+    // (guardRefundable: order paymentStatus CANCELLED + payment PAID), and
+    // the stub provider accepts the submission, so the row is PENDING.
+    const created = await refunds.requestRefund({ paymentId: f.paymentId, requestedByUserId: "admin-1" });
+    expect(created.kind).toBe("created");
+    const requested = (await rows(f.paymentId))[0];
+    expect(requested.status).toBe("PENDING");
+
+    // The provider then confirms the full refund via webhook. Settlement
+    // must accept verified refund evidence for this payment: the money was
+    // captured, the order was cancelled, and the refund is the only way the
+    // money moves back — it must not be parked as REFUND_FOR_UNSETTLED_PAYMENT.
+    const result = await processObservation(
+      refundObservation(f, f.capturedMinor.toString(), { providerState: "TRACKER_REFUNDED" })
+    );
+    expect(result).toEqual({ kind: "settled",
+      refund: { refundIds: [requested.id], amountMinor: f.capturedMinor.toString() } });
+    expect((await rows(f.paymentId))[0].status).toBe("SUCCEEDED");
+    const payment = await db.payment.findUniqueOrThrow({ where: { id: f.paymentId } });
+    expect(payment.status).toBe("REFUNDED");
+    expect(payment.refundedAmountMinor).toBe(f.capturedMinor);
+    expect(await state(f.orderId)).toMatchObject({ status: "CANCELLED", paymentStatus: "REFUNDED" });
   });
 });

@@ -95,6 +95,19 @@ function requireMfaKey(): Buffer {
   return key;
 }
 
+/**
+ * Cheap config check for route handlers: is MFA usable at all (a valid
+ * 32-byte base64 key configured)? Routes call this BEFORE consuming a
+ * rate-limit slot, so a missing or invalid key returns 503 without
+ * burning the attempt budget — a configuration failure must never
+ * consume attempts and must never mask itself as a 429.
+ */
+export function isAdminMfaConfigured(
+  env: Readonly<Record<string, string | undefined>> = process.env
+): boolean {
+  return loadAdminMfaEncryptionKey(env) !== null;
+}
+
 /** Encrypt a TOTP secret. Layout: IV (12 bytes) || auth tag (16 bytes) || ciphertext. */
 export function encryptTotpSecret(secret: string, key: Buffer): Uint8Array<ArrayBuffer> {
   const iv = randomBytes(12);

@@ -12,11 +12,11 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { withPerformanceTiming } from "@/lib/performance-timing";
 import { ProductImage } from "@/components/products/product-image";
+import { OrderCancelButton } from "@/components/account/order-cancel-button";
+import { TRACK_STEPS, trackerStepIndex } from "@/lib/order-tracking";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Order Details" };
-
-const TRACK_STEPS = ["CONFIRMED", "PROCESSING", "SHIPPED", "DELIVERED"] as const;
 
 export default async function OrderDetailPage({
   params,
@@ -28,12 +28,16 @@ export default async function OrderDetailPage({
   if (!user) redirect("/login?callbackUrl=/account/orders");
   const { id } = await params;
 
-  const order = await getOrderById(id);
-  // NFR-11 — customers may only view their own orders
+  const order = await getOrderById(id, user.id);
+  // NFR-11 — customers may only view their own orders. getOrderById already
+  // scopes by user, so a foreign id returns null; the check stays as
+  // defense-in-depth for the page itself.
   if (!order || order.userId !== user.id) notFound();
 
   const cancelled = order.status === "CANCELLED";
-  const currentStep = TRACK_STEPS.indexOf(order.status as (typeof TRACK_STEPS)[number]);
+  const cancellable =
+    order.status === "PENDING" || order.status === "CONFIRMED" || order.status === "PROCESSING";
+  const currentStep = trackerStepIndex(order.status);
 
   return (
     <div className="max-w-3xl">
@@ -42,16 +46,20 @@ export default async function OrderDetailPage({
           <h1 className="font-mono text-xl font-extrabold tracking-tight sm:text-2xl">{order.reference}</h1>
           <p className="mt-1 text-sm text-muted-foreground">Placed {formatDateTime(order.createdAt)}</p>
         </div>
-        <Badge variant="outline" className={STATUS_BADGE_CLASSES[order.status] ?? ""}>
-          {order.status}
-        </Badge>
+        <div className="flex items-center gap-2">
+          <Badge variant="outline" className={STATUS_BADGE_CLASSES[order.status] ?? ""}>
+            {order.status}
+          </Badge>
+          {cancellable && <OrderCancelButton orderId={order.id} />}
+        </div>
       </div>
 
       {/* Status tracker */}
       {cancelled ? (
         <div className="mb-4 rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
-          This order was cancelled. Any authorised refunds follow our store policy — contact us if
-          you have questions.
+          This order was cancelled{order.cancelledAt ? ` on ${formatDateTime(order.cancelledAt)}` : ""}. Any
+          authorised refunds follow our store policy — contact us if you have questions.
+          {order.cancelReason ? <p className="mt-1">Reason: {order.cancelReason}</p> : null}
         </div>
       ) : (
         <div className="mb-4 rounded-xl border p-5">
@@ -83,6 +91,32 @@ export default async function OrderDetailPage({
               <Truck className="h-3.5 w-3.5" /> Your order is on the way!
             </p>
           )}
+          {(order.carrier || order.trackingNumber) && (
+            <p className="mt-2 text-center text-xs text-muted-foreground">
+              {order.carrier ? `Shipped via ${order.carrier}` : "Shipped"}
+              {order.trackingNumber ? ` · Tracking: ${order.trackingNumber}` : ""}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Status history (M-6) — dated timeline of every transition, oldest
+          first. The actor is internal and never rendered here. Orders placed
+          before this landed show no entries until their next status update. */}
+      {order.statusHistory.length > 0 && (
+        <div className="mb-4 rounded-xl border p-5">
+          <h2 className="mb-4 text-sm font-bold">Status history</h2>
+          <ol className="space-y-3">
+            {order.statusHistory.map((h) => (
+              <li key={h.id} className="flex flex-wrap items-baseline justify-between gap-2 border-b pb-3 last:border-b-0 last:pb-0">
+                <p className="text-sm font-medium">
+                  {h.status}
+                  {h.note ? <span className="ml-2 font-normal text-muted-foreground">{h.note}</span> : null}
+                </p>
+                <p className="text-xs text-muted-foreground">{formatDateTime(h.createdAt)}</p>
+              </li>
+            ))}
+          </ol>
         </div>
       )}
 
@@ -112,6 +146,9 @@ export default async function OrderDetailPage({
                     </span>
                   )}
                 </p>
+                {item.variantLabel ? (
+                  <p className="truncate text-xs text-muted-foreground">{item.variantLabel}</p>
+                ) : null}
                 <p className="text-xs text-muted-foreground">
                   {item.quantity} × {formatPKR(item.unitPrice)}
                 </p>
@@ -152,6 +189,35 @@ export default async function OrderDetailPage({
             Payment: {order.paymentMethod === "COD" ? "Cash on Delivery" : order.paymentMethod} · {order.paymentStatus}
           </p>
         </div>
+      </div>
+
+      {/* Payment history — the order's payment rows, newest first. The
+          service already fetched them; the page just never rendered them. */}
+      <div className="mt-4 rounded-xl border p-5">
+        <h2 className="mb-4 text-sm font-bold">Payment history ({order.payments.length})</h2>
+        {order.payments.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No payments recorded for this order.</p>
+        ) : (
+          <ul className="space-y-3">
+            {order.payments.map((p) => (
+              <li key={p.id} className="flex flex-wrap items-center justify-between gap-2 border-b pb-3 last:border-b-0 last:pb-0">
+                <div>
+                  <p className="text-sm font-medium">
+                    {p.provider === "COD" ? "Cash on Delivery" : p.provider}
+                    {p.reference ? <span className="ml-2 font-mono text-xs text-muted-foreground">{p.reference}</span> : null}
+                  </p>
+                  <p className="text-xs text-muted-foreground">{formatDateTime(p.createdAt)}</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Badge variant="outline" className={STATUS_BADGE_CLASSES[p.status] ?? ""}>
+                    {p.status}
+                  </Badge>
+                  <span className="text-sm font-bold">{formatPKR(p.amount)}</span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
 
       {/* Address */}

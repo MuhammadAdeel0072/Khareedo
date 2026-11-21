@@ -36,8 +36,13 @@ vi.mock("@/lib/rate-limit", () => ({
   rateLimit: mocks.rateLimit,
 }));
 
-vi.mock("@/lib/api", () => ({
-  parseBody: async (
+vi.mock("@/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api")>();
+  return {
+    ...actual,
+    // Real handleRoute is kept: the maintenance route is wrapped in it
+    // (Stage 3, L-2), and the tests below exercise its auth-error mapping.
+    parseBody: async (
     request: Request,
     schema: {
       safeParse: (value: unknown) => {
@@ -69,7 +74,8 @@ vi.mock("@/lib/api", () => ({
 
   jsonOk: (data: unknown) =>
     Response.json({ ok: true, data }),
-}));
+  };
+});
 
 vi.mock("@/services/payment-maintenance.service", () => ({
   MAINTENANCE_ACTIONS: [

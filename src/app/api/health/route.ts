@@ -8,11 +8,14 @@
 // - Database: a bounded `SELECT 1` against the application database
 //   (Supabase Postgres via Prisma) with a 5s timeout. A failure means the
 //   app cannot serve traffic that needs data.
-// - Worker: the in-process payment maintenance worker heartbeat
-//   (src/services/worker-heartbeat.ts). A stale/failing/not-started worker
-//   degrades the result but does not take the app down: the storefront still
-//   serves traffic, but reservation expiry and payment reconciliation are
-//   not running.
+// - Workers: the in-process payment maintenance worker heartbeat and the
+//   email outbox worker heartbeat (src/services/worker-heartbeat.ts).
+//   A stale/failing/not-started worker degrades the result but does not
+//   take the app down: the storefront still serves traffic, but
+//   reservation expiry and payment reconciliation (payment worker) or
+//   email delivery (outbox worker) are not running. Either worker being
+//   unhealthy degrades the result — one healthy worker never masks the
+//   other.
 //
 // Safety: the response contains only coarse statuses, ISO timestamps and
 // counts. It never includes error messages, stack traces, connection
@@ -20,13 +23,14 @@
 // Responses are never cached.
 //
 // Statuses:
-// - ok: database reachable and worker heartbeat fresh.
-// - degraded: database reachable but the worker is stale, failing, stopped
-//   or never started (HTTP 200 — the app itself is up).
+// - ok: database reachable and BOTH worker heartbeats fresh.
+// - degraded: database reachable but either worker is stale, failing,
+//   stopped or never started (HTTP 200 — the app itself is up).
 // - down: database unreachable (HTTP 503).
 import { db } from "@/lib/db";
 import { rateLimit } from "@/lib/rate-limit";
 import {
+  getOutboxWorkerHeartbeat,
   getWorkerHeartbeat,
   type WorkerHeartbeatSnapshot,
   type WorkerHeartbeatStatus,
@@ -49,28 +53,35 @@ export type HealthPayload = {
   timestamp: string;
   checks: {
     database: HealthCheck;
+    /** Payment maintenance worker heartbeat (unchanged shape since D15). */
     worker: WorkerHeartbeatSnapshot;
+    /** Email outbox worker heartbeat (Stream F) — same snapshot shape. */
+    outbox: WorkerHeartbeatSnapshot;
   };
 };
 
 export function evaluateHealthStatus(
   databaseOk: boolean,
   workerStatus: WorkerHeartbeatStatus,
+  outboxStatus: WorkerHeartbeatStatus = "healthy",
 ): HealthStatus {
   if (!databaseOk) return "down";
-  return workerStatus === "healthy" ? "ok" : "degraded";
+  return workerStatus === "healthy" && outboxStatus === "healthy"
+    ? "ok"
+    : "degraded";
 }
 
 /** Pure payload builder — exported so the status mapping is unit-testable. */
 export function buildHealthPayload(
   database: HealthCheck,
   worker: WorkerHeartbeatSnapshot,
+  outbox: WorkerHeartbeatSnapshot,
   nowMs: number = Date.now(),
 ): HealthPayload {
   return {
-    status: evaluateHealthStatus(database.status === "ok", worker.status),
+    status: evaluateHealthStatus(database.status === "ok", worker.status, outbox.status),
     timestamp: new Date(nowMs).toISOString(),
-    checks: { database, worker },
+    checks: { database, worker, outbox },
   };
 }
 
@@ -126,11 +137,12 @@ export async function GET() {
       { status: 429, headers: { "Retry-After": String(limit.retryAfterSec), "Cache-Control": "no-store" } },
     );
   }
-  const [database, worker] = await Promise.all([
+  const [database, worker, outbox] = await Promise.all([
     checkDatabase(),
     Promise.resolve(getWorkerHeartbeat()),
+    Promise.resolve(getOutboxWorkerHeartbeat()),
   ]);
-  const payload = buildHealthPayload(database, worker);
+  const payload = buildHealthPayload(database, worker, outbox);
   return Response.json(payload, {
     status: payload.status === "down" ? 503 : 200,
     headers: { "Cache-Control": "no-store" },

@@ -88,6 +88,9 @@ pnpm-lock.yaml
 
 # Temporary inspection results
 /tool-results/
+
+# Playwright test artifacts — never commit (local runs only)
+/test-results/
 # Khareedo local development and security files
 /.next-db-latency/
 *.db

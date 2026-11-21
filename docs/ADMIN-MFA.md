@@ -213,24 +213,84 @@ multiple instances; see the limitations below):
 - Verify: 5/15min per admin, 10/15min per IP.
 - Recovery-code regeneration: 3/15min per admin, 5/15min per IP.
 - Disable: 3/15min per admin, 5/15min per IP.
+- Replace: 5/15min per admin, 10/15min per IP.
 
-## Configuration
+Limits are fixed 15-minute windows: once a window expires the budget is
+restored in full — there is no permanent lockout, and a 429 always
+carries a `retryAfterSec` (≤ 900). A missing or invalid encryption key
+never consumes the budget: setup, verify, activate, replace and disable
+check `isAdminMfaConfigured()` before touching the limiter, so a
+configuration failure returns 503 every time instead of burning attempts
+and surfacing as a misleading 429 (Phase 3 fix; see
+`tests/unit/admin-mfa-routes.test.ts`).
 
-Add to the environment (see `.env.example`):
+## Configuration — operator runbook
 
-```
-ADMIN_MFA_ENCRYPTION_KEY="<32 random bytes, base64>"
-```
+`ADMIN_MFA_ENCRYPTION_KEY` is required before the first admin enrolls.
+Without it, admin MFA setup and verification return 503 and admins
+cannot reach the admin panel (MFA is required). The key is **not** in
+the repository and is different per environment — never copy one
+environment's key to another, and never commit it.
 
-Generate it with:
+### 1. Generate a key (one per environment)
 
-```
+On Windows (PowerShell) or Linux/macOS:
+
+```powershell
 openssl rand -base64 32
 ```
 
-Without this key, admin MFA setup and verification return 503 and admins
-cannot reach the admin panel (MFA is required). Set it before the first
-admin enrolls.
+The output is 44 characters of base64 (ending in `=`). Verify it
+decodes to exactly 32 bytes before using it:
+
+```powershell
+# PowerShell — must print 32
+[Convert]::FromBase64String("<paste the key here>").Length
+```
+
+```bash
+# Linux/macOS — must print 32
+printf '%s' '<paste the key here>' | base64 -d | wc -c
+```
+
+A key that does not decode to exactly 32 bytes is treated as missing:
+the server returns 503 for all MFA operations.
+
+### 2. Set it on Windows (local development, `D:\Khareedo`)
+
+Add one line to `D:\Khareedo\.env` (the file is gitignored — never
+commit it, never paste the key into chat):
+
+```
+ADMIN_MFA_ENCRYPTION_KEY=<paste the generated key here>
+```
+
+Restart the dev server (`npm run dev`) so the new value is picked up.
+
+### 3. Set it on production (Hostinger VPS)
+
+Set the same variable in the production environment — the `.env` file
+the systemd service (`deploy/khareedo.service`) loads, or the host's
+environment for the app process — then restart the app service
+(`systemctl restart khareedo`). Confirm the service is healthy with
+`GET /api/health` and by signing in as an admin: the MFA setup page
+must load instead of a 503. The production key must be generated
+fresh (step 1); do **not** reuse the Windows dev key or any sandbox key.
+
+### 4. Rotating the key — warning
+
+> **Rotating `ADMIN_MFA_ENCRYPTION_KEY` makes every existing MFA secret
+> undecryptable. There is no recovery except re-enrollment.**
+
+After a rotation, every enrolled admin's stored TOTP secret fails to
+decrypt, so verification and disablement both fail for them. The only
+way back is the break-glass procedure below (operator deletes the
+`AdminMfa` row from the database) followed by fresh enrollment. Plan a
+rotation like a maintenance event: warn all admins first, rotate, then
+walk each admin through break-glass + re-enrollment. Do not rotate the
+key casually, and never rotate it to "fix" a forgotten key — if the
+current key is lost, the enrolled secrets are already unrecoverable and
+the same break-glass + re-enrollment path applies.
 
 ## Break-glass: an admin loses both authenticator and recovery codes
 
@@ -279,8 +339,8 @@ record break-glass resets in the operator's own log.)
 - `tests/unit/admin-mfa-totp.test.ts` (8): RFC 6238 test vectors,
   6-digit codes, base32 round-trip, secret generation, the ±1-step window,
   expired codes, invalid codes/secrets.
-- `tests/unit/admin-mfa-service.test.ts` (27): key loading/validation,
-  secret encryption + tamper detection, recovery-code format/hashing,
+- `tests/unit/admin-mfa-service.test.ts` (28): key loading/validation,
+  `isAdminMfaConfigured()`, secret encryption + tamper detection, recovery-code format/hashing,
   status, enrollment (encrypted storage, QR + key), enrollment failing
   closed without the key, activation (valid/invalid/replayed first code,
   rollback on recovery-code failure, session binding), session
@@ -288,13 +348,21 @@ record break-glass resets in the operator's own log.)
   unknown code, not-enrolled, fails closed without a sid, records the
   session id), regeneration (old codes invalidated),
   disablement (correct/wrong password, wrong code).
-- `tests/unit/admin-mfa-guard.test.ts` (11): `isMfaVerifiedForSession`
+- `tests/unit/admin-mfa-guard.test.ts` (12): `isMfaVerifiedForSession`
   (before/after/at the session issued-at, missing values, verification in
   a different session, legacy session without a sid, same-second session),
   `requireAdminMfaVerified` (verified admin passes, unenrolled → 403
   MFA_ENROLLMENT_REQUIRED, enrolled-but-not-activated → 403, enabled-but-
   unverified → 401 MFA_VERIFICATION_REQUIRED, customer → 403 admin-only,
   unauthenticated → 401).
+- `tests/unit/admin-mfa-routes.test.ts` (19): the limiter-ordering fix —
+  a missing key returns 503 on repeated attempts without consuming any
+  rate-limit budget (setup/verify/activate/replace/disable), real
+  attempts are still limited (setup 3 then 429, verify/activate 5 then
+  429), the 15-minute window restores the budget (no permanent lockout),
+  invalid TOTP codes, `SESSION_REBIND_REQUIRED` for sessions without a
+  sid, unauthenticated callers (401), recovery-code verification, and
+  activation returning the recovery codes.
 - `tests/unit/integration.admin-mfa.test.ts` (17): full lifecycle against
   the disposable SQLite DB — enroll, activate, verify, replay rejection,
   recovery-code single use, regeneration, disablement; activation with an

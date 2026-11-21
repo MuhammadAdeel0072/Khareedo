@@ -1,6 +1,6 @@
 "use client";
 
-// Listing sidebar filters — category, price, availability (FR-10). URL-param driven.
+// Listing sidebar filters — category, brand, price, availability (FR-10). URL-param driven.
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useState } from "react";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -17,26 +17,32 @@ export interface FilterCategory {
 }
 
 const PRICE_MIN = 0;
-const PRICE_MAX = 50000;
+/** Fallback cap when the page does not supply the data-driven catalogue max. */
+const DEFAULT_PRICE_MAX = 50000;
 
 export function ProductFilters({
   categories,
+  brands = [],
+  maxPrice = DEFAULT_PRICE_MAX,
   totalResults,
 }: {
   categories: FilterCategory[];
+  brands?: string[];
+  maxPrice?: number;
   totalResults: number;
 }) {
   const router = useRouter();
   const params = useSearchParams();
 
   const activeCategory = params.get("category") ?? "";
+  const activeBrand = params.get("brand") ?? "";
   const activeMin = params.get("min") ?? String(PRICE_MIN);
-  const activeMax = params.get("max") ?? String(PRICE_MAX);
+  const activeMax = params.get("max") ?? String(maxPrice);
   const inStockOnly = params.get("instock") === "1";
 
   const [priceRange, setPriceRange] = useState<[number, number]>([
-    Number(activeMin) || PRICE_MIN,
-    Number(activeMax) || PRICE_MAX,
+    Math.min(Number(activeMin) || PRICE_MIN, maxPrice),
+    Math.min(Number(activeMax) || maxPrice, maxPrice),
   ]);
 
   const setParam = useCallback(
@@ -55,11 +61,19 @@ export function ProductFilters({
   const applyPrice = () => {
     setParam({
       min: priceRange[0] > PRICE_MIN ? String(priceRange[0]) : null,
-      max: priceRange[1] < PRICE_MAX ? String(priceRange[1]) : null,
+      max: priceRange[1] < maxPrice ? String(priceRange[1]) : null,
     });
   };
 
-  const hasFilters = activeCategory || inStockOnly || activeMin !== null || activeMax !== null;
+  // A filter counts as active only when it actually narrows the listing.
+  // (The min/max params default to the full range, so comparing them
+  // against null was always true and "Clear all filters" never hid.)
+  const hasFilters =
+    activeCategory !== "" ||
+    activeBrand !== "" ||
+    inStockOnly ||
+    Number(activeMin) > PRICE_MIN ||
+    Number(activeMax) < maxPrice;
 
   return (
     <aside aria-label="Product filters" className="space-y-5">
@@ -100,7 +114,7 @@ export function ProductFilters({
         <h3 className="mb-3 text-sm font-bold">Price Range</h3>
         <Slider
           min={PRICE_MIN}
-          max={PRICE_MAX}
+          max={maxPrice}
           step={500}
           value={priceRange}
           onValueChange={(v) => setPriceRange(v as [number, number])}
@@ -110,12 +124,33 @@ export function ProductFilters({
         <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
           <span>{formatPKR(priceRange[0])}</span>
           <span>to</span>
-          <span>{priceRange[1] >= PRICE_MAX ? `${formatPKR(PRICE_MAX)}+` : formatPKR(priceRange[1])}</span>
+          <span>{priceRange[1] >= maxPrice ? `${formatPKR(maxPrice)}+` : formatPKR(priceRange[1])}</span>
         </div>
         <Button size="sm" className="mt-3 w-full" onClick={applyPrice}>
           Apply Price
         </Button>
       </section>
+
+      {brands.length > 0 && (
+        <section className="rounded-xl border p-4">
+          <h3 className="mb-3 text-sm font-bold">Brands</h3>
+          <ul className="space-y-2.5">
+            {brands.map((brand) => (
+              <li key={brand}>
+                <Label
+                  className="flex cursor-pointer items-center gap-2 text-sm font-normal"
+                  onClick={() => setParam({ brand: activeBrand === brand ? null : brand })}
+                >
+                  <Checkbox checked={activeBrand === brand} aria-hidden="true" tabIndex={-1} />
+                  <span className={activeBrand === brand ? "font-semibold text-primary" : ""}>
+                    {brand}
+                  </span>
+                </Label>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <section className="rounded-xl border p-4">
         <Label className="flex cursor-pointer items-center gap-2 text-sm font-normal">

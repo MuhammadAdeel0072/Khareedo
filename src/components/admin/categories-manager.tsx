@@ -47,6 +47,37 @@ interface Draft {
   sortOrder: number | string;
 }
 
+/** Flat parent choices, depth-indented, excluding a category and all of its
+ *  descendants — moving a category under one of its own subcategories
+ *  would create a cycle. A visited set also guards legacy-cyclic data. */
+function parentOptions(
+  categories: AdminCategory[],
+  excludeId: string | null,
+): Array<{ id: string; name: string; depth: number }> {
+  const childrenByParent = new Map<string, AdminCategory[]>();
+  for (const category of categories) {
+    if (!category.parentId) continue;
+    const children = childrenByParent.get(category.parentId) ?? [];
+    children.push(category);
+    childrenByParent.set(category.parentId, children);
+  }
+  const options: Array<{ id: string; name: string; depth: number }> = [];
+  const walk = (parentId: string | null, depth: number, seen: Set<string>) => {
+    const children = parentId === null
+      ? categories.filter((c) => !c.parentId)
+      : (childrenByParent.get(parentId) ?? []);
+    for (const child of children) {
+      if (seen.has(child.id)) continue;
+      seen.add(child.id);
+      if (child.id === excludeId) continue; // skip the whole subtree
+      options.push({ id: child.id, name: child.name, depth });
+      walk(child.id, depth + 1, seen);
+    }
+  };
+  walk(null, 0, new Set());
+  return options;
+}
+
 export function CategoriesManager({ initial }: { initial: AdminCategory[] }) {
   const router = useRouter();
   const categories = initial;
@@ -242,16 +273,18 @@ export function CategoriesManager({ initial }: { initial: AdminCategory[] }) {
                   onChange={(e) => setDraft({ ...draft, parentId: e.target.value })}
                   className="mt-1.5 flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                   aria-label="Parent category"
+                  aria-invalid={Boolean(errors.parentId)}
                 >
                   <option value="">None (top level)</option>
-                  {roots
-                    .filter((r) => r.id !== draft.id)
-                    .map((r) => (
-                      <option key={r.id} value={r.id}>
-                        {r.name}
-                      </option>
-                    ))}
+                  {parentOptions(categories, draft.id).map((o) => (
+                    <option key={o.id} value={o.id}>
+                      {"\u00A0".repeat(o.depth * 3)}
+                      {o.depth > 0 ? "↳ " : ""}
+                      {o.name}
+                    </option>
+                  ))}
                 </select>
+                {errors.parentId && <p className="mt-1 text-xs text-destructive" role="alert">{errors.parentId}</p>}
               </div>
               <div>
                 <Label>Description</Label>
@@ -265,6 +298,7 @@ export function CategoriesManager({ initial }: { initial: AdminCategory[] }) {
                 <Checkbox checked={draft.isActive} onCheckedChange={(c) => setDraft({ ...draft, isActive: c === true })} />
                 <span className="text-sm">Active — visible in storefront navigation</span>
               </label>
+              {errors.isActive && <p className="text-xs text-destructive" role="alert">{errors.isActive}</p>}
               {errors._ && <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">{errors._}</p>}
               <div className="flex justify-end gap-2 pt-2">
                 <Button type="button" variant="ghost" onClick={() => setDraft(null)}>

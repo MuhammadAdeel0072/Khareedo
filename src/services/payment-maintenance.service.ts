@@ -3,11 +3,13 @@ import { db } from "@/lib/db";
 import { capturePaymentAlert } from "@/lib/error-monitoring";
 import { loadSafepayApiOnlyConfig, SafepayConfigurationError, type SafepayConfig } from "@/lib/safepay/config";
 import { createSafepayProvider } from "@/lib/safepay/provider";
-import { createSafepayReservationService } from "@/services/safepay-reservations.service";
+import { createSafepayReservationService, type ExpiryProviderCheck } from "@/services/safepay-reservations.service";
 import { createPaymentWebhookService, type PaymentWebhookService } from "@/services/payment-webhook.service";
 import { createPaymentReconciliationService } from "@/services/payment-reconciliation.service";
 import { createPaymentVerificationService, type PaymentVerificationService, type PaymentDatabase } from "@/services/payment-verification.service";
 import { createPaymentRefundService } from "@/services/payment-refund.service";
+import { cleanupEmailOutboxEntries } from "@/services/email-outbox.service";
+import { pruneStaleGuestCarts } from "@/services/cart.service";
 import { createPaymentPayloadVault, type PaymentPayloadVault } from "@/lib/payments/payload-vault";
 import { loadPaymentPayloadVaultKeys } from "@/lib/payments/vault-env";
 import { localId } from "@/lib/safepay/contracts";
@@ -23,11 +25,14 @@ import { SAFEPAY_REFUNDS_SANDBOX_ONLY } from "@/lib/safepay/readiness";
 
 export const MAINTENANCE_ACTIONS = [
   "expire_reservations",
+  "verify_expiring_payments",
   "process_webhook_inbox",
   "reconcile_due_payments",
   "verify_order_payment",
   "investigate_closed_order_payment",
   "reconcile_refunds",
+  "cleanup_email_outbox",
+  "prune_stale_carts",
 ] as const;
 export type MaintenanceAction = (typeof MAINTENANCE_ACTIONS)[number];
 
@@ -35,12 +40,15 @@ export type MaintenanceActionUnavailable = "PAYMENT_PAYLOAD_CUSTODY_UNAVAILABLE"
   "SAFEPAY_CONFIGURATION_UNAVAILABLE" | "REFUNDS_SANDBOX_ONLY";
 
 export type PaymentMaintenanceRunResult =
-  | { action: "expire_reservations"; batch: number; released: number; reviewRequired: number; failed: number }
+  | { action: "expire_reservations"; batch: number; released: number; reviewRequired: number; settled: number; failed: number }
+  | { action: "verify_expiring_payments"; batch: number; considered: number; outcomes: Array<{ paymentId: string; outcome: string; code?: string }> }
   | { action: "process_webhook_inbox"; batch: number; considered: number; outcomes: Array<{ eventId: string; result: string }> }
   | { action: "reconcile_due_payments"; batch: number; considered: number; outcomes: Array<{ paymentId: string; outcome: string; code?: string }> }
   | { action: "verify_order_payment"; orderId: string; outcome: string; code?: string }
   | { action: "investigate_closed_order_payment"; orderId: string; outcome: string; code?: string; attempts?: Array<{ attemptNumber: number | null; outcome: string; code?: string }> }
-  | { action: "reconcile_refunds"; batch: number; considered: number; outcomes: Array<{ refundId: string; disposition: string; outcome?: string; code?: string }> }
+  | { action: "reconcile_refunds"; batch: number; considered: number; released: number; outcomes: Array<{ refundId: string; disposition: string; outcome?: string; code?: string }> }
+  | { action: "cleanup_email_outbox"; batch: number; deleted: number }
+  | { action: "prune_stale_carts"; batch: number; deleted: number }
   | { action: MaintenanceAction; blocked: true; code: MaintenanceActionUnavailable };
 export type MaintenanceRunResult = PaymentMaintenanceRunResult;
 
@@ -114,7 +122,7 @@ export function alertOnRefundReconciliationOutcomes(
 
 export function alertOnProviderFetchFailures(
   outcomes: Array<{ paymentId?: string; orderId?: string; outcome: string; code?: string }>,
-  operation: "reconcile-due-payments" | "verify-order-payment",
+  operation: "reconcile-due-payments" | "verify-order-payment" | "verify-expiring-payments",
 ): void {
   const fetchFailed = outcomes.filter((o) => o.outcome === "provider_fetch_failed");
   if (fetchFailed.length === 0) return;
@@ -133,12 +141,50 @@ export function createPaymentMaintenanceRunner(injectedDatabase?: PaymentDatabas
   return {
     async run(action: MaintenanceAction, batch: number, target?: { orderId?: string }): Promise<PaymentMaintenanceRunResult> {
       if (action === "expire_reservations") {
-        const reservations = createSafepayReservationService(database as never);
+        // M-26: consult the provider before closing a possibly-paid tracker.
+        // Best-effort here — without Safepay config or payload custody there
+        // is no verifier, and expiry proceeds as before (the close retains
+        // holds for review and the investigate action consults the provider
+        // later). Only a missing-config error is swallowed; anything else
+        // throws, as in the provider branches below.
+        let verify: ExpiryProviderCheck | undefined;
+        try {
+          const expireConfig = loadSafepayApiOnlyConfig();
+          const expireStack = createPaymentStack(database);
+          if (expireStack) {
+            const verification = expireStack.verification(expireConfig);
+            verify = (paymentId: string) => verification.verifyPaymentNow(paymentId);
+          }
+        } catch (error) {
+          if (!(error instanceof SafepayConfigurationError)) throw error;
+        }
+        const reservations = createSafepayReservationService(database as never, undefined, { verifyPayment: verify });
         const results = await reservations.expireBatch(batch);
         return { action, batch,
           released: results.filter(r => r.result.ok && r.result.outcome === "RELEASED").length,
           reviewRequired: results.filter(r => r.result.ok && r.result.outcome === "REVIEW_REQUIRED").length,
+          settled: results.filter(r => r.result.ok && r.result.outcome === "SETTLED").length,
           failed: results.filter(r => !r.result.ok).length };
+      }
+
+      // Email outbox retention (Phase 3 Chunk 7, M-23). Deliberately placed
+      // before the Safepay config gate below: deleting old terminal outbox
+      // rows needs no provider credentials or payload custody, exactly like
+      // reservation expiry. The batch size is irrelevant here (one bounded
+      // deleteMany over the 30-day cutoff) and is echoed back unchanged.
+      if (action === "cleanup_email_outbox") {
+        const { deleted } = await cleanupEmailOutboxEntries();
+        return { action, batch, deleted };
+      }
+
+      // Stale guest-cart pruning (Phase 3, chunk 12 follow-up B). Same
+      // placement as the outbox cleanup: no provider credentials or
+      // payload custody needed, one bounded deleteMany over the 30-day
+      // cutoff (the guest-cart cookie lifetime). Batch is echoed back
+      // unchanged.
+      if (action === "prune_stale_carts") {
+        const { deleted } = await pruneStaleGuestCarts();
+        return { action, batch, deleted };
       }
 
       // Provider-independent actions still need encrypted payload custody (inbox) or
@@ -411,6 +457,26 @@ export function createPaymentMaintenanceRunner(injectedDatabase?: PaymentDatabas
           "verify-order-payment",
         );
         return { action, orderId, outcome: outcome.kind, ...("code" in outcome ? { code: outcome.code } : {}) };
+      }
+
+      // Pre-expiry provider check (M-26): force-verify payments whose
+      // reservations expire within the next five minutes, while settlement
+      // is still possible. The worker runs this before expire_reservations
+      // in the same sweep (see SWEEP_PLAN), so a capture is settled rather
+      // than LATE_CAPTURE-reviewed. The force flag bypasses the
+      // transport-failure backoff only — an in-flight fetch is never
+      // doubled — and the batch bounds the provider calls per sweep.
+      if (action === "verify_expiring_payments") {
+        const verification = stack.verification(config);
+        const due = await stack.reconciliation.dueForPreExpiryCheck(batch);
+        const outcomes: Array<{ paymentId: string; outcome: string; code?: string }> = [];
+        for (const payment of due) {
+          if (payment.provider !== "SAFEPAY" || !payment.trackerToken) continue;
+          const outcome = await verification.verifyPaymentNow(payment.id, { force: true });
+          outcomes.push({ paymentId: payment.id, outcome: outcome.kind, ...("code" in outcome ? { code: outcome.code } : {}) });
+        }
+        alertOnProviderFetchFailures(outcomes, "verify-expiring-payments");
+        return { action, batch, considered: due.length, outcomes };
       }
 
       // reconcile_due_payments: bounded sweep of due managed attempts through the same
