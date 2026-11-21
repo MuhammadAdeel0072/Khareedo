@@ -164,14 +164,53 @@ email is sent asynchronously" above).
 ## The outbox worker
 
 `src/services/email-outbox.service.ts` exports `enqueuePasswordResetEmail`
-(single INSERT carrying only the email), `deliverPendingOutboxEmails(batch)`
-(one sweep; exported so tests and operators can invoke delivery directly),
-and `startEmailOutboxWorker()` (in-process 60-second sweep, single-flight,
-unref'd timer, started from `src/instrumentation.ts` alongside the payment
-maintenance worker). Rows are claimed atomically (conditional update on status +
-nextAttemptAt) so two instances racing on the same row cannot both
-deliver it. The worker never logs tokens, email bodies, or customer data
-— only the outbox row id and the error name.
+and `enqueueVerificationEmail` (single INSERTs carrying only the email, deduped
+against an existing PENDING row for the same type and email),
+`deliverPendingOutboxEmails(batch)` (one sweep; exported so tests and
+operators can invoke delivery directly), `listEmailOutboxEntries` /
+`getEmailOutboxEntry` / `retryEmailOutboxEntry` (the admin viewer and retry),
+`cleanupEmailOutboxEntries` (retention), and `startEmailOutboxWorker()`
+(in-process 60-second sweep, single-flight, unref'd timer, started from
+`src/instrumentation.ts` alongside the payment maintenance worker). Rows are
+claimed atomically (conditional update on status + nextAttemptAt) so two
+instances racing on the same row cannot both deliver it. The worker never
+logs tokens, email bodies, or customer data — only the outbox row id and the
+error name.
+
+The outbox carries two email types. `PASSWORD_RESET` rows are created by the
+forgot-password endpoint; `EMAIL_VERIFICATION` rows are created by
+registration and by the resend-verification endpoint (Phase 3 Chunk 7,
+M-24). Both are delivered by the same worker with the same retries: the
+worker looks the account up at delivery time, generates the token then,
+stores only its hash, and sends the email. Unknown, OAuth-only, and (for
+verification) already-verified addresses are silently discarded. One
+deliberate limitation: a row carries only type + email — there is no payload
+column — so a verification email delivered from the outbox cannot carry the
+request's callbackUrl, and its link uses the default "/account" destination
+instead. The token itself is generated identically (32 random bytes,
+base64url, SHA-256 hash stored, 24h TTL).
+
+## Admin visibility, retry, retention
+
+A FAILED row is terminal — the worker never retries it automatically — and
+used to be visible only in error monitoring. The admin outbox viewer
+(`/admin/email-outbox`, sidebar: "Email outbox") lists every PENDING and
+FAILED row with its type, recipient, attempts, last error and age, with a
+status filter and a detail view per row. A FAILED row can be retried from
+the detail view (`POST /api/admin/email-outbox/[id]/retry`, audited as
+`admin.email.outbox_retried`): the retry is a conditional update that only
+succeeds while the row is still FAILED, resetting it to PENDING with a fresh
+attempt budget. Delivered and discarded rows are deleted by the worker, so
+they never appear here.
+
+Retention: FAILED rows older than 30 days are deleted by
+`cleanupEmailOutboxEntries()`, wired into the shared maintenance runner as
+the `cleanup_email_outbox` action — it runs in the payment maintenance
+worker's sweep and can be triggered manually via `POST
+/api/admin/payments/maintenance`. PENDING rows are never deleted. No
+retention convention existed anywhere in the codebase, so 30 days is the
+documented choice: long enough to investigate a delivery failure, short
+enough that the table stays small.
 
 ## Worker configuration
 
@@ -193,11 +232,12 @@ they are independent — disabling one must never silently disable the other:
 corresponding opt-out (`EMAIL_OUTBOX_WORKER=off` for the email worker,
 `PAYMENT_MAINTENANCE_WORKER=off` for the payment worker) and use an
 external scheduler to invoke delivery instead: call
-`deliverPendingOutboxEmails(batch)` for password-reset emails (and `POST
-/api/admin/payments/maintenance` for payment maintenance). If the email
-worker is disabled and no scheduler is configured, enqueued reset emails
-simply wait in the outbox — they are not lost, but they are not delivered
-until a sweep runs.
+`POST /api/admin/email-outbox/deliver` for outbox emails (admin
+MFA-verified session required; same delivery as the worker, safe to call
+concurrently with it) and `POST /api/admin/payments/maintenance` for
+payment maintenance. If the email worker is disabled and no scheduler is
+configured, enqueued reset emails simply wait in the outbox — they are not
+lost, but they are not delivered until a sweep runs.
 
 ## What is NOT covered
 
@@ -216,17 +256,39 @@ until a sweep runs.
   enqueues the identical single row — only the email — for registered,
   unknown, and OAuth-only addresses; no token and no email from the
   service), single-use, expiry, reuse, weak-password rejection, admin reset.
+  Requesting twice delegates twice to the enqueue function, which dedups
+  PENDING rows (Phase 3 Chunk 7, M-25).
 - `tests/unit/password-reset-routes.test.ts` (11): uniform responses,
   no 503 for any address (the route never checks SMTP), 422/429
   behaviour, per-IP and per-email rate limiting.
-- `tests/unit/email-outbox.test.ts` (9): delivery looks the account up,
+- `tests/unit/email-outbox.test.ts` (21): delivery looks the account up,
   creates a hashed token and sends the email; unknown and OAuth-only
   addresses are silently discarded without sending; SMTP failure retries
   with backoff and keeps the row pending; max attempts marks FAILED and
-  captures an error; rows not yet due are not delivered; the worker
+  captures an error; rows not yet due are not delivered; enqueue dedups a
+  second PENDING row for the same type and email; verification delivery
+  (token generated at delivery, hash only, default "/account" destination;
+  unknown, OAuth-only, and already-verified addresses discarded; SMTP
+  failure retries); admin list/retry/cleanup functions; the worker
   registers at most once per process and honours its own
   `EMAIL_OUTBOX_WORKER=off` opt-out, which is independent of
   `PAYMENT_MAINTENANCE_WORKER`.
+- `tests/unit/email-outbox-admin.test.ts` (6, Phase 3 Chunk 7): the retry
+  route re-enqueues a FAILED row and audits it, 404s for a missing or
+  non-FAILED row, rejects unauthenticated and rate-limited requests; the
+  deliver route runs one sweep and returns the counts, defaults the batch
+  to 10, rejects an invalid body, and rejects unauthenticated requests.
+- `tests/unit/email-verification-flow.test.ts` (Phase 3 Chunk 7):
+  registration and resend only enqueue a verification row (no account
+  lookup, no synchronous send); token redemption stays single-use and
+  rejects expired, consumed, already-verified, admin, and OAuth-only
+  tokens.
+- `tests/unit/integration.email-outbox.test.ts` (4, via `test:db`, Phase 3
+  Chunk 7): dedup (two rapid reset requests for one email enqueue one row;
+  a different email gets its own row); registration succeeds while SMTP is
+  down and the worker delivers the verification email on retry, with the
+  stored token verifying the account end to end; cleanup deletes only old
+  terminal rows; the admin list shows FAILED rows and retry re-enqueues one.
 - `tests/unit/instrumentation-workers.test.ts` (6): the instrumentation
   hook starts both workers when neither opt-out is set; disabling payment
   maintenance does not prevent the email outbox worker from starting;

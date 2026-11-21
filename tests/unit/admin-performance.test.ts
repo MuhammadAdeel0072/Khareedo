@@ -4,6 +4,7 @@ const database = vi.hoisted(() => ({
   executeRaw: vi.fn(),
   queryRaw: vi.fn(),
   userFindMany: vi.fn(),
+  userCount: vi.fn(),
   orderGroupBy: vi.fn(),
   orderFindMany: vi.fn(),
 }));
@@ -19,7 +20,7 @@ vi.mock("@/lib/db", () => ({
   db: {
     $executeRaw: database.executeRaw,
     $queryRaw: database.queryRaw,
-    user: { findMany: database.userFindMany },
+    user: { findMany: database.userFindMany, count: database.userCount },
     order: {
       groupBy: database.orderGroupBy,
       findMany: database.orderFindMany,
@@ -46,8 +47,10 @@ describe("admin performance queries", () => {
       totalCustomers: 8,
       totalProducts: 20,
       totalRevenue: 120000,
+      pendingRevenue: 25000,
       lowStockCount: 2,
       revenueThisMonth: 45000,
+      pendingRevenueThisMonth: 10000,
       ordersThisMonth: 5,
       ordersLastMonth: 4,
     }]);
@@ -57,8 +60,10 @@ describe("admin performance queries", () => {
       totalCustomers: 8,
       totalProducts: 20,
       totalRevenue: 120000,
+      pendingRevenue: 25000,
       lowStockCount: 2,
       revenueThisMonth: 45000,
+      pendingRevenueThisMonth: 10000,
       ordersThisMonth: 5,
       ordersLastMonth: 4,
     });
@@ -70,7 +75,10 @@ describe("admin performance queries", () => {
     const queryText = Array.from(queryParts).join("");
     expect(queryText).toContain('"status" <> \'CANCELLED\'');
     expect(queryText).not.toContain('"status" = \'PENDING\'');
-    expect(values.filter((value) => value instanceof Date)).toHaveLength(4);
+    // M-33/D18: revenue is paid-only, pending shown separately.
+    expect(queryText).toContain('"paymentStatus" = \'PAID\'');
+    expect(queryText).toContain('"paymentStatus" = \'PENDING\'');
+    expect(values.filter((value) => value instanceof Date)).toHaveLength(5);
   });
 
   it("aggregates chart revenue per day in SQL instead of transferring each order", async () => {
@@ -138,17 +146,24 @@ describe("admin performance queries", () => {
       _count: { _all: 2 },
       _sum: { total: 650 },
     }]);
+    database.userCount.mockResolvedValue(1);
 
-    await expect(adminListCustomerSummaries()).resolves.toEqual([{
-      id: "customer-1",
-      name: "Customer",
-      email: "customer@example.com",
-      phone: null,
-      createdAt,
-      orderCount: 2,
-      totalSpent: 650,
-      addressCount: 2,
-    }]);
+    await expect(adminListCustomerSummaries()).resolves.toEqual({
+      items: [{
+        id: "customer-1",
+        name: "Customer",
+        email: "customer@example.com",
+        phone: null,
+        createdAt,
+        orderCount: 2,
+        totalSpent: 650,
+        addressCount: 2,
+      }],
+      total: 1,
+      page: 1,
+      perPage: 15,
+      pages: 1,
+    });
     expect(database.userFindMany).toHaveBeenCalledWith(
       expect.objectContaining({ select: expect.not.objectContaining({ orders: expect.anything() }) })
     );

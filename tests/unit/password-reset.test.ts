@@ -174,7 +174,12 @@ describe("password reset tokens", () => {
     expect(mockDb.$transaction).not.toHaveBeenCalled();
   });
 
-  it("requesting a reset twice enqueues two rows (the worker dedups tokens at delivery)", async () => {
+  it("requesting a reset twice delegates both requests to the enqueue function (which dedups PENDING rows)", async () => {
+    // Phase 3 Chunk 7 (M-25): the dedup lives in enqueuePasswordResetEmail
+    // itself — a second request while a PENDING row exists for the same
+    // email creates no second row (proved in email-outbox.test.ts and the
+    // integration suite). requestPasswordReset still delegates each request;
+    // it performs no lookup and no dedup of its own.
     mockFindUserByEmail.mockResolvedValue(customer);
 
     await requestPasswordReset("customer@example.com");

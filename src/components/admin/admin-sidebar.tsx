@@ -12,15 +12,19 @@ import {
   Image as ImageIcon,
   LayoutDashboard,
   LogOut,
+  Mail,
   Megaphone,
   Menu,
   Package,
   ScrollText,
   Settings,
+  ShieldCheck,
   ShoppingCart,
+  Star,
   Store,
   Tags,
   Users,
+  Warehouse,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -28,14 +32,18 @@ import { cn } from "@/lib/utils";
 const NAV = [
   { href: "/admin", label: "Dashboard", icon: LayoutDashboard, exact: true },
   { href: "/admin/products", label: "Products", icon: Package },
+  { href: "/admin/reviews", label: "Reviews", icon: Star },
   { href: "/admin/categories", label: "Categories", icon: Boxes },
+  { href: "/admin/inventory", label: "Inventory", icon: Warehouse },
   { href: "/admin/orders", label: "Orders", icon: ShoppingCart },
+  { href: "/admin/payments/review", label: "Payment review", icon: ShieldCheck },
   { href: "/admin/customers", label: "Customers", icon: Users },
   { href: "/admin/banners", label: "Banners", icon: ImageIcon },
   { href: "/admin/coupons", label: "Coupons", icon: Tags },
   { href: "/admin/promotions", label: "Promotions", icon: Megaphone },
   { href: "/admin/reports", label: "Reports", icon: BarChart3 },
   { href: "/admin/audit-log", label: "Audit log", icon: ScrollText },
+  { href: "/admin/email-outbox", label: "Email outbox", icon: Mail },
   { href: "/admin/settings", label: "Settings", icon: Settings },
 ];
 

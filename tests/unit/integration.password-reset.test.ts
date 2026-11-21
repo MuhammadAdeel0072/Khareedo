@@ -26,6 +26,9 @@ vi.mock("@/lib/db", async () => {
 });
 
 vi.mock("@/services/email.service", () => ({
+  isEmailDeliveryConfigured: () => true,
+  classifyEmailSendError: () => ({ kind: "transient", permanent: false, authFailure: false, reason: "Transient email delivery failure — will retry with backoff." }),
+  resetEmailTransporter: vi.fn(),
   sendPasswordResetEmail: vi.fn(async ({ token }: { token: string }) => {
     sentTokens.push(token);
   }),

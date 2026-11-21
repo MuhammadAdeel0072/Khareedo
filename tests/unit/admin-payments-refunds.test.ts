@@ -19,6 +19,10 @@ const mocks = vi.hoisted(() => ({
     abandonStaleSubmission: vi.fn(),
     noteReconcileAttempt: vi.fn(),
   },
+  refundServiceOptions: {
+    pollDelayMs: 60_000, maxConfirmationAttempts: 6, submitGraceMs: 120_000,
+    reversalWindowMs: 24 * 3_600_000, cardRefundWindowMs: 90 * 24 * 3_600_000,
+  },
   refundFactory: vi.fn(),
   inboxFactory: vi.fn(),
   reconciliationFactory: vi.fn(),
@@ -58,6 +62,7 @@ vi.mock("@/lib/safepay/config", () => ({
 vi.mock("@/lib/safepay/provider", () => ({ createSafepayProvider: mocks.providerFactory }));
 vi.mock("@/services/payment-refund.service", () => ({
   createPaymentRefundService: mocks.refundFactory,
+  REFUND_SERVICE_OPTIONS: mocks.refundServiceOptions,
 }));
 vi.mock("@/services/payment-webhook.service", () => ({ createPaymentWebhookService: mocks.inboxFactory }));
 vi.mock("@/services/payment-reconciliation.service", () => ({

@@ -3,6 +3,13 @@ import { sha256, trackerIdentity, type VerificationInput } from "@/lib/payments/
 import { authenticatePaymentEvidence, copyVerificationInput, readTrustedPaymentEvidence } from "@/lib/payments/verified-evidence";
 import type { PaymentPayloadVault } from "@/lib/payments/payload-vault";
 import { createPaymentSettlementService, normalizedEvidence, type PaymentPersistence, type SettlementResult } from "@/services/payment-settlement.service";
+import { captureError } from "@/lib/error-monitoring";
+import {
+  enqueueOrderConfirmedEmail,
+  enqueueOrderPaymentFailedEmail,
+  enqueueOrderPaymentSucceededEmail,
+  enqueueOrderRefundSucceededEmail,
+} from "@/services/order-notification.service";
 
 export type InboxReceiveResult = { kind: "stored" | "duplicate" | "quarantined" | "conflict"; eventId: string } |
   { kind: "blocked"; code: "INVALID_INPUT" | "BUSY" | "PERSISTENCE_UNAVAILABLE" };
@@ -102,7 +109,18 @@ export function createPaymentWebhookService(database: PaymentPersistence, vault:
         // A persisted VERIFIED flag or normalized JSON is never a settlement capability.
         const verified = await authenticatePaymentEvidence(input, clock());
         if (verified.kind !== "verified") return { kind: "blocked", code: verified.code === "VERIFICATION_DISABLED" ? verified.code : "UNVERIFIED_EVIDENCE" };
-        return await settlement.apply(verified.proof, eventId);
+        const result = await settlement.apply(verified.proof, eventId);
+        // Order notifications (Chunk 7-final — D14): the settlement
+        // transaction has committed by now, so this is the safe moment to
+        // notify. The result is the only trustworthy signal — "settled"
+        // means THIS call settled something new (a repeat returns
+        // "already_settled" / "recorded" and never re-notifies), a refund
+        // settlement carries the exact rows it finalized, and only a
+        // verified FAILURE_CONFIRMED observation carries failureConfirmed.
+        // Never throws: a mail problem must not turn a committed
+        // settlement into a "blocked" processing outcome.
+        await notifyOrderEmailsAfterSettlement(database, eventId, result);
+        return result;
       } catch { return { kind: "blocked", code: "PERSISTENCE_UNAVAILABLE" }; }
     },
     async pending(limit = 50) {
@@ -114,3 +132,70 @@ export function createPaymentWebhookService(database: PaymentPersistence, vault:
   };
 }
 export type PaymentWebhookService = ReturnType<typeof createPaymentWebhookService>;
+
+/**
+ * Notify the customer about what a settlement just did (Chunk 7-final —
+ * D14). Called only after settlement.apply() has returned, i.e. after the
+ * transaction committed. Three cases, all gated on the result:
+ * - A capture settlement ("settled" for a CAPTURE_CONFIRMED event):
+ *   order confirmation + verified payment success — two distinct D14
+ *   events. Never on tracker creation or the return page: those never
+ *   reach apply() with a capture.
+ * - A refund settlement ("settled" with refund info): refund success for
+ *   exactly the rows settlement finalized, with their amount.
+ * - A recorded final failure ("review_required" with failureConfirmed):
+ *   final payment failure. No other review_required is a failure — a
+ *   declined card stays UNCERTAIN (D5 pending) and never notifies.
+ * Everything else (duplicate, already_settled, recorded, blocked) sends
+ * nothing. The notification functions never throw; the reloads below are
+ * wrapped so a mail problem can never fail webhook processing.
+ */
+async function notifyOrderEmailsAfterSettlement(
+  database: PaymentPersistence,
+  eventId: string,
+  result: SettlementResult
+): Promise<void> {
+  try {
+    const isCaptureSettled =
+      result.kind === "settled" && !result.refund;
+    const isRefundSettled =
+      result.kind === "settled" && !!result.refund;
+    const isFailureConfirmed =
+      result.kind === "review_required" && result.failureConfirmed === true;
+    if (!isCaptureSettled && !isRefundSettled && !isFailureConfirmed) return;
+
+    const settledEvent = await database.$transaction((tx) =>
+      tx.paymentWebhookEvent.findUnique({
+        where: { id: eventId },
+        select: { paymentId: true, eventType: true },
+      })
+    );
+    if (!settledEvent?.paymentId) return;
+
+    if (isRefundSettled && result.kind === "settled" && result.refund) {
+      await enqueueOrderRefundSucceededEmail({
+        paymentId: settledEvent.paymentId,
+        refundIds: result.refund.refundIds,
+        amountMinor: result.refund.amountMinor,
+      });
+      return;
+    }
+    if (isFailureConfirmed) {
+      await enqueueOrderPaymentFailedEmail({ paymentId: settledEvent.paymentId });
+      return;
+    }
+    if (isCaptureSettled && settledEvent.eventType === "CAPTURE_CONFIRMED") {
+      const payment = await database.$transaction((tx) =>
+        tx.payment.findUnique({
+          where: { id: settledEvent.paymentId! },
+          select: { orderId: true },
+        })
+      );
+      if (!payment) return;
+      await enqueueOrderConfirmedEmail({ orderId: payment.orderId });
+      await enqueueOrderPaymentSucceededEmail({ paymentId: settledEvent.paymentId });
+    }
+  } catch (error) {
+    captureError(error, { operation: "order-notification-enqueue" });
+  }
+}

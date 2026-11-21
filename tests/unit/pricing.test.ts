@@ -54,6 +54,18 @@ describe("computeDiscount — coupons/promotions (D-06, FR-21)", () => {
   it("returns 0 for null rule", () => {
     expect(computeDiscount(1000, null)).toBe(0);
   });
+
+  it("clamps a percentage discount to the per-coupon max discount (D11/M-21)", () => {
+    expect(computeDiscount(5000, { type: "PERCENT", value: 50, maxDiscount: 300 })).toBe(300);
+    expect(computeDiscount(5000, { type: "PERCENT", value: 5, maxDiscount: 300 })).toBe(250); // under the cap
+    expect(computeDiscount(5000, { type: "PERCENT", value: 50, maxDiscount: null })).toBe(2500); // no cap
+    expect(computeDiscount(5000, { type: "PERCENT", value: 50 })).toBe(2500); // cap absent
+  });
+
+  it("clamps a fixed discount to the cap too, and never exceeds the subtotal", () => {
+    expect(computeDiscount(5000, { type: "FIXED", value: 500, maxDiscount: 300 })).toBe(300);
+    expect(computeDiscount(200, { type: "PERCENT", value: 50, maxDiscount: 1000 })).toBe(100);
+  });
 });
 
 describe("computeDeliveryFee — configurable flat fees (D-03)", () => {

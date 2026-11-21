@@ -79,8 +79,18 @@ export function createPaymentVerificationService(deps: {
      * One server-initiated verification attempt for ONE payment. The caller must have
      * resolved the payment id from a trusted, owner-validated context — never from a
      * browser-supplied identifier alone.
+     *
+     * `force` bypasses the transport-failure backoff (nextReconcileAt) and the
+     * minimum-spacing guard — it does NOT bypass an active lease (a fetch
+     * already in flight stays in flight). It exists for exactly one caller:
+     * the pre-expiry check (M-26), which is the last chance to settle a
+     * payment before its reservation closes. A payment whose fetches keep
+     * failing backs off exponentially (up to 15 minutes) — longer than the
+     * 15-minute reservation — so without force it could expire unverified
+     * even though the provider would have answered. Forced checks are
+     * bounded by the pre-expiry window (a few sweeps per payment at most).
      */
-    async verifyPaymentNow(paymentId: string): Promise<PaymentVerificationOutcome> {
+    async verifyPaymentNow(paymentId: string, options?: { force?: boolean }): Promise<PaymentVerificationOutcome> {
       if (!/^[A-Za-z0-9_-]{1,128}$/.test(paymentId)) return { kind: "skipped", code: "NOT_ELIGIBLE" };
       const at = now();
       const payment = await deps.database.payment.findFirst({
@@ -122,7 +132,13 @@ export function createPaymentVerificationService(deps: {
       if ((payment.nextReconcileAt && at < payment.nextReconcileAt) ||
           (payment.lastReconcileAt && at.getTime() - payment.lastReconcileAt.getTime() < minIntervalMs) ||
           (payment.reconcileLeaseUntil && at < payment.reconcileLeaseUntil)) {
-        return { kind: "skipped", code: "BACKOFF" };
+        // A forced pre-expiry check skips the backoff/spacing guards (see
+        // above) but never a fetch already in flight: if another sweep is
+        // consulting this payment right now, wait for it instead of
+        // doubling the provider call.
+        if (!options?.force || (payment.reconcileLeaseUntil && at < payment.reconcileLeaseUntil)) {
+          return { kind: "skipped", code: "BACKOFF" };
+        }
       }
 
       const leaseToken = randomUUID();

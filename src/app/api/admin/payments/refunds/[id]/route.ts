@@ -3,17 +3,15 @@ import { db } from "@/lib/db";
 import { requireAdminMfaVerified, AuthError } from "@/lib/auth-guard";
 import { rateLimit } from "@/lib/rate-limit";
 import { jsonOk, handleRoute } from "@/lib/api";
-import { createPaymentRefundService } from "@/services/payment-refund.service";
+import { createPaymentRefundService, REFUND_SERVICE_OPTIONS } from "@/services/payment-refund.service";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const REFUND_SERVICE_OPTIONS = {
-  pollDelayMs: 60_000, maxConfirmationAttempts: 6, submitGraceMs: 120_000,
-  reversalWindowMs: 24 * 3_600_000, cardRefundWindowMs: 90 * 24 * 3_600_000,
-} as const;
-
 export async function GET(_request: Request, ctx: { params: Promise<{ id: string }> }) {
+  // Stage 3 audit, L-2: wrapped in handleRoute so a non-auth throw
+  // becomes a JSON 500 instead of Next.js's default HTML 500 page.
+  return handleRoute(async () => {
   try {
     const user = await requireAdminMfaVerified();
     const limit = rateLimit(`payments-refunds-status:${user.id}`, 60, 60_000);
@@ -52,4 +50,5 @@ export async function GET(_request: Request, ctx: { params: Promise<{ id: string
     }
     throw error;
   }
+  }, _request);
 }

@@ -19,15 +19,15 @@ function okRunner() {
     run: vi.fn(async (action: MaintenanceAction, batch: number): Promise<MaintenanceRunResult> => {
       switch (action) {
         case "expire_reservations":
-          return { action, batch, released: 0, reviewRequired: 0, failed: 0 };
+          return { action, batch, released: 0, reviewRequired: 0, settled: 0, failed: 0 };
         case "process_webhook_inbox":
           return { action, batch, considered: 0, outcomes: [] };
         case "reconcile_due_payments":
           return { action, batch, considered: 0, outcomes: [] };
         case "reconcile_refunds":
-          return { action, batch, considered: 0, outcomes: [] };
+          return { action, batch, considered: 0, released: 0, outcomes: [] };
         default:
-          return { action: "reconcile_refunds", batch, considered: 0, outcomes: [] };
+          return { action: "reconcile_refunds", batch, considered: 0, released: 0, outcomes: [] };
       }
     }),
   };

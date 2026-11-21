@@ -130,26 +130,32 @@ async function renderHomePage(requestId: string) {
 
       {/* Category circles */}
       <section className="container-khd mt-8 sm:mt-10" aria-label="Shop by category">
-        <div className="grid grid-cols-3 gap-3 sm:grid-cols-5 lg:grid-cols-10">
-          {categories.map((c) => (
-            <Link
-              key={c.id}
-              href={`/products?category=${c.slug}`}
-              className="group flex flex-col items-center gap-2 rounded-xl border bg-card p-3 text-center transition-all hover:-translate-y-0.5 hover:border-primary/30 hover:shadow-md"
-            >
-              <span className="relative h-14 w-14 overflow-hidden rounded-full bg-muted sm:h-16 sm:w-16">
-                <Image
-                  src={c.imageUrl ?? "/images/placeholder.svg"}
-                  alt={c.name}
-                  fill
-                  sizes="64px"
-                  className="object-cover transition-transform duration-300 group-hover:scale-110"
-                />
-              </span>
-              <span className="text-[11px] font-semibold leading-tight sm:text-xs">{c.name}</span>
-            </Link>
-          ))}
-        </div>
+        {categories.length === 0 ? (
+          <p className="rounded-xl border border-dashed py-10 text-center text-sm text-muted-foreground">
+            No categories yet — check back soon.
+          </p>
+        ) : (
+          <div className="grid grid-cols-3 gap-3 sm:grid-cols-5 lg:grid-cols-10">
+            {categories.map((c) => (
+              <Link
+                key={c.id}
+                href={`/products?category=${c.slug}`}
+                className="group flex flex-col items-center gap-2 rounded-xl border bg-card p-3 text-center transition-all hover:-translate-y-0.5 hover:border-primary/30 hover:shadow-md"
+              >
+                <span className="relative h-14 w-14 overflow-hidden rounded-full bg-muted sm:h-16 sm:w-16">
+                  <Image
+                    src={c.imageUrl ?? "/images/placeholder.svg"}
+                    alt={c.name}
+                    fill
+                    sizes="64px"
+                    className="object-cover transition-transform duration-300 group-hover:scale-110"
+                  />
+                </span>
+                <span className="text-[11px] font-semibold leading-tight sm:text-xs">{c.name}</span>
+              </Link>
+            ))}
+          </div>
+        )}
       </section>
 
       {/* Promotions strip */}
@@ -196,16 +202,24 @@ async function renderHomePage(requestId: string) {
             </Link>
           </Button>
         </div>
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 lg:gap-4">
-          {featured.map((p) => (
-            <ProductCard
-              key={p.id}
-              product={p}
-              wished={wishlistIds.includes(p.id)}
-              isSignedIn={Boolean(user)}
-            />
-          ))}
-        </div>
+        {/* Empty state (Phase 3, chunk 12 follow-up B): the header and
+            View All link used to render over an empty grid. */}
+        {featured.length === 0 ? (
+          <p className="rounded-xl border border-dashed py-10 text-center text-sm text-muted-foreground">
+            No featured products yet — check back soon.
+          </p>
+        ) : (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 lg:gap-4">
+            {featured.map((p) => (
+              <ProductCard
+                key={p.id}
+                product={p}
+                wished={wishlistIds.includes(p.id)}
+                isSignedIn={Boolean(user)}
+              />
+            ))}
+          </div>
+        )}
       </section>
 
       {/* New arrivals */}
@@ -221,16 +235,22 @@ async function renderHomePage(requestId: string) {
             </Link>
           </Button>
         </div>
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 lg:gap-4">
-          {newArrivals.map((p) => (
-            <ProductCard
-              key={p.id}
-              product={p}
-              wished={wishlistIds.includes(p.id)}
-              isSignedIn={Boolean(user)}
-            />
-          ))}
-        </div>
+        {newArrivals.length === 0 ? (
+          <p className="rounded-xl border border-dashed py-10 text-center text-sm text-muted-foreground">
+            No new arrivals yet — check back soon.
+          </p>
+        ) : (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 lg:gap-4">
+            {newArrivals.map((p) => (
+              <ProductCard
+                key={p.id}
+                product={p}
+                wished={wishlistIds.includes(p.id)}
+                isSignedIn={Boolean(user)}
+              />
+            ))}
+          </div>
+        )}
       </section>
     </div>
   );

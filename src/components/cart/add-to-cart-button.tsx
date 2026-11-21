@@ -7,6 +7,7 @@ import { Check, Loader2, ShoppingCart, Zap } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { fetchWithTimeout } from "@/lib/fetch-with-timeout";
 
 interface CartResponse {
   ok: boolean;
@@ -14,11 +15,11 @@ interface CartResponse {
   error?: string;
 }
 
-async function addToCartApi(productId: string, quantity: number): Promise<CartResponse> {
-  const res = await fetch("/api/cart", {
+async function addToCartApi(productId: string, quantity: number, variantId?: string): Promise<CartResponse> {
+  const res = await fetchWithTimeout("/api/cart", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ productId, quantity }),
+    body: JSON.stringify({ productId, quantity, ...(variantId ? { variantId } : {}) }),
   });
   const data: CartResponse = await res.json();
   if (!res.ok || !data.ok) throw new Error(data.error ?? "Could not add to cart");
@@ -29,6 +30,7 @@ export function AddToCartButton({
   productId,
   stock,
   quantity = 1,
+  variantId,
   size = "default",
   className,
   label = "Add to Cart",
@@ -37,6 +39,8 @@ export function AddToCartButton({
   productId: string;
   stock: number;
   quantity?: number;
+  /** Variant of the product to add (Chunk 8 — D12). */
+  variantId?: string;
   size?: "sm" | "default" | "lg";
   className?: string;
   label?: string;
@@ -56,7 +60,7 @@ export function AddToCartButton({
   async function onAdd() {
     setState("loading");
     try {
-      const data = await addToCartApi(productId, quantity);
+      const data = await addToCartApi(productId, quantity, variantId);
       window.dispatchEvent(
         new CustomEvent("cart:updated", { detail: { itemCount: data.cart?.itemCount ?? 0 } })
       );
@@ -96,12 +100,15 @@ export function BuyNowButton({
   productId,
   stock,
   quantity = 1,
+  variantId,
   size = "default",
   className,
 }: {
   productId: string;
   stock: number;
   quantity?: number;
+  /** Variant of the product to buy (Chunk 8 — D12). */
+  variantId?: string;
   size?: "sm" | "default" | "lg";
   className?: string;
 }) {
@@ -119,7 +126,7 @@ export function BuyNowButton({
   async function onBuyNow() {
     setLoading(true);
     try {
-      const data = await addToCartApi(productId, quantity);
+      const data = await addToCartApi(productId, quantity, variantId);
       window.dispatchEvent(
         new CustomEvent("cart:updated", { detail: { itemCount: data.cart?.itemCount ?? 0 } })
       );

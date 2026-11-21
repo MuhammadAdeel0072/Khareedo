@@ -7,6 +7,7 @@ import { ChevronRight, ShieldCheck, Truck, RotateCcw, PackageCheck } from "lucid
 import { ProductGallery } from "@/components/products/product-gallery";
 import { ProductCard } from "@/components/products/product-card";
 import { RatingStars } from "@/components/products/rating-stars";
+import { ProductReviewsSection } from "@/components/products/product-reviews";
 import { WishlistHeart } from "@/components/products/wishlist-heart";
 import { PdpActions } from "@/components/products/pdp-actions";
 import { WhatsAppIcon } from "@/components/layout/whatsapp-icon";
@@ -19,6 +20,7 @@ import { getCachedSettings } from "@/services/settings.service";
 import { getRequestSession, getSessionUser } from "@/lib/auth-guard";
 import { getWishlistProductIds } from "@/services/wishlist.service";
 import { discountPercent, formatPKR } from "@/lib/utils";
+import { RETURNS_WINDOW, STANDARD_DELIVERY_WINDOW } from "@/lib/delivery";
 import { buildProductInquiryMessage } from "@/lib/whatsapp-messages";
 import {
   Breadcrumb,
@@ -35,6 +37,7 @@ export const dynamic = "force-dynamic";
 
 interface PageProps {
   params: Promise<{ slug: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }
 
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
@@ -50,11 +53,13 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
   });
 }
 
-export default async function ProductPage({ params }: PageProps) {
+export default async function ProductPage({ params, searchParams }: PageProps) {
   return withPerformanceTiming("page.product-details", async () => {
   const { slug } = await params;
   const product = await getProductBySlug(slug);
   if (!product) notFound();
+  const sp = await searchParams;
+  const reviewsPage = Math.max(1, Number(typeof sp.reviewsPage === "string" ? sp.reviewsPage : "1") || 1);
 
   const userPromise = getSessionUser();
   const [settings, related, session, user, wishlistIds] = await Promise.all([
@@ -68,6 +73,12 @@ export default async function ProductPage({ params }: PageProps) {
 
   const off = discountPercent(product.price, product.comparePrice);
   const lowStock = product.stock > 0 && product.stock <= product.lowStockThreshold;
+  // With variants the page price is the floor: the cheapest effective price
+  // across variants (override when set, else the product price). The exact
+  // selected-variant price is shown by PdpActions (Chunk 8 — D12).
+  const minVariantPrice = product.variants.length > 0
+    ? Math.min(...product.variants.map((v) => v.priceOverride ?? product.price))
+    : null;
 
   const waHref = `https://wa.me/${settings.whatsapp_number.replace(/\D/g, "")}?text=${encodeURIComponent(
     buildProductInquiryMessage(settings.store_name, product.name, product.price)
@@ -125,8 +136,10 @@ export default async function ProductPage({ params }: PageProps) {
           </div>
 
           <div className="mt-4 flex flex-wrap items-baseline gap-3">
-            <span className="text-3xl font-extrabold text-primary">{formatPKR(product.price)}</span>
-            {product.comparePrice && product.comparePrice > product.price && (
+            <span className="text-3xl font-extrabold text-primary">
+              {minVariantPrice !== null ? `From ${formatPKR(minVariantPrice)}` : formatPKR(product.price)}
+            </span>
+            {minVariantPrice === null && product.comparePrice && product.comparePrice > product.price && (
               <>
                 <span className="text-lg text-muted-foreground line-through">
                   {formatPKR(product.comparePrice)}
@@ -165,13 +178,17 @@ export default async function ProductPage({ params }: PageProps) {
             </div>
           )}
 
-          <PdpActions productId={product.id} stock={product.stock} price={product.price} />
+          <PdpActions productId={product.id} stock={product.stock} price={product.price} variants={product.variants} />
 
           <a
             href={waHref}
             target="_blank"
             rel="noopener noreferrer"
-            className="mt-3 hidden h-11 w-full items-center justify-center gap-2 rounded-md border border-whatsapp/40 text-sm font-medium text-whatsapp-dark transition-colors hover:bg-whatsapp/10 lg:flex"
+            // Shown on mobile too (Phase 3, chunk 12 follow-up B): it used
+            // to be `hidden lg:flex`, and the floating WhatsApp button
+            // hides on mobile wherever an inline button exists — so mobile
+            // had no inquiry path at all.
+            className="mt-3 flex h-11 w-full items-center justify-center gap-2 rounded-md border border-whatsapp/40 text-sm font-medium text-whatsapp-dark transition-colors hover:bg-whatsapp/10"
           >
             <WhatsAppIcon className="h-4 w-4" />
             Ask about this product on WhatsApp
@@ -181,7 +198,7 @@ export default async function ProductPage({ params }: PageProps) {
             <div className="flex flex-col items-center gap-1.5">
               <Truck className="h-5 w-5 text-primary" aria-hidden="true" />
               <span className="font-medium">Fast Delivery</span>
-              <span className="text-muted-foreground">2-5 working days</span>
+              <span className="text-muted-foreground">{STANDARD_DELIVERY_WINDOW}</span>
             </div>
             <div className="flex flex-col items-center gap-1.5">
               <ShieldCheck className="h-5 w-5 text-primary" aria-hidden="true" />
@@ -191,7 +208,7 @@ export default async function ProductPage({ params }: PageProps) {
             <div className="flex flex-col items-center gap-1.5">
               <RotateCcw className="h-5 w-5 text-primary" aria-hidden="true" />
               <span className="font-medium">Easy Returns</span>
-              <span className="text-muted-foreground">Within 7 days</span>
+              <span className="text-muted-foreground">{RETURNS_WINDOW}</span>
             </div>
           </div>
 
@@ -200,6 +217,18 @@ export default async function ProductPage({ params }: PageProps) {
           )}
         </div>
       </div>
+
+      {/* Customer reviews (Phase 3, Chunk 9 — D13): approved only, newest
+          first, 10 per page; the write form shows only to verified
+          purchasers. */}
+      <ProductReviewsSection
+        productId={product.id}
+        productSlug={product.slug}
+        rating={product.rating}
+        reviewCount={product.reviewCount}
+        userId={user?.id ?? null}
+        page={reviewsPage}
+      />
 
       {related.length > 0 && (
         <section className="mt-14" aria-label="Related products">

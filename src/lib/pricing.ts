@@ -20,6 +20,8 @@ export interface DiscountRule {
   type: "PERCENT" | "FIXED";
   value: number; // percent 1-100, or fixed PKR amount
   title?: string;
+  /** Per-coupon max-discount cap (D11/M-21): null/undefined = no cap. */
+  maxDiscount?: number | null;
 }
 
 export interface DeliveryConfig {
@@ -71,7 +73,9 @@ export function computeLines(
   return { lines, subtotal };
 }
 
-/** Coupon/promotion amount against a given subtotal (min-order already validated). */
+/** Coupon/promotion amount against a given subtotal (min-order already validated).
+ *  A per-coupon max-discount cap (D11/M-21) clamps the computed amount before
+ *  the subtotal clamp; a null cap means uncapped. */
 export function computeDiscount(
   subtotal: number,
   rule?: DiscountRule | null
@@ -83,6 +87,7 @@ export function computeDiscount(
   } else {
     d = safeInt(rule.value);
   }
+  if (rule.maxDiscount != null) d = Math.min(d, safeInt(rule.maxDiscount));
   return Math.min(d, subtotal); // never exceed subtotal
 }
 

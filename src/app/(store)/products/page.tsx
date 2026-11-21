@@ -8,7 +8,7 @@ import { ProductFilters } from "@/components/products/product-filters";
 import { MobileFilters } from "@/components/products/mobile-filters";
 import { ProductSort } from "@/components/products/product-sort";
 import { Skeleton } from "@/components/ui/skeleton";
-import { listProducts, type ProductListItem } from "@/services/products.service";
+import { listProducts, getCatalogueBrands, getCatalogueMaxPrice, type ProductListItem } from "@/services/products.service";
 import { getCategoriesWithCounts, getCategoryBySlug } from "@/services/categories.service";
 import { getWishlistProductIds } from "@/services/wishlist.service";
 import { getRequestSession, getSessionUser } from "@/lib/auth-guard";
@@ -55,6 +55,7 @@ export default async function ProductsPage({ searchParams }: PageProps) {
   const params = await searchParams;
   const q = first(params.q);
   const category = first(params.category);
+  const brand = first(params.brand);
   const sort = first(params.sort) ?? "featured";
   const page = Number(first(params.page) ?? "1") || 1;
   const min = first(params.min);
@@ -62,10 +63,11 @@ export default async function ProductsPage({ searchParams }: PageProps) {
   const inStockOnly = first(params.instock) === "1";
 
   const userPromise = getSessionUser();
-  const [result, categories, user, activeCategory, wishlistIds] = await Promise.all([
+  const [result, categories, user, activeCategory, wishlistIds, brands, maxPrice] = await Promise.all([
     listProducts({
       q,
       category,
+      brand,
       sort: sort as "featured",
       page,
       minPrice: min !== undefined ? Number(min) : undefined,
@@ -79,11 +81,16 @@ export default async function ProductsPage({ searchParams }: PageProps) {
     category ? getCategoryBySlug(category) : Promise.resolve(null),
     // Wishlist ids ride the same batch instead of a follow-up round trip.
     userPromise.then((u) => (u ? getWishlistProductIds(u.id) : [])),
+    getCatalogueBrands(),
+    getCatalogueMaxPrice(),
   ]);
 
   // Count of active filters for the mobile filter button badge
   const activeFilterCount =
-    (category ? 1 : 0) + (inStockOnly ? 1 : 0) + (min !== undefined || max !== undefined ? 1 : 0);
+    (category ? 1 : 0) +
+    (brand ? 1 : 0) +
+    (inStockOnly ? 1 : 0) +
+    (min !== undefined || max !== undefined ? 1 : 0);
 
   const buildPageUrl = (p: number) => {
     const next = new URLSearchParams();
@@ -124,7 +131,7 @@ export default async function ProductsPage({ searchParams }: PageProps) {
         {/* Desktop sidebar filters — replaced by a bottom-sheet drawer on <lg */}
         <div className="hidden lg:block">
           <Suspense fallback={<FilterSkeleton />}>
-            <ProductFilters categories={categories} totalResults={result.total} />
+            <ProductFilters categories={categories} brands={brands} maxPrice={maxPrice} totalResults={result.total} />
           </Suspense>
         </div>
 
@@ -140,6 +147,8 @@ export default async function ProductsPage({ searchParams }: PageProps) {
                 <Suspense fallback={null}>
                   <MobileFilters
                     categories={categories}
+                    brands={brands}
+                    maxPrice={maxPrice}
                     totalResults={result.total}
                     activeCount={activeFilterCount}
                   />

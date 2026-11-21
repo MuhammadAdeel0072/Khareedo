@@ -29,7 +29,12 @@ export type RefundRejectionCode =
   | "INVALID_INPUT" | "PAYMENT_NOT_FOUND" | "IDEMPOTENCY_KEY_CONFLICT"
   | "NOT_ONLINE_MANAGED_PAYMENT" | "NOT_REFUNDABLE" | "NOTHING_TO_REFUND"
   | "REFUND_EXCEEDS_REMAINING" | "REFUND_WINDOW_REVERSAL_24H"
-  | "REFUND_WINDOW_METHOD_UNVERIFIED" | "REFUND_SUBMIT_OUTCOME_UNKNOWN";
+  | "REFUND_WINDOW_METHOD_UNVERIFIED" | "REFUND_SUBMIT_OUTCOME_UNKNOWN"
+  // Stage 3 audit, M-8: transient DB contention (P2034/P2028/P2024) is
+  // retryable, so it gets its own code instead of sharing INVALID_INPUT
+  // (which the route used to map to 404 — telling the admin the payment
+  // did not exist and discouraging the retry that would succeed).
+  | "TRANSIENT";
 
 export type RefundSubmissionOutcome =
   | { kind: "submitted"; providerState?: string }
@@ -46,6 +51,13 @@ export type RefundRequestResult =
   | { kind: "rejected"; code: RefundRejectionCode; refundId?: string };
 
 export type RefundRow = Prisma.PaymentRefundGetPayload<{ include: { payment: { select: { orderId: true } } } }>;
+
+/** Shared service tuning (polling, windows). Single source of truth for the
+ * refund routes and the admin order page's read-only refund listing. */
+export const REFUND_SERVICE_OPTIONS = {
+  pollDelayMs: 60_000, maxConfirmationAttempts: 6, submitGraceMs: 120_000,
+  reversalWindowMs: 24 * 3_600_000, cardRefundWindowMs: 90 * 24 * 3_600_000,
+} as const;
 
 class RefundSubmitConflict extends Error {}
 
@@ -86,7 +98,13 @@ export function createPaymentRefundService(
     !!payment && !!order && order.paymentFlowVersion === 1 && order.paymentMethod === "ONLINE" &&
     order.currency === "PKR" && payment.currency === "PKR" && payment.provider === "SAFEPAY" &&
     payment.providerEnvironment === options.environment && payment.merchantAccountRef === options.merchantAccountRef &&
-    order.paymentOwnerOrderId === order.id && payment.status === "PAID" && order.paymentStatus === "PAID" &&
+    order.paymentOwnerOrderId === order.id && payment.status === "PAID" &&
+    // PAID (live order) or CANCELLED (paid order cancelled under H-12/D2):
+    // cancelling an order does not move the money — the captured payment
+    // stays PAID and its refund must remain requestable through this manual
+    // flow. Any other order payment status (PENDING, FAILED, REFUNDED)
+    // means there is no verified capture to refund.
+    (order.paymentStatus === "PAID" || order.paymentStatus === "CANCELLED") &&
     order.acceptedPaymentId === payment.id && !!payment.paidVerifiedAt &&
     payment.capturedAmountMinor !== null && payment.expectedAmountMinor !== null &&
     payment.capturedAmountMinor === payment.expectedAmountMinor && payment.trackerToken !== null;
@@ -188,7 +206,9 @@ export function createPaymentRefundService(
             return { kind: "rejected", code: "IDEMPOTENCY_KEY_CONFLICT" };
           }
           if (code === "P2034" || code === "P2028" || code === "P2024") {
-            return { kind: "rejected", code: "INVALID_INPUT" };
+            // Stage 3 audit, M-8: transaction contention is transient and
+            // retryable — it must not masquerade as INVALID_INPUT (404).
+            return { kind: "rejected", code: "TRANSIENT" };
           }
           return { kind: "rejected", code: "NOT_REFUNDABLE" };
         }
@@ -238,6 +258,13 @@ export function createPaymentRefundService(
             if (amountMinor <= BigInt(0) || amountMinor > remaining) {
               return { kind: "rejected" as const, code: "REFUND_EXCEEDS_REMAINING" as const };
             }
+            // M-27: without an idempotency key there is no operationKey to
+            // replay against, so an identical in-window request returns the
+            // existing parked row instead of queueing a duplicate refund.
+            const duplicate = await tx.paymentRefund.findFirst({ where: { paymentId: input.paymentId,
+              status: "REVIEW_REQUIRED", reviewReason: reason, amountMinor },
+              select: { id: true, status: true } });
+            if (duplicate) return { kind: "existing" as const, refundId: duplicate.id, status: duplicate.status };
             const row = await tx.paymentRefund.create({ data: {
               paymentId: input.paymentId, trackerToken: payment.trackerToken,
               providerEnvironment: payment.providerEnvironment!, merchantAccountRef: payment.merchantAccountRef!,
@@ -262,6 +289,66 @@ export function createPaymentRefundService(
         }
       }
       return { kind: "rejected", code: "NOT_REFUNDABLE" };
+    },
+
+    /**
+     * Post-window release (M-27): REVIEW_REQUIRED refunds parked for the
+     * 24-hour reversal window become submittable once the capture is old
+     * enough for an ordinary refund. Each due row is claimed version-gated
+     * (REVIEW_REQUIRED + REFUND_WINDOW_REVERSAL_24H → REQUESTED) after
+     * re-validating the refundable guard and the remaining balance, so a
+     * row is released exactly once and never submitted twice. Released rows
+     * join the normal due list, so the existing submit path (documented
+     * endpoint, exactly-once claim, no automatic resubmission) handles
+     * them. Rows whose payment is no longer refundable, whose capture is
+     * still inside the window, or whose amount no longer fits the remaining
+     * balance stay parked for manual review.
+     */
+    async releaseDueWindowRefunds(limit = 25): Promise<Array<{ refundId: string; released: boolean }>> {
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid window-release batch size.");
+      // A zero window means this service does not enforce the reversal
+      // window at all (it never parks in-window rows) — it must not
+      // release rows parked under another service's real window either.
+      // The documented 24-hour window is the release threshold for
+      // services that enforce it.
+      if (options.reversalWindowMs <= 0) return [];
+      const now = clock();
+      const parked = await database.$transaction(tx => tx.paymentRefund.findMany({
+        where: { status: "REVIEW_REQUIRED", reviewReason: "REFUND_WINDOW_REVERSAL_24H",
+          providerEnvironment: options.environment, merchantAccountRef: options.merchantAccountRef },
+        orderBy: [{ requestedAt: "asc" }, { id: "asc" }],
+        take: limit,
+        select: { id: true, paymentId: true, amountMinor: true, version: true },
+      }));
+      const results: Array<{ refundId: string; released: boolean }> = [];
+      for (const row of parked) {
+        let released = false;
+        try {
+          released = await database.$transaction(async tx => {
+            const payment = await tx.payment.findUnique({ where: { id: row.paymentId },
+              include: { order: { select: { id: true, paymentFlowVersion: true, paymentMethod: true,
+                currency: true, paymentStatus: true, acceptedPaymentId: true, paymentOwnerOrderId: true } } } });
+            if (!payment || !guardRefundable(payment, payment.order)) return false;
+            const ageMs = now.getTime() - payment.paidVerifiedAt!.getTime();
+            if (ageMs < options.reversalWindowMs) return false;
+            const open = await tx.paymentRefund.findMany({
+              where: { paymentId: payment.id, status: { in: [...openStatuses] }, id: { not: row.id } },
+              select: { amountMinor: true },
+            });
+            const openSum = open.reduce((sum, r) => sum + r.amountMinor, BigInt(0));
+            const remaining = (payment.capturedAmountMinor ?? BigInt(0)) -
+              (payment.refundedAmountMinor ?? BigInt(0)) - openSum;
+            if (row.amountMinor > remaining) return false;
+            return (await tx.paymentRefund.updateMany({ where: { id: row.id, version: row.version,
+              status: "REVIEW_REQUIRED", reviewReason: "REFUND_WINDOW_REVERSAL_24H" },
+            data: { status: "REQUESTED", reviewReason: null, version: { increment: 1 } } })).count === 1;
+          }, { isolationLevel: "Serializable", maxWait: 5_000, timeout: 15_000 });
+        } catch {
+          released = false; // a contended row stays parked; the next sweep retries it
+        }
+        results.push({ refundId: row.id, released });
+      }
+      return results;
     },
 
     /**

@@ -19,6 +19,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ProductImage } from "@/components/products/product-image";
+import { ProductVariantsSection } from "@/components/admin/product-variants-section";
 import { slugify } from "@/lib/utils";
 import {
   adminApiErrorMessage,
@@ -37,8 +38,8 @@ export interface ProductDialogValues {
   comparePrice: number | string | null;
   status: "DRAFT" | "PUBLISHED" | "ARCHIVED";
   isFeatured: boolean;
-  rating: number | string;
-  reviewCount: number | string;
+  // No rating / reviewCount fields: they are calculated from APPROVED
+  // reviews only and must not be editable here.
   tags: string;
   images: string[];
   stock: number | string;
@@ -55,8 +56,6 @@ export const EMPTY_PRODUCT: ProductDialogValues = {
   comparePrice: null,
   status: "PUBLISHED",
   isFeatured: false,
-  rating: 0,
-  reviewCount: 0,
   tags: "",
   images: [],
   stock: 0,
@@ -74,8 +73,6 @@ const INLINE_PRODUCT_ERROR_FIELDS = new Set([
   "description",
   "brand",
   "status",
-  "rating",
-  "reviewCount",
   "tags",
   "stock",
   "lowStockThreshold",
@@ -308,8 +305,6 @@ export function ProductDialog({
           comparePrice: values.comparePrice ? Number(values.comparePrice) : null,
           status: values.status,
           isFeatured: values.isFeatured,
-          rating: Number(values.rating) || 0,
-          reviewCount: Number(values.reviewCount) || 0,
           stock: Number(values.stock) || 0,
           lowStockThreshold: Number(values.lowStockThreshold) || 5,
           tags: values.tags || "",
@@ -591,7 +586,11 @@ export function ProductDialog({
             {errors.images && <p className="mt-1 text-xs text-destructive" role="alert">{errors.images}</p>}
           </div>
 
-          <div className="grid gap-4 rounded-xl border bg-muted/30 p-3 sm:grid-cols-3">
+          {isEdit && initial.id && (
+            <ProductVariantsSection productId={initial.id} productPrice={Number(values.price) || 0} />
+          )}
+
+          <div className="grid gap-4 rounded-xl border bg-muted/30 p-3 sm:grid-cols-2">
             <div>
               <Label htmlFor="pd-status" className="text-xs">Visibility</Label>
               <select id="pd-status" value={values.status} onChange={(e) => set("status", e.target.value as ProductDialogValues["status"])} className={`mt-1.5 ${selectCls}`} aria-invalid={Boolean(errors.status)}>
@@ -601,17 +600,7 @@ export function ProductDialog({
               </select>
               {errors.status && <p className="mt-1 text-xs text-destructive" role="alert">{errors.status}</p>}
             </div>
-            <div>
-              <Label htmlFor="pd-rating" className="text-xs">Display rating (0-5)</Label>
-              <Input id="pd-rating" type="number" min={0} max={5} step={0.1} value={values.rating} onChange={(e) => set("rating", e.target.value)} className="mt-1.5" aria-invalid={Boolean(errors.rating)} />
-              {errors.rating && <p className="mt-1 text-xs text-destructive" role="alert">{errors.rating}</p>}
-            </div>
-            <div>
-              <Label htmlFor="pd-reviews" className="text-xs">Review count</Label>
-              <Input id="pd-reviews" type="number" min={0} value={values.reviewCount} onChange={(e) => set("reviewCount", e.target.value)} className="mt-1.5" aria-invalid={Boolean(errors.reviewCount)} />
-              {errors.reviewCount && <p className="mt-1 text-xs text-destructive" role="alert">{errors.reviewCount}</p>}
-            </div>
-            <label className="flex cursor-pointer items-center gap-2 sm:col-span-3">
+            <label className="flex cursor-pointer items-center gap-2 sm:col-span-2">
               <Checkbox checked={values.isFeatured} onCheckedChange={(c) => set("isFeatured", c === true)} />
               <span className="text-sm">Feature on homepage</span>
             </label>

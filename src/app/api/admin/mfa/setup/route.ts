@@ -17,6 +17,7 @@ import { adminAuditContext } from "@/services/admin-audit.service";
 import {
   MfaAlreadyEnabledError,
   MfaUnavailableError,
+  isAdminMfaConfigured,
   startAdminMfaEnrollment,
 } from "@/services/admin-mfa.service";
 
@@ -26,6 +27,14 @@ export const dynamic = "force-dynamic";
 export async function POST(request: Request) {
   return handleRoute(async () => {
     const user = await requireAdmin();
+    // Config failure is checked BEFORE the limiter: a missing key must
+    // return 503 without burning any of the 3 attempts in the budget.
+    if (!isAdminMfaConfigured()) {
+      return jsonError(
+        "Administrator MFA is not configured on this server. Ask the operator to set ADMIN_MFA_ENCRYPTION_KEY.",
+        503
+      );
+    }
     const ip = clientIp(request.headers);
     const ipLimit = rateLimit(`admin-mfa-setup-ip:${ip}`, 5, 15 * 60 * 1000);
     const userLimit = rateLimit(`admin-mfa-setup-user:${user.id}`, 3, 15 * 60 * 1000);

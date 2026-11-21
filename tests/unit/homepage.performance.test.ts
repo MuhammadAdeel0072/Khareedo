@@ -148,7 +148,8 @@ const catalogProduct = {
   createdAt: new Date("2026-11-04T12:00:00+00:00"),
   category: { name: "Fixture", slug: "fixture" },
   images: [{ url: "/fixture.png" }],
-  inventory: { quantity: 0 },
+  // Inventory is a list now (Chunk 8 — D12): one row per (product, variant).
+  inventory: [{ variantId: null, quantity: 0 }],
 };
 const promotion = {
   id: "offer", title: "Offer", description: null, type: "FIXED", value: 10,
@@ -209,7 +210,7 @@ describe("live homepage catalogue batch", () => {
     dbMock.productFindMany
       .mockResolvedValueOnce([catalogProduct])
       .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([{ ...catalogProduct, price: 2345, inventory: { quantity: 7 } }])
+      .mockResolvedValueOnce([{ ...catalogProduct, price: 2345, inventory: [{ variantId: null, quantity: 7 }] }])
       .mockResolvedValueOnce([]);
     dbMock.promotionFindMany
       .mockResolvedValueOnce([promotion])

@@ -80,6 +80,33 @@ describe("postgresConnectionUrl (src/lib/db.ts)", () => {
     expect(url.searchParams.has("sslrootcert")).toBe(false);
   });
 
+  it("sets a 30s server-side statement timeout on a Supabase pooler URL", async () => {
+    vi.stubEnv("SUPABASE_POSTGRES_URL", POOLER_URL);
+    vi.stubEnv("SUPABASE_DB_CA_CERT", caPath);
+    const { postgresConnectionUrl } = await import("@/lib/db");
+    const url = new URL(postgresConnectionUrl());
+    expect(url.searchParams.get("options")).toBe("-c statement_timeout=30000");
+  });
+
+  it("sets the statement timeout on loopback databases too", async () => {
+    vi.stubEnv("SUPABASE_POSTGRES_URL", LOOPBACK_URL);
+    vi.stubEnv("SUPABASE_DB_CA_CERT", "");
+    const { postgresConnectionUrl } = await import("@/lib/db");
+    const url = new URL(postgresConnectionUrl());
+    expect(url.searchParams.get("options")).toBe("-c statement_timeout=30000");
+  });
+
+  it("an explicit options param in the URL always wins over the default timeout", async () => {
+    vi.stubEnv(
+      "SUPABASE_POSTGRES_URL",
+      `${LOOPBACK_URL}?options=${encodeURIComponent("-c statement_timeout=5000")}`,
+    );
+    vi.stubEnv("SUPABASE_DB_CA_CERT", "");
+    const { postgresConnectionUrl } = await import("@/lib/db");
+    const url = new URL(postgresConnectionUrl());
+    expect(url.searchParams.get("options")).toBe("-c statement_timeout=5000");
+  });
+
   it("requires SUPABASE_POSTGRES_URL", async () => {
     vi.stubEnv("SUPABASE_POSTGRES_URL", "");
     vi.stubEnv("SUPABASE_DB_CA_CERT", "");

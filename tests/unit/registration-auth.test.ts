@@ -4,7 +4,6 @@ const mocks = vi.hoisted(() => ({
   db: { user: { create: vi.fn() } },
   findUserByEmail: vi.fn(),
   sendRegistrationVerification: vi.fn(),
-  isEmailDeliveryConfigured: vi.fn(() => true),
 }));
 
 vi.mock("@/lib/db", () => ({ db: mocks.db }));
@@ -13,10 +12,6 @@ vi.mock("@/services/auth-users.service", () => ({
 }));
 vi.mock("@/services/email-verification.service", () => ({
   sendRegistrationVerification: mocks.sendRegistrationVerification,
-}));
-vi.mock("@/services/email.service", () => ({
-  EmailDeliveryNotConfiguredError: class EmailDeliveryNotConfiguredError extends Error {},
-  isEmailDeliveryConfigured: mocks.isEmailDeliveryConfigured,
 }));
 
 import bcrypt from "bcryptjs";
@@ -31,11 +26,10 @@ const input = {
 describe("customer registration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.isEmailDeliveryConfigured.mockReturnValue(true);
     mocks.sendRegistrationVerification.mockResolvedValue(undefined);
   });
 
-  it("creates a customer with a password hash and sends one verification email", async () => {
+  it("creates a customer with a password hash and enqueues one verification email", async () => {
     mocks.findUserByEmail.mockResolvedValue(null);
     mocks.db.user.create.mockImplementation(async ({ data }) => ({
       id: "customer-1",
@@ -43,7 +37,10 @@ describe("customer registration", () => {
       name: data.name,
     }));
 
-    await expect(registerUser(input, "/checkout")).resolves.toEqual({ ok: true });
+    // Phase 3 Chunk 7 (M-24): registration only enqueues the verification
+    // email in the outbox — it never sends synchronously and never checks
+    // SMTP configuration, so it succeeds whether or not SMTP is reachable.
+    await expect(registerUser(input)).resolves.toEqual({ ok: true });
 
     const createCall = mocks.db.user.create.mock.calls[0][0];
     expect(createCall.data.role).toBe("CUSTOMER");
@@ -52,7 +49,8 @@ describe("customer registration", () => {
     expect(mocks.sendRegistrationVerification).toHaveBeenCalledTimes(1);
     expect(mocks.sendRegistrationVerification).toHaveBeenCalledWith(
       { id: "customer-1", email: input.email, name: input.name },
-      "/checkout"
+      // Chunk 7-final: no callbackUrl was supplied, so null is threaded.
+      null
     );
   });
 
@@ -72,7 +70,8 @@ describe("customer registration", () => {
     expect(mocks.sendRegistrationVerification).toHaveBeenCalledTimes(1);
     expect(mocks.sendRegistrationVerification).toHaveBeenCalledWith(
       { id: existing.id, email: existing.email, name: existing.name },
-      undefined
+      // Chunk 7-final: no callbackUrl was supplied, so null is threaded.
+      null
     );
   });
 
@@ -91,7 +90,11 @@ describe("customer registration", () => {
     expect(mocks.sendRegistrationVerification).not.toHaveBeenCalled();
   });
 
-  it("surfaces email delivery failure and lets the pending account retry", async () => {
+  it("surfaces a verification-enqueue failure and lets the pending account retry", async () => {
+    // The enqueue (not an SMTP send) is what can still fail here — e.g. the
+    // database is unreachable. The user was already created, so the retry
+    // finds the existing unverified account and enqueues again; the user is
+    // never created twice.
     const createdUser = { id: "customer-1", email: input.email, name: input.name };
     mocks.findUserByEmail
       .mockResolvedValueOnce(null)

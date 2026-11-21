@@ -46,7 +46,16 @@ listed here is unverified — do not assume it.
   on the in-process worker (set `PAYMENT_MAINTENANCE_WORKER=off` there).
 - Health is exposed at `GET /api/health` (public, no-store). Errors are
   captured centrally and, when configured, emailed (see
-  `docs/ERROR-MONITORING.md`).
+  `docs/ERROR-MONITORING.md`). The worker health check, monitoring
+  checklist, and recovery procedure are in `docs/WORKER-HEALTH.md` (D15).
+- Process supervision is systemd: `deploy/khareedo.service` runs the
+  standalone server (`bun .next/standalone/server.js`, `NODE_ENV=production`)
+  as a single service, restarts it on failure, and routes logs to the
+  journal (see `docs/WORKER-HEALTH.md` §8). The unit's VPS-specific
+  values (user, checkout path, bun path, env file) are marked
+  **operator to confirm** in the file — it has been syntax-checked
+  locally (`systemd-analyze verify`) but not installed or tested on the
+  VPS, which this repo cannot access.
 - CI is the `Khareedo CI` workflow (`.github/workflows/ci.yml`): `npm ci`,
   both Prisma clients, typecheck, lint, `test:db`, production build.
 
@@ -68,7 +77,18 @@ per-IP features degraded rather than spoofable.
   `ci.yml` (a one-line change; the GitHub App cannot edit workflows, so
   the operator applies it).
 - **Trusted proxy — `TRUSTED_PROXY_IPS`.** Comma-separated list of the
-  production proxy's IPs. The proxy **must overwrite** `X-Forwarded-For`,
+  production proxy's IPs. Accepted entries: a single IPv4 address
+  (`127.0.0.1`), a single IPv6 address (`::1`), or a CIDR range
+  (`10.0.0.0/24` for a proxy subnet; `10.0.0.1/32` means exactly one host
+  and is normalised to the bare IP). Whitespace is tolerated and duplicate
+  entries are removed. Every entry is validated: a hostname, a malformed
+  address, an out-of-range prefix, or a `/0` range (which would trust
+  everyone) is logged with a loud `SECURITY` warning and **ignored — never
+  trusted**. If every entry is invalid, the configuration behaves exactly
+  as if the variable were unset. In production, an unset (or
+  all-invalid) value logs a `SECURITY` warning once per process at
+  startup/first use — log only, the app still boots in its fail-safe
+  posture. The proxy **must overwrite** `X-Forwarded-For`,
   `X-Real-IP`, `X-Forwarded-Host` and `X-Forwarded-Proto` (not append to
   them — the Caddyfile does overwrite them, if it is the proxy). When
   `TRUSTED_PROXY_IPS` is unset, forwarded headers are **ignored**: every
@@ -79,6 +99,29 @@ per-IP features degraded rather than spoofable.
   variable to the production proxy's IPs as soon as the proxy is named.
   See `src/lib/trusted-proxy.ts`, `src/lib/rate-limit.ts` (`clientIp`),
   `src/lib/request-origin.ts`.
+  - **Operator steps (once the production proxy is named — Q-01, still
+    open; no proxy IP has been supplied yet, so do not guess one):**
+    1. Find the proxy's IP(s) as the app sees them: if the proxy runs on
+       the same host as the app (Caddy on the VPS), that is `127.0.0.1`;
+       if it is a separate host, use that host's private IP; for several
+       proxies on one subnet, use the subnet CIDR (only if the subnet
+       contains proxies and nothing else).
+    2. Confirm the proxy overwrites the four forwarded headers (step
+       above) — in the Caddyfile those are the `header_up` lines. A
+       proxy that appends must be fixed first; otherwise a client can
+       spoof its own IP into the front of `X-Forwarded-For`.
+    3. Set the value in the production environment file (the systemd
+       unit's `EnvironmentFile`): e.g.
+       `TRUSTED_PROXY_IPS="127.0.0.1"` — an example only, replace it
+       with the real proxy IP(s). Never put a client IP, a public range,
+       or `0.0.0.0/0` here.
+    4. Restart the service (`sudo systemctl restart khareedo`) and check
+       the journal (`journalctl -u khareedo`): no `[trusted-proxy]`
+       warning means the value parsed cleanly; a warning names the
+       invalid entries that were ignored.
+    5. Verify end to end: requests through the proxy from two different
+       client IPs must be recorded under distinct client IPs (e.g. in
+       the admin audit log), not both as `"unknown"`.
 - **Rate limits are per instance** (in-memory). The login limiter
   (10/min per IP + 5/min per email hash, failures only), the API limits
   (quote/cart/wishlist 60/min per IP; upload 10/min, import 5/min,

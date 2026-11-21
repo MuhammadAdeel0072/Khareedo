@@ -8,7 +8,7 @@ import Link from "next/link";
 import { Search, X } from "lucide-react";
 import { adminListOrders } from "@/services/orders.service";
 import { formatPKR, formatDate } from "@/lib/utils";
-import { ORDER_STATUSES, STATUS_BADGE_CLASSES } from "@/lib/constants";
+import { ORDER_STATUSES, PAYMENT_STATUSES, STATUS_BADGE_CLASSES } from "@/lib/constants";
 import { ExportButtons } from "@/components/admin/export-buttons";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -24,29 +24,45 @@ export default async function AdminOrdersPage({
 }) {
   const params = await searchParams;
   const status = typeof params.status === "string" ? params.status : "";
+  const rawPaymentStatus = typeof params.paymentStatus === "string" ? params.paymentStatus : "";
+  const paymentStatus = (PAYMENT_STATUSES as readonly string[]).includes(rawPaymentStatus)
+    ? rawPaymentStatus
+    : "";
   const q = typeof params.q === "string" ? params.q.trim() : "";
   const page = Number(typeof params.page === "string" ? params.page : "1") || 1;
 
-  const result = await adminListOrders({ status: status || undefined, q: q || undefined, page });
+  const result = await adminListOrders({
+    status: status || undefined,
+    paymentStatus: paymentStatus || undefined,
+    q: q || undefined,
+    page,
+  });
 
   // Builds a URL from explicit parts only — nothing is carried over unless it
   // is passed in, so no filter can silently leak into another view (the root
   // cause of the previous "All kept showing the searched order" bug).
-  const buildUrl = (parts: { q?: string; status?: string; page?: number }) => {
+  const buildUrl = (parts: { q?: string; status?: string; paymentStatus?: string; page?: number }) => {
     const sp = new URLSearchParams();
     const effectiveQ = parts.q !== undefined ? parts.q : q;
     const effectiveStatus = parts.status !== undefined ? parts.status : status;
+    const effectivePaymentStatus =
+      parts.paymentStatus !== undefined ? parts.paymentStatus : paymentStatus;
     if (effectiveQ) sp.set("q", effectiveQ);
     if (effectiveStatus) sp.set("status", effectiveStatus);
+    if (effectivePaymentStatus) sp.set("paymentStatus", effectivePaymentStatus);
     if (parts.page && parts.page > 1) sp.set("page", String(parts.page));
     const qs = sp.toString();
     return qs ? `/admin/orders?${qs}` : "/admin/orders";
   };
 
-  const scopeQuery = [q ? `q=${encodeURIComponent(q)}` : "", status ? `status=${encodeURIComponent(status)}` : ""]
+  const scopeQuery = [
+    q ? `q=${encodeURIComponent(q)}` : "",
+    status ? `status=${encodeURIComponent(status)}` : "",
+    paymentStatus ? `paymentStatus=${encodeURIComponent(paymentStatus)}` : "",
+  ]
     .filter(Boolean)
     .join("&");
-  const hasActiveFilters = Boolean(q || status);
+  const hasActiveFilters = Boolean(q || status || paymentStatus);
 
   return (
     <div className="p-4 sm:p-6">
@@ -61,6 +77,7 @@ export default async function AdminOrdersPage({
               </>
             ) : null}
             {status ? <> with status <span className="font-semibold text-foreground">{status.toLowerCase()}</span></> : null}
+            {paymentStatus ? <> with payment <span className="font-semibold text-foreground">{paymentStatus.toLowerCase()}</span></> : null}
             {result.pages > 1 ? <> · showing page {result.page} of {result.pages}</> : null}
           </p>
         </div>
@@ -83,13 +100,36 @@ export default async function AdminOrdersPage({
           </div>
           <Button type="submit" variant="secondary">Search</Button>
         </form>
+        {/* Payment filter (M-31): a plain GET form, no client JS — the select
+            carries the active search/status along so filtering never drops them. */}
+        <form action="/admin/orders" method="get" className="flex items-center gap-2" aria-label="Payment filter">
+          {q && <input type="hidden" name="q" value={q} />}
+          {status && <input type="hidden" name="status" value={status} />}
+          <label htmlFor="paymentStatus" className="text-xs font-semibold text-muted-foreground">
+            Payment
+          </label>
+          <select
+            id="paymentStatus"
+            name="paymentStatus"
+            defaultValue={paymentStatus}
+            className="h-9 rounded-md border border-input bg-card px-2 text-sm"
+          >
+            <option value="">All payments</option>
+            {PAYMENT_STATUSES.map((p) => (
+              <option key={p} value={p}>
+                {p.charAt(0) + p.slice(1).toLowerCase()}
+              </option>
+            ))}
+          </select>
+          <Button type="submit" variant="secondary" size="sm">Filter</Button>
+        </form>
         <div className="flex flex-wrap gap-1 rounded-lg border bg-card p-1" role="tablist" aria-label="Status filter">
           {/* ALL — a true reset: clears search, status and pagination. */}
           <Link
             href="/admin/orders"
             role="tab"
-            aria-selected={!q && !status}
-            className={`rounded-md px-2.5 py-1.5 text-xs font-semibold ${!q && !status ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
+            aria-selected={!q && !status && !paymentStatus}
+            className={`rounded-md px-2.5 py-1.5 text-xs font-semibold ${!q && !status && !paymentStatus ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
           >
             All
           </Link>
@@ -107,22 +147,37 @@ export default async function AdminOrdersPage({
         </div>
       </div>
 
-      {q && (
+      {(q || paymentStatus) && (
         <div className="mb-4 flex flex-wrap items-center gap-2">
-          <span className="inline-flex items-center gap-1.5 rounded-full bg-primary/10 px-3 py-1 text-xs font-semibold text-primary">
-            Search: &ldquo;{q}&rdquo;
-            <Link
-              href={buildUrl({ q: "", page: 1 })}
-              className="ml-0.5 rounded-full p-0.5 hover:bg-primary/20"
-              aria-label={`Clear search “${q}” and show all ${status ? `${status.toLowerCase()} ` : ""}orders`}
-              title="Clear search"
-            >
-              <X className="h-3.5 w-3.5" aria-hidden="true" />
-            </Link>
-          </span>
+          {q && (
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-primary/10 px-3 py-1 text-xs font-semibold text-primary">
+              Search: &ldquo;{q}&rdquo;
+              <Link
+                href={buildUrl({ q: "", page: 1 })}
+                className="ml-0.5 rounded-full p-0.5 hover:bg-primary/20"
+                aria-label={`Clear search “${q}” and show all ${status ? `${status.toLowerCase()} ` : ""}orders`}
+                title="Clear search"
+              >
+                <X className="h-3.5 w-3.5" aria-hidden="true" />
+              </Link>
+            </span>
+          )}
           {status && (
             <span className="inline-flex items-center rounded-full bg-muted px-3 py-1 text-xs font-semibold text-muted-foreground">
               Status: {status.toLowerCase()}
+            </span>
+          )}
+          {paymentStatus && (
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-muted px-3 py-1 text-xs font-semibold text-muted-foreground">
+              Payment: {paymentStatus.toLowerCase()}
+              <Link
+                href={buildUrl({ paymentStatus: "", page: 1 })}
+                className="ml-0.5 rounded-full p-0.5 hover:bg-muted-foreground/20"
+                aria-label="Clear payment filter"
+                title="Clear payment filter"
+              >
+                <X className="h-3.5 w-3.5" aria-hidden="true" />
+              </Link>
             </span>
           )}
         </div>

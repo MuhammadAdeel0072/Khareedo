@@ -5,6 +5,9 @@ import { assertDisposableTestDatabase } from "../helpers/disposable-sqlite.mjs";
 
 const visitor = vi.hoisted(() => ({ key: undefined as string | undefined, userId: undefined as string | undefined }));
 vi.mock("@/lib/auth-guard", () => ({
+  // Cart paths read the session through getSessionUser() (PR-25); the old
+  // getRequestSession mock went stale when the service switched over.
+  getSessionUser: async () => visitor.userId ? { id: visitor.userId } : null,
   getRequestSession: async () => visitor.userId ? { user: { id: visitor.userId } } : null,
 }));
 vi.mock("next/headers", () => ({
@@ -23,7 +26,7 @@ vi.mock("@/lib/db", async () => {
 });
 
 import { db } from "@/lib/db";
-import { addToCart, getCartCount, getCartDetails, removeCartItem, setCartItemGiftWrap, updateCartItem } from "@/services/cart.service";
+import { addToCart, getCartCount, getCartDetails, removeCartItem, setCartItemGiftWrap, applyCartItemUpdate } from "@/services/cart.service";
 import { getCategoryTree, getCategoriesWithCounts } from "@/services/categories.service";
 
 // Real SQL tests are opt-in through a marked temporary database, never .env.
@@ -67,7 +70,7 @@ describe.skipIf(process.env.KHAREEDO_DISPOSABLE_SQLITE_TEST !== "1")("cart/categ
     visitor.key = randomUUID();
     expect(await getCartDetails()).toBeNull();
     const cart = await guestCart();
-    expect(await getCartDetails()).toEqual({ id: cart.id, items: [], itemCount: 0, subtotal: 0, wrappedUnits: 0 });
+    expect(await getCartDetails()).toEqual({ id: cart.id, items: [], itemCount: 0, subtotal: 0, wrappedUnits: 0, removed: [] });
     expect(await getCartCount()).toBe(0);
   });
 
@@ -86,20 +89,28 @@ describe.skipIf(process.env.KHAREEDO_DISPOSABLE_SQLITE_TEST !== "1")("cart/categ
     const originalOrder = await db.cartItem.findMany({ where: { cartId: cart.id } });
     const details = await getCartDetails();
     expect(details).toMatchObject({ id: cart.id, itemCount: 5, subtotal: 3950, wrappedUnits: 3 });
-    expect(details!.items.map(item => item.productId)).toEqual(originalOrder
-      .filter(item => item.productId !== draft.id && item.productId !== deleted.id).map(item => item.productId));
+    // Phase 3, M-13: stale lines are dropped on load and reported — the
+    // sold-out, no-inventory, draft and deleted lines are gone from the
+    // cart (and from the database), named in `removed`, and only the live
+    // lines remain, in original order.
+    expect(details!.items.map(item => item.productId)).toEqual([wrapped.id, normal.id]);
+    expect(details!.removed.map(line => line.productId).sort()).toEqual(
+      [soldOut.id, noInventory.id, draft.id, deleted.id].sort()
+    );
+    expect(await db.cartItem.count({ where: { cartId: cart.id } })).toBe(2);
     expect(details!.items.find(item => item.productId === wrapped.id)).toEqual({
       itemId: originalOrder.find(item => item.productId === wrapped.id)!.id,
-      productId: wrapped.id, name: wrapped.name, slug: wrapped.slug,
-      price: 1250, comparePrice: 1500, image: "/first.png", quantity: 8,
-      stock: 3, lowStock: true, outOfStock: false, lineTotal: 3750, priceChanged: false, giftWrap: true,
+      productId: wrapped.id, variantId: null, variantLabel: null,
+      name: wrapped.name, slug: wrapped.slug,
+      price: 1250, comparePrice: 1500, image: "/first.png", quantity: 3,
+      stock: 3, lowStock: true, outOfStock: false, lineTotal: 3750, giftWrap: true,
     });
     expect(details!.items.find(item => item.productId === normal.id)).toMatchObject({ lowStock: false, lineTotal: 200 });
-    for (const id of [soldOut.id, noInventory.id]) {
-      expect(details!.items.find(item => item.productId === id)).toMatchObject({ quantity: 2, stock: 0, outOfStock: true, lowStock: false, lineTotal: 0 });
-    }
     expect(await getCartCount()).toBe(details!.itemCount);
-    expect(await addToCart(normal.id, 99)).toEqual({ itemCount: 13 });
+    // Phase 3, H-8 (Chunk 1): adding beyond stock throws instead of silently
+    // clamping — the old assertion (itemCount 13) pinned the clamp.
+    await expect(addToCart(normal.id, 99)).rejects.toThrow("Only 10 unit(s) available in stock");
+    expect(await getCartCount()).toBe(5);
   });
 
   it("reads updated prices and inventory instead of a global customer cache", async () => {
@@ -108,7 +119,7 @@ describe.skipIf(process.env.KHAREEDO_DISPOSABLE_SQLITE_TEST !== "1")("cart/categ
     await db.cartItem.create({ data: { cartId: cart.id, productId: p.id, quantity: 3, giftWrap: true } });
     expect((await getCartDetails())!.subtotal).toBe(3750);
     await db.product.update({ where: { id: p.id }, data: { price: 2000 } });
-    await db.inventory.update({ where: { productId: p.id }, data: { quantity: 1 } });
+    await db.inventory.updateMany({ where: { productId: p.id, variantId: null }, data: { quantity: 1 } });
     expect(await getCartDetails()).toMatchObject({ subtotal: 2000, itemCount: 1, wrappedUnits: 1 });
     expect(await getCartCount()).toBe(1);
   });
@@ -151,9 +162,9 @@ describe.skipIf(process.env.KHAREEDO_DISPOSABLE_SQLITE_TEST !== "1")("cart/categ
     const p = await product();
     expect(await addToCart(p.id, 2)).toEqual({ itemCount: 2 });
     const item = await db.cartItem.findFirstOrThrow({ where: { cartId: cart.id } });
-    await expect(updateCartItem(item.id, 4)).rejects.toThrow("Only 3 unit(s) available in stock");
+    await expect(applyCartItemUpdate(item.id, { quantity: 4 })).rejects.toThrow("Only 3 unit(s) available in stock");
     expect(await setCartItemGiftWrap(item.id, true)).toMatchObject({ wrappedUnits: 2 });
-    expect(await updateCartItem(item.id, 1)).toMatchObject({ itemCount: 1, wrappedUnits: 1 });
+    expect(await applyCartItemUpdate(item.id, { quantity: 1 })).toMatchObject({ itemCount: 1, wrappedUnits: 1 });
     expect(await removeCartItem(item.id)).toMatchObject({ items: [], itemCount: 0, subtotal: 0 });
   });
 
@@ -162,7 +173,7 @@ describe.skipIf(process.env.KHAREEDO_DISPOSABLE_SQLITE_TEST !== "1")("cart/categ
     const p = await product();
     const item = await db.cartItem.create({ data: { cartId: other.id, productId: p.id, quantity: 1 } });
     await guestCart();
-    await expect(updateCartItem(item.id, 1)).rejects.toThrow("Cart item not found");
+    await expect(applyCartItemUpdate(item.id, { quantity: 1 })).rejects.toThrow("Cart item not found");
     await expect(setCartItemGiftWrap(item.id, true)).rejects.toThrow("Cart item not found");
     await removeCartItem(item.id);
     expect(await db.cartItem.findUnique({ where: { id: item.id } })).not.toBeNull();
@@ -186,25 +197,32 @@ describe.skipIf(process.env.KHAREEDO_DISPOSABLE_SQLITE_TEST !== "1")("cart/categ
     }));
     await db.product.createMany({ data: products });
     await db.cartItem.createMany({ data: products.map(p => ({ cartId: cart.id, productId: p.id, quantity: 1 })) });
+    // Phase 3, M-13: lines without inventory are dropped on load (stock 0),
+    // so the bulk products get stock here — the test's point is that the
+    // batched read does not truncate at 1000 rows, not that unavailable
+    // lines are kept.
+    await db.inventory.createMany({ data: products.map(p => ({ productId: p.id, quantity: 10 })) });
     const details = await getCartDetails();
     expect(details!.items).toHaveLength(1001);
-    expect(details!.itemCount).toBe(0); // Missing inventory remains unavailable.
+    expect(details!.itemCount).toBe(1001);
+    expect(details!.removed).toEqual([]);
     expect(new Set(details!.items.map(item => item.productId))).toEqual(new Set(products.map(p => p.id)));
   });
 
-  it("preserves active roots, direct-child sorting and the existing two-level navigation", async () => {
+  it("preserves active roots, direct-child sorting and the recursive navigation tree", async () => {
     const suffix = randomUUID();
     const root = await db.category.create({ data: { name: "Root", slug: `root-${suffix}`, sortOrder: 5 } });
     const first = await db.category.create({ data: { name: "First", slug: `first-${suffix}`, sortOrder: 1, parentId: root.id, description: "Description", imageUrl: "/child.png" } });
     const last = await db.category.create({ data: { name: "Last", slug: `last-${suffix}`, sortOrder: 9, parentId: root.id } });
     await db.category.create({ data: { name: "Hidden", slug: `hidden-${suffix}`, sortOrder: 0, parentId: root.id, isActive: false } });
-    await db.category.create({ data: { name: "Grandchild", slug: `grand-${suffix}`, parentId: first.id } });
+    const grandchild = await db.category.create({ data: { name: "Grandchild", slug: `grand-${suffix}`, parentId: first.id } });
     const inactive = await db.category.create({ data: { name: "Inactive", slug: `inactive-${suffix}`, isActive: false } });
     const orphan = await db.category.create({ data: { name: "Orphan", slug: `orphan-${suffix}`, parentId: inactive.id } });
     const tree = await getCategoryTree();
     const node = tree.find(category => category.id === root.id)!;
     expect(node.children.map(child => child.id)).toEqual([first.id, last.id]);
-    expect(node.children[0]).toEqual({ id: first.id, name: "First", slug: first.slug, description: "Description", imageUrl: "/child.png", children: [] });
+    // Grandchildren are no longer dropped: the tree is recursive (Phase 3).
+    expect(node.children[0]).toEqual({ id: first.id, name: "First", slug: first.slug, description: "Description", imageUrl: "/child.png", children: [{ id: grandchild.id, name: "Grandchild", slug: grandchild.slug, description: null, imageUrl: null, children: [] }] });
     expect(tree.some(category => category.id === inactive.id || category.id === orphan.id)).toBe(false);
   });
 
@@ -217,6 +235,8 @@ describe.skipIf(process.env.KHAREEDO_DISPOSABLE_SQLITE_TEST !== "1")("cart/categ
     const empty = await db.category.create({ data: { name: `empty-${suffix}`, slug: `empty-${suffix}` } });
     const list = await getCategoriesWithCounts();
     expect(list.find(category => category.id === active.id)?.productCount).toBe(1);
-    expect(list.some(category => category.id === empty.id)).toBe(false);
+    // Empty categories are listed too (productCount 0) so the sidebar filter
+    // matches the navigation, which shows them (Phase 3).
+    expect(list.find(category => category.id === empty.id)?.productCount).toBe(0);
   });
 });

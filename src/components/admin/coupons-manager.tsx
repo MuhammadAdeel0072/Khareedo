@@ -31,6 +31,8 @@ export interface AdminCoupon {
   value: number;
   minOrderAmount: number;
   maxUses: number | null;
+  maxDiscountAmount: number | null;
+  firstOrderOnly: boolean;
   usedCount: number;
   startsAt: string | null;
   expiresAt: string | null;
@@ -45,6 +47,8 @@ interface Draft {
   value: number | string;
   minOrderAmount: number | string;
   maxUses: number | string;
+  maxDiscountAmount: number | string;
+  firstOrderOnly: boolean;
   startsAt: string;
   expiresAt: string;
   isActive: boolean;
@@ -65,7 +69,7 @@ export function CouponsManager({ initial }: { initial: AdminCoupon[] }) {
 
   function openCreate() {
     setErrors({});
-    setDraft({ id: null, code: "", description: "", type: "PERCENT", value: "", minOrderAmount: 0, maxUses: "", startsAt: "", expiresAt: "", isActive: true });
+    setDraft({ id: null, code: "", description: "", type: "PERCENT", value: "", minOrderAmount: 0, maxUses: "", maxDiscountAmount: "", firstOrderOnly: false, startsAt: "", expiresAt: "", isActive: true });
   }
   function openEdit(c: AdminCoupon) {
     setErrors({});
@@ -77,6 +81,8 @@ export function CouponsManager({ initial }: { initial: AdminCoupon[] }) {
       value: c.value,
       minOrderAmount: c.minOrderAmount,
       maxUses: c.maxUses ?? "",
+      maxDiscountAmount: c.maxDiscountAmount ?? "",
+      firstOrderOnly: c.firstOrderOnly,
       startsAt: toInputDate(c.startsAt),
       expiresAt: toInputDate(c.expiresAt),
       isActive: c.isActive,
@@ -98,6 +104,8 @@ export function CouponsManager({ initial }: { initial: AdminCoupon[] }) {
             value: Number(draft.value) || 0,
             minOrderAmount: Number(draft.minOrderAmount) || 0,
             maxUses: draft.maxUses ? Number(draft.maxUses) : null,
+            maxDiscountAmount: draft.maxDiscountAmount ? Number(draft.maxDiscountAmount) : null,
+            firstOrderOnly: draft.firstOrderOnly,
             startsAt: draft.startsAt || "",
             expiresAt: draft.expiresAt || "",
             isActive: draft.isActive,
@@ -171,9 +179,11 @@ export function CouponsManager({ initial }: { initial: AdminCoupon[] }) {
                   <td className="px-4 py-3">
                     <p className="font-mono font-bold">{c.code}</p>
                     {c.description && <p className="text-xs text-muted-foreground">{c.description}</p>}
+                    {c.firstOrderOnly && <p className="text-xs font-medium text-primary">First order only</p>}
                   </td>
                   <td className="px-4 py-3 font-semibold text-primary">
                     {c.type === "PERCENT" ? `${c.value}%` : formatPKR(c.value)}
+                    {c.maxDiscountAmount ? <span className="block text-xs font-normal text-muted-foreground">max {formatPKR(c.maxDiscountAmount)}</span> : null}
                   </td>
                   <td className="px-4 py-3">{c.minOrderAmount > 0 ? formatPKR(c.minOrderAmount) : "—"}</td>
                   <td className="px-4 py-3">
@@ -249,12 +259,18 @@ export function CouponsManager({ initial }: { initial: AdminCoupon[] }) {
                 <Input type="number" min={1} value={draft.maxUses} onChange={(e) => setDraft({ ...draft, maxUses: e.target.value })} placeholder="Unlimited" className="mt-1.5" />
               </div>
               <div>
+                <Label>Max discount (PKR, optional)</Label>
+                <Input type="number" min={1} value={draft.maxDiscountAmount} onChange={(e) => setDraft({ ...draft, maxDiscountAmount: e.target.value })} placeholder="No cap" className="mt-1.5" aria-invalid={Boolean(errors.maxDiscountAmount)} />
+                {errors.maxDiscountAmount && <p className="mt-1 text-xs text-destructive" role="alert">{errors.maxDiscountAmount}</p>}
+              </div>
+              <div>
                 <Label>Start date</Label>
                 <Input type="date" value={draft.startsAt} onChange={(e) => setDraft({ ...draft, startsAt: e.target.value })} className="mt-1.5" />
               </div>
               <div>
                 <Label>Expiry date</Label>
-                <Input type="date" value={draft.expiresAt} onChange={(e) => setDraft({ ...draft, expiresAt: e.target.value })} className="mt-1.5" />
+                <Input type="date" value={draft.expiresAt} onChange={(e) => setDraft({ ...draft, expiresAt: e.target.value })} className="mt-1.5" aria-invalid={Boolean(errors.expiresAt)} />
+                {errors.expiresAt && <p className="mt-1 text-xs text-destructive" role="alert">{errors.expiresAt}</p>}
               </div>
               <div className="sm:col-span-2">
                 <Label>Description</Label>
@@ -263,6 +279,10 @@ export function CouponsManager({ initial }: { initial: AdminCoupon[] }) {
               <label className="flex cursor-pointer items-center gap-2 sm:col-span-2">
                 <Checkbox checked={draft.isActive} onCheckedChange={(c) => setDraft({ ...draft, isActive: c === true })} />
                 <span className="text-sm">Active — usable at checkout</span>
+              </label>
+              <label className="flex cursor-pointer items-center gap-2 sm:col-span-2">
+                <Checkbox checked={draft.firstOrderOnly} onCheckedChange={(c) => setDraft({ ...draft, firstOrderOnly: c === true })} />
+                <span className="text-sm">First order only — only usable on a customer&apos;s first order</span>
               </label>
               {errors._ && <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive sm:col-span-2" role="alert">{errors._}</p>}
               <div className="flex justify-end gap-2 sm:col-span-2">
