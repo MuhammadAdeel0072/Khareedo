@@ -182,6 +182,7 @@ function selectTestFiles(arguments_) {
         "tests/unit/integration.email-outbox.test.ts",
         "tests/unit/integration.order-emails.test.ts",
         "tests/unit/integration.admin-mfa.test.ts",
+        "tests/unit/integration.admin-mfa-reset.test.ts",
         "tests/unit/integration.admin-audit.test.ts",
         "tests/unit/integration.catalogue.test.ts",
         "tests/unit/integration.cart.test.ts",

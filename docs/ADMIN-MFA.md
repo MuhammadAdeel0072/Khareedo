@@ -292,29 +292,163 @@ key casually, and never rotate it to "fix" a forgotten key — if the
 current key is lost, the enrolled secrets are already unrecoverable and
 the same break-glass + re-enrollment path applies.
 
+## Authenticator recovery — diagnosing a "wrong code" first
+
+No email inbox is required for TOTP authentication, and losing access to
+an email address never locks an admin out of MFA: the authenticator app
+and the recovery codes are the only second factors, and neither involves
+email. Before resetting anything, work out which failure you are seeing —
+a reset is only the answer when the authenticator and the recovery codes
+are both truly gone:
+
+- **503 "Administrator MFA is not configured on this server"** — the
+  server has no valid `ADMIN_MFA_ENCRYPTION_KEY` (missing, or not 32
+  bytes when base64-decoded). No code can verify until the key is set
+  (see "Configuration — operator runbook" above). A reset will **not**
+  fix this: after a reset, enrollment itself returns 503. Set the key
+  first, then re-test.
+- **400 "That code is not valid"** — the key loads, but the code does
+  not match the stored secret. Candidates, in order: the authenticator
+  was never actually enrolled (scanning the QR code with a camera app
+  such as Google Camera does **not** save a TOTP credential — the code
+  must be scanned with Google Authenticator, Microsoft Authenticator,
+  or Authy, or the manual key entered in one of those apps); the phone
+  or server clock is more than ~30 seconds out (the window is the
+  current step ± 1); the code was already used for this 30-second step
+  (replay protection); or the key is present but **wrong** (rotated, or
+  another environment's key — decryption fails and the error is
+  indistinguishable from a wrong code, by design).
+- **429** — too many failed attempts (5 per 15 minutes on verify).
+  Wait out the window; the budget restores in full.
+- **401 `SESSION_REBIND_REQUIRED`** — the session predates session-id
+  binding. Sign out and sign in again.
+
+Also try an unused recovery code, typed **with its hyphen**
+(`XXXXX-XXXXX`, 11 characters): a code typed without the hyphen falls
+through to the TOTP check and fails. If a recovery code works but TOTP
+codes do not, the problem is the secret, the key, or the clock — not
+the account. Recovery codes are the only fallback when the
+authenticator is lost, and only their SHA-256 hashes are stored, so a
+lost code cannot be looked up or re-displayed.
+
 ## Break-glass: an admin loses both authenticator and recovery codes
 
 There is deliberately no self-service MFA reset (that would be an
 authentication bypass). If an admin loses their authenticator **and** all
-recovery codes, an operator with database access must disable MFA for that
-admin directly:
+recovery codes, an operator must reset MFA for that admin with the
+break-glass script — never by hand-editing the database if the script
+is available:
+
+```powershell
+# 1. Dry run first — read-only, prints what would be deleted, writes nothing.
+ADMIN_MFA_RESET_ALLOW=1 npx tsx --env-file=.env scripts/reset-admin-mfa.ts --email admin@khareedo.pk --dry-run
+
+# 2. Only after verifying the admin's identity out-of-band (below) and
+#    confirming the dry-run output names the right admin, perform the reset.
+ADMIN_MFA_RESET_ALLOW=1 npx tsx --env-file=.env scripts/reset-admin-mfa.ts --email admin@khareedo.pk --apply --confirm
+```
+
+(`bun scripts/reset-admin-mfa.ts ...` works the same way. `tsx` does not
+auto-load `.env`, hence `--env-file=.env`. The script needs the generated
+Postgres client first: `npm run db:generate:postgres`.)
+
+### What the script does
+
+`scripts/reset-admin-mfa.ts` is a thin CLI wrapper around
+`src/lib/admin-mfa-reset.ts`. It deletes **only** the `AdminMfa` row for
+the named admin (its recovery codes cascade-delete with it) and writes
+one `AdminAuditLog` row (`admin.mfa.reset`) in the same transaction, so
+a failed reset never leaves a false audit record. The admin `User` row,
+password, and every other row are untouched. After the reset the admin
+signs in with their password and is redirected to `/admin/mfa/setup` to
+enroll a fresh authenticator — MFA stays mandatory; there is no bypass.
+
+### Required operator verification
+
+1. Verify the admin's identity **out-of-band** before running
+   `--apply` (for example, a known phone number or in-person
+   confirmation). Nothing in the script can do this for you.
+2. Run `--dry-run` first and check it names the right email and user
+   id. The script refuses when the account does not exist, when more
+   than one account matches, when the account is not an `ADMIN`, or
+   when there is no MFA enrollment to reset.
+3. Confirm `ADMIN_MFA_ENCRYPTION_KEY` is set and valid on the server
+   **before** resetting — otherwise the admin re-locks at setup with
+   a 503 (see "Authenticating recovery" above).
+
+### Database-target safeguards
+
+- The script uses `SUPABASE_POSTGRES_URL` only and **never** reads
+  `DATABASE_URL`, so the local SQLite database can never be the target
+  by accident. A `file:` URL, a loopback/local host, or any
+  non-Supabase host refuses.
+- The URL must be a Supabase host (`.pooler.supabase.com` or
+  `.supabase.co`) **and** match the project named by
+  `NEXT_PUBLIC_SUPABASE_URL` (the same project-match check as the
+  Postgres migration deploy script). A different Supabase project
+  refuses.
+- The reset requires `ADMIN_MFA_RESET_ALLOW=1` exactly on every run
+  and, for `--apply`, an explicit `--confirm` flag. `--dry-run` is the
+  default. There is no persistent "reset enabled" state.
+- The script prints only the target hostname (never the connection
+  URL), the admin email, the user id, the MFA row id, and code counts.
+  It never prints secrets, passwords, hashes, TOTP secrets, recovery
+  codes, or database credentials.
+
+### Post-reset enrollment
+
+After the reset, the admin signs in with their password and is sent to
+`/admin/mfa/setup`. They must scan the new QR code **with an
+authenticator app** (Google Authenticator, Microsoft Authenticator, or
+Authy — not a camera app) or enter the manual key in one of those apps,
+then enter the first code to activate. Activation issues 10 fresh
+recovery codes, shown **once** — the admin must save them (for example,
+in a password manager) before continuing. Until activation completes,
+the admin cannot reach the admin panel; that is the intended
+enforcement.
+
+### Audit
+
+Every scripted reset writes one append-only `AdminAuditLog` row
+(action `admin.mfa.reset`, target `AdminMfa` / the admin's user id,
+actor `null` — the actor is the shell operator, not a signed-in admin).
+It is visible in the admin audit-log viewer and via
+`GET /api/admin/audit-log?action=admin.mfa.reset`. The metadata carries
+only the email, the fixed reason, the method, and the count of codes
+deleted — never a secret or code.
+
+### Raw-SQL fallback (only if the script cannot run)
+
+If the script itself cannot run (for example, the generated Postgres
+client cannot be built), the same effect can be achieved with raw SQL
+against the **Supabase** database only, after the same out-of-band
+identity verification — and the operator must then insert the audit row
+by hand, because raw SQL bypasses the app entirely:
 
 ```sql
--- Find the admin's MFA row, then delete it (recovery codes cascade).
+-- Find the admin's id first, and confirm it is the right admin.
+SELECT "id", "email", "role" FROM "User" WHERE "email" = 'admin@khareedo.pk';
+-- Then delete only that admin's MFA row (recovery codes cascade).
 DELETE FROM "AdminMfa" WHERE "userId" = '<admin user id>';
 ```
 
-After this, the admin signs in with their password and is redirected to
-`/admin/mfa/setup` to enroll again with a new secret. Verify the admin's
-identity out-of-band before doing this, and record the action in the
-operator's runbook. (Append-only admin audit logging is PR-12; until then,
-record break-glass resets in the operator's own log.)
+Never run this against the local SQLite database (`DATABASE_URL`) and
+never substitute another admin's id. Prefer the script whenever
+possible: it performs the lookup, the guards, and the audit write for
+you.
 
 ## Files
 
 - `src/lib/totp.ts` — TOTP (RFC 6238) + base32, from scratch on Node crypto.
 - `src/services/admin-mfa.service.ts` — enrollment, activation,
   verification, recovery codes, disablement, AES-256-GCM secret encryption.
+- `src/lib/admin-mfa-reset.ts` — operator break-glass reset: Supabase
+  project-match target guard, `ADMIN_MFA_RESET_ALLOW=1` opt-in,
+  dry-run-by-default, exact-email admin targeting, transactional
+  `AdminMfa` delete + `admin.mfa.reset` audit write. Never touches the
+  `User` row and never prints secrets.
+- `scripts/reset-admin-mfa.ts` — thin CLI wrapper for the reset
+  (`--email`, `--dry-run` / `--apply --confirm`).
 - `src/lib/auth-guard.ts` — `requireAdminMfaVerified()`,
   `isMfaVerifiedForSession()`, `MfaRequiredError`.
 - `src/lib/api.ts` — `handleRoute` includes the MFA error code in the
@@ -369,6 +503,16 @@ record break-glass resets in the operator's own log.)
   invalid first code leaves MFA disabled; session binding (verification
   in one session does not verify another, no-sid verification fails
   closed, activation binds the activating session).
+- `tests/unit/admin-mfa-reset.test.ts`: the break-glass reset — Supabase
+  target guard (missing URL, SQLite `file:` URL, loopback, non-Supabase
+  host, project mismatch), opt-in, dry-run/apply modes, exact-email
+  targeting (unknown / ambiguous / non-admin / no enrollment), dry-run
+  writes nothing, apply deletes only the MFA row and records the
+  `admin.mfa.reset` audit event, no secrets in results or audit metadata.
+- `tests/unit/integration.admin-mfa-reset.test.ts`: the same reset
+  against the real Prisma layer on a disposable SQLite DB — dry run,
+  reset (row + codes gone, user untouched, audit row written, admin
+  unenrolled), and refusals.
 
 ## Limitations
 
