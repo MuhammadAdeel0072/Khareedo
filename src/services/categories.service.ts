@@ -1,5 +1,6 @@
 // Category service — navigation tree, listing, admin CRUD (FR-40, FR-51).
 import { cache } from "react";
+import { revalidateTag, unstable_cache } from "next/cache";
 import { db } from "@/lib/db";
 import { slugify } from "@/lib/utils";
 import { cleanupOrphanedMediaImage } from "@/services/media-cleanup.service";
@@ -29,13 +30,58 @@ const storefrontCategorySelect = {
   },
 } satisfies Prisma.CategorySelect;
 
-const getActiveStorefrontCategories = cache(() =>
-  db.category.findMany({
+// Active categories change only via admin writes, yet the tree/counts are
+// read on every storefront request (header + homepage + listings). Cache the
+// read 60s with unstable_cache, exactly like banners (60s) — public data,
+// identical for all users, never prices/promotions. The React cache()
+// underneath still dedupes within one request; the tag lets admin writes
+// expire the cross-request cache immediately (see revalidateStorefrontCategories).
+// The read is pure and serializable (no Date fields in the select), so the
+// cached JSON round-trip is lossless.
+const CATEGORIES_CACHE_TAG = "storefront-categories";
+
+async function readActiveStorefrontCategoriesFresh() {
+  return db.category.findMany({
     where: { isActive: true },
     orderBy: { sortOrder: "asc" },
     select: storefrontCategorySelect,
-  })
+  });
+}
+
+const readActiveStorefrontCategoriesCached = unstable_cache(
+  readActiveStorefrontCategoriesFresh,
+  ["storefront-categories"],
+  { revalidate: 60, tags: [CATEGORIES_CACHE_TAG] },
 );
+
+/** Cached read with a fresh fallback: outside a Next request scope (unit /
+ * integration tests, scripts) unstable_cache throws "Invariant:
+ * incrementalCache missing" — the same fallback products.service.ts uses
+ * for catalogue metadata. A database failure still surfaces (the fresh
+ * read throws it too). */
+async function readActiveStorefrontCategories() {
+  try {
+    return await readActiveStorefrontCategoriesCached();
+  } catch {
+    return await readActiveStorefrontCategoriesFresh();
+  }
+}
+
+const getActiveStorefrontCategories = cache(() => readActiveStorefrontCategories());
+
+/** Expire the cached category tree after an admin write. revalidateTag
+ * needs a Next request store; admin writes also run in unit/integration
+ * tests where that store does not exist (the reason products.service.ts
+ * does not invalidate its catalogue-meta tag from writers). The write
+ * itself must never fail for a cache concern, so a missing-store failure
+ * is swallowed — in production (request scope) the tag is invalidated. */
+function revalidateStorefrontCategories(): void {
+  try {
+    revalidateTag(CATEGORIES_CACHE_TAG, { expire: 0 });
+  } catch {
+    // Outside a Next request scope (tests/scripts): nothing to invalidate.
+  }
+}
 
 /** Parent/leaf tree for storefront navigation (only active categories, FR-07).
  *  Built recursively, so the tree supports any depth (Phase 3: grandchildren
@@ -246,7 +292,7 @@ async function assertNoParentCycle(id: string, parentId: string | null): Promise
 
 export async function adminCreateCategory(input: CategoryWriteInput) {
   const slug = await ensureUniqueCatSlug(input.slug || input.name);
-  return db.category.create({
+  const category = await db.category.create({
     data: {
       name: input.name,
       slug,
@@ -257,6 +303,8 @@ export async function adminCreateCategory(input: CategoryWriteInput) {
       sortOrder: input.sortOrder,
     },
   });
+  revalidateStorefrontCategories();
+  return category;
 }
 
 export async function adminUpdateCategory(id: string, input: CategoryWriteInput) {
@@ -304,6 +352,7 @@ export async function adminUpdateCategory(id: string, input: CategoryWriteInput)
       sortOrder: input.sortOrder,
     },
   });
+  revalidateStorefrontCategories();
 
   // Replaced image: clean up the old storage object if nothing references it.
   if (existing?.imageUrl && existing.imageUrl !== input.imageUrl) {
@@ -323,6 +372,7 @@ export async function adminDeleteCategory(id: string): Promise<{ ok: boolean; re
   }
   const category = await db.category.findUnique({ where: { id }, select: { imageUrl: true } });
   await db.category.delete({ where: { id } });
+  revalidateStorefrontCategories();
   // The deleted category's image is unreferenced now — clean it up if
   // nothing else (a product image, another category) shares the URL.
   if (category?.imageUrl) {

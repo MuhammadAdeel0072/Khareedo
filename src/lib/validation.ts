@@ -344,11 +344,8 @@ export const settingsSchema = z.object({
 });
 
 export type PlaceOrderInput = z.infer<typeof placeOrderSchema>;
-export type ProductFormInput = z.infer<typeof productSchema>;
-export type CategoryFormInput = z.infer<typeof categorySchema>;
 export type CouponFormInput = z.infer<typeof couponSchema>;
 export type PromotionFormInput = z.infer<typeof promotionSchema>;
-export type SettingsFormInput = z.infer<typeof settingsSchema>;
 
 /** Flatten a ZodError into { field: message } for form display (FR-49). */
 export function fieldErrors(error: z.ZodError): Record<string, string> {

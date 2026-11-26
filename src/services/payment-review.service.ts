@@ -635,7 +635,3 @@ export function createPaymentReviewService(
     },
   };
 }
-
-export type PaymentReviewService = ReturnType<
-  typeof createPaymentReviewService
->;

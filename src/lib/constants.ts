@@ -38,13 +38,10 @@ export const PAYMENT_METHODS = ["COD", "ONLINE"] as const;
 export type PaymentMethod = (typeof PAYMENT_METHODS)[number];
 
 export const PAYMENT_STATUSES = ["PENDING", "PAID", "FAILED", "REFUNDED", "CANCELLED"] as const;
-export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
 
 export const DELIVERY_METHODS = ["STANDARD", "EXPRESS"] as const;
-export type DeliveryMethod = (typeof DELIVERY_METHODS)[number];
 
 export const PRODUCT_STATUSES = ["DRAFT", "PUBLISHED", "ARCHIVED"] as const;
-export type ProductStatus = (typeof PRODUCT_STATUSES)[number];
 
 export const PRODUCT_SORTS = [
   "featured",
@@ -56,10 +53,8 @@ export const PRODUCT_SORTS = [
 export type ProductSort = (typeof PRODUCT_SORTS)[number];
 
 export const COUPON_TYPES = ["PERCENT", "FIXED"] as const;
-export type CouponType = (typeof COUPON_TYPES)[number];
 
 export const BANNER_PLACEMENTS = ["HERO", "SIDE", "STRIP"] as const;
-export type BannerPlacement = (typeof BANNER_PLACEMENTS)[number];
 
 // Order/status badges use four semantic tones only: warning (awaiting action),
 // brand tint (in progress), solid brand (completed), destructive (failed /

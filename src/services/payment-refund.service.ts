@@ -1,6 +1,6 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
-import type { Prisma, PrismaClient } from "../../generated/postgres-client";
+import type { PrismaClient } from "../../generated/postgres-client";
 import type { SafepayProvider } from "@/lib/safepay/provider";
 import { localId } from "@/lib/safepay/contracts";
 
@@ -49,8 +49,6 @@ export type RefundRequestResult =
   | { kind: "review_required"; refundId: string; reason: string }
   | { kind: "existing"; refundId: string; status: string }
   | { kind: "rejected"; code: RefundRejectionCode; refundId?: string };
-
-export type RefundRow = Prisma.PaymentRefundGetPayload<{ include: { payment: { select: { orderId: true } } } }>;
 
 /** Shared service tuning (polling, windows). Single source of truth for the
  * refund routes and the admin order page's read-only refund listing. */
