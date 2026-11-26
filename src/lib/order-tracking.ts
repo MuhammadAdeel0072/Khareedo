@@ -5,7 +5,6 @@
 // nothing was ever marked done). Order status is the source of truth for the
 // steps; payment status is rendered as a separate badge, never as a step.
 export const TRACK_STEPS = ["PENDING", "CONFIRMED", "PROCESSING", "SHIPPED", "DELIVERED"] as const;
-export type TrackStep = (typeof TRACK_STEPS)[number];
 
 /** Index of the order's current tracker step, or -1 for CANCELLED (the
  * tracker is replaced by the cancellation notice) and unknown statuses. */

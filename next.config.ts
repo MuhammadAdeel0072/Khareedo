@@ -28,6 +28,14 @@ const nextConfig: NextConfig = {
       { source: "/:path*", headers: base },
       { source: "/api/checkout/safepay/:path*", headers: safepay },
       { source: "/api/webhooks/safepay", headers: safepay },
+      // Seed product/banner images under public/images are content-stable
+      // (they change only on redeploy), so repeat visits can cache them
+      // immutably. Scoped to /images/* only — never pages or API routes,
+      // and never user-specific data (see F-08/F-15 in the perf audit).
+      {
+        source: "/images/:path*",
+        headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
+      },
     ];
   },
   // Optional storage proxy (sandbox/CI previews only): when LOCAL_STORAGE_PROXY_URL
@@ -40,6 +48,9 @@ const nextConfig: NextConfig = {
     return [{ source: "/storage/:path*", destination: `${storageProxy}/storage/:path*` }];
   },
   images: {
+    // Serve modern formats where the browser supports them (the optimiser
+    // emits AVIF/WebP instead of the source PNGs for product/banner images).
+    formats: ["image/avif", "image/webp"],
   remotePatterns: [
     {
       protocol: "https",
@@ -74,6 +85,11 @@ const nextConfig: NextConfig = {
   // uses to pick version-specific exploits, and nothing in the app reads it.
   poweredByHeader: false,
   reactStrictMode: false,
+  experimental: {
+    // Barrel-import optimisation for the large icon/chart/carousel libs
+    // (build-time transform only; verified by a production build).
+    optimizePackageImports: ["lucide-react", "recharts", "embla-carousel-react"],
+  },
 };
 
 export default nextConfig;

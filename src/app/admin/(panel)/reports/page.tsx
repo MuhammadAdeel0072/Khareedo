@@ -9,8 +9,26 @@ import {
 import { formatPKR } from "@/lib/utils";
 import { getReportSummary } from "@/services/reports.service";
 import { getLowStockProducts } from "@/services/inventory.service";
+import NextDynamic from "next/dynamic";
 import { ExportButtons } from "@/components/admin/export-buttons";
-import { RevenueChart, StatusDonut } from "@/components/admin/dashboard-charts";
+// Batch 3 perf: the Recharts charts load as a separate chunk instead of in
+// this page's initial bundle. Plain next/dynamic (ssr: true) — ssr: false is
+// not allowed in Server Components, so the charts still render server-side,
+// but their code is split from the page bundle. Imported as `NextDynamic`
+// because this file already exports `dynamic = "force-dynamic"` (route
+// segment config), which would collide with a `dynamic` import name.
+const RevenueChart = NextDynamic(
+  () => import("@/components/admin/dashboard-charts").then((m) => m.RevenueChart),
+  {
+    loading: () => <div aria-hidden="true" className="h-64 w-full animate-pulse rounded-lg bg-muted" />,
+  },
+);
+const StatusDonut = NextDynamic(
+  () => import("@/components/admin/dashboard-charts").then((m) => m.StatusDonut),
+  {
+    loading: () => <div aria-hidden="true" className="mx-auto h-44 w-44 animate-pulse rounded-full bg-muted" />,
+  },
+);
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Reports · Admin" };

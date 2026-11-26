@@ -109,24 +109,30 @@ describe("next.config.ts wiring", () => {
   it("applies the security headers to every path", async () => {
     expect(typeof nextConfig.headers).toBe("function");
     const routes = await nextConfig.headers!();
-    expect(routes).toHaveLength(3);
+    // 4 rules: global security headers, the two Safepay no-referrer pins,
+    // and the immutable Cache-Control rule for public seed images
+    // (perf audit Batch 2 — content-stable /images/* assets only).
+    expect(routes).toHaveLength(4);
     expect(routes[0].source).toBe("/:path*");
     const headers = headerMap(routes[0].headers);
     expect(headers.get("x-content-type-options")).toBe("nosniff");
     expect(headers.get("referrer-policy")).toBe("strict-origin-when-cross-origin");
     expect(headers.has("content-security-policy-report-only")).toBe(true);
     expect(headers.has("content-security-policy")).toBe(false);
+    // The global rule sets security headers only — no Cache-Control on
+    // pages/API routes, where it could cache user-specific responses.
+    expect(headers.has("cache-control")).toBe(false);
   });
 
   it("pins no-referrer on the Safepay routes, keeping every other header", async () => {
     const routes = await nextConfig.headers!();
     const base = headerMap(routes[0].headers);
-    const safepaySources = routes.slice(1).map((r) => r.source);
-    expect(safepaySources).toEqual([
+    const safepayRoutes = routes.filter((r) => r.source.startsWith("/api/"));
+    expect(safepayRoutes.map((r) => r.source)).toEqual([
       "/api/checkout/safepay/:path*",
       "/api/webhooks/safepay",
     ]);
-    for (const route of routes.slice(1)) {
+    for (const route of safepayRoutes) {
       const headers = headerMap(route.headers);
       expect(headers.get("referrer-policy")).toBe("no-referrer");
       for (const [key, value] of base) {
@@ -135,6 +141,20 @@ describe("next.config.ts wiring", () => {
       }
       expect(headers.has("content-security-policy")).toBe(false);
     }
+  });
+
+  it("caches only the public seed images immutably, and nothing else", async () => {
+    const routes = await nextConfig.headers!();
+    const imageRules = routes.filter((r) => r.source === "/images/:path*");
+    expect(imageRules).toHaveLength(1);
+    // Exactly one header: immutable Cache-Control. No security header is
+    // weakened here — /images/* also matches the global /:path* rule.
+    expect(imageRules[0].headers).toEqual([
+      { key: "Cache-Control", value: "public, max-age=31536000, immutable" },
+    ]);
+    expect(routes.filter((r) => r.source !== "/images/:path*").every((r) =>
+      headerMap(r.headers).has("cache-control") === false
+    )).toBe(true);
   });
 
   it("does not include HSTS when NODE_ENV is not production", async () => {

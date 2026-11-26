@@ -494,9 +494,6 @@ export function createPaymentMaintenanceRunner(injectedDatabase?: PaymentDatabas
   };
 }
 
-export type PaymentMaintenanceRunner = ReturnType<typeof createPaymentMaintenanceRunner>;
-
-
 
 
 

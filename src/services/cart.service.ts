@@ -14,11 +14,6 @@ import {
   withPerformanceTiming,
 } from "@/lib/performance-timing";
 
-export interface CartOwner {
-  userId?: string;
-  sessionKey?: string;
-}
-
 /** The cart API caps a single add/update at 20 units (src/app/api/cart/route.ts);
  *  the merge clamps to the same ceiling so a merged line can never hold more
  *  than the API would ever let a customer add (Phase 3, H-7). */
@@ -318,16 +313,23 @@ export async function getCartCount(): Promise<number> {
 
     if (!cartOwner) return 0;
 
+    // Aggregate in SQL: one row back instead of one row per cart line.
+    // The CASE is exactly the old JS reduce (skip non-PUBLISHED/deleted
+    // lines; otherwise add min(quantity, max(0, stock))) written with
+    // portable CASE instead of LEAST/GREATEST, which SQLite lacks — the
+    // disposable-SQLite test path runs this same query. SUM over integers
+    // is bigint on Postgres, number on SQLite, hence Number().
     const rows = await withPerformanceMeasurement(
       "cart.count.query",
-      () => db.$queryRaw<Array<{
-          quantity: number;
-          status: string;
-          isDeleted: boolean | number;
-          stock: number | null;
-        }>>`
-          SELECT item."quantity", p."status", (p."deletedAt" IS NOT NULL) AS "isDeleted",
-                 i."quantity" AS "stock"
+      () => db.$queryRaw<Array<{ total: number | bigint }>>`
+          SELECT COALESCE(SUM(
+            CASE
+              WHEN p."status" <> 'PUBLISHED' OR p."deletedAt" IS NOT NULL THEN 0
+              WHEN item."quantity" <= 0 THEN 0
+              WHEN COALESCE(i."quantity", 0) <= 0 THEN 0
+              WHEN item."quantity" < i."quantity" THEN item."quantity"
+              ELSE i."quantity"
+            END), 0) AS "total"
           FROM "Cart" AS cart
           JOIN "CartItem" AS item ON item."cartId" = cart."id"
           JOIN "Product" AS p ON p."id" = item."productId"
@@ -338,39 +340,29 @@ export async function getCartCount(): Promise<number> {
       requestId
     );
 
-    return withPerformanceMeasurement(
-      "cart.count.reduce",
-      () =>
-        rows.reduce((count, row) => {
-          if (row.status !== "PUBLISHED" || row.isDeleted) return count;
-          const stock = row.stock ?? 0;
-          return count + Math.min(row.quantity, Math.max(0, stock));
-        }, 0),
-      requestId
-    );
+    return Number(rows[0]?.total ?? 0);
   }, requestId);
 }
 
 async function getCartItemCount(cartId: string): Promise<number> {
-  const rows = await db.$queryRaw<Array<{
-    quantity: number;
-    status: string;
-    isDeleted: boolean | number;
-    stock: number | null;
-  }>>`
-    SELECT item."quantity", p."status", (p."deletedAt" IS NOT NULL) AS "isDeleted",
-           i."quantity" AS "stock"
+  // Same SQL aggregation as getCartCount (see there for the semantics and
+  // portability notes) — one row back instead of one row per cart line.
+  const rows = await db.$queryRaw<Array<{ total: number | bigint }>>`
+    SELECT COALESCE(SUM(
+      CASE
+        WHEN p."status" <> 'PUBLISHED' OR p."deletedAt" IS NOT NULL THEN 0
+        WHEN item."quantity" <= 0 THEN 0
+        WHEN COALESCE(i."quantity", 0) <= 0 THEN 0
+        WHEN item."quantity" < i."quantity" THEN item."quantity"
+        ELSE i."quantity"
+      END), 0) AS "total"
     FROM "CartItem" AS item
     JOIN "Product" AS p ON p."id" = item."productId"
     LEFT JOIN "Inventory" AS i ON i."productId" = p."id" AND i."variantId" IS NOT DISTINCT FROM item."variantId"
     WHERE item."cartId" = ${cartId}
   `;
 
-  return rows.reduce((count, row) => {
-    if (row.status !== "PUBLISHED" || row.isDeleted) return count;
-    const stock = row.stock ?? 0;
-    return count + Math.min(row.quantity, Math.max(0, stock));
-  }, 0);
+  return Number(rows[0]?.total ?? 0);
 }
 
 export async function addToCart(productId: string, quantity: number, variantId?: string | null) {
