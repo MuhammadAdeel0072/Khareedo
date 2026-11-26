@@ -25,6 +25,7 @@ export const ADMIN_AUDIT_ACTIONS = {
   MFA_REPLACEMENT_STARTED: "admin.mfa.replacement_started",
   MFA_REPLACEMENT_ACTIVATED: "admin.mfa.replacement_activated",
   MFA_DISABLED: "admin.mfa.disabled",
+  MFA_RESET: "admin.mfa.reset",
   MFA_RECOVERY_CODES_REGENERATED: "admin.mfa.recovery_codes_regenerated",
   PRODUCT_CREATED: "admin.product.created",
   PRODUCT_UPDATED: "admin.product.updated",
