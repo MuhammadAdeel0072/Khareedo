@@ -341,11 +341,25 @@ is available:
 
 ```powershell
 # 1. Dry run first — read-only, prints what would be deleted, writes nothing.
-ADMIN_MFA_RESET_ALLOW=1 npx tsx --env-file=.env scripts/reset-admin-mfa.ts --email admin@khareedo.pk --dry-run
+Set-Location D:\Khareedo
 
+npm run db:generate:postgres
+
+$env:ADMIN_MFA_RESET_ALLOW = "1"
+
+npx tsx --env-file=.env scripts/reset-admin-mfa.ts --email admin@khareedo.pk --dry-run
+```
+
+Then, separately, apply the reset:
+
+```powershell
 # 2. Only after verifying the admin's identity out-of-band (below) and
 #    confirming the dry-run output names the right admin, perform the reset.
-ADMIN_MFA_RESET_ALLOW=1 npx tsx --env-file=.env scripts/reset-admin-mfa.ts --email admin@khareedo.pk --apply --confirm
+#    The $env:ADMIN_MFA_RESET_ALLOW = "1" set above is still in effect in
+#    this PowerShell session; clear it afterwards.
+npx tsx --env-file=.env scripts/reset-admin-mfa.ts --email admin@khareedo.pk --apply --confirm
+
+Remove-Item Env:ADMIN_MFA_RESET_ALLOW
 ```
 
 (`bun scripts/reset-admin-mfa.ts ...` works the same way. `tsx` does not
